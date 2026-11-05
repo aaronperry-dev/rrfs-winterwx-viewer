@@ -333,7 +333,7 @@ function thrList(p) {
 function activeMembers() { return D.members.filter(m => state.on[m]); }
 function thrOf(p) { const l = thrList(p); return state.thr != null && l.includes(state.thr) ? state.thr : l[Math.min(1, l.length - 1)]; }
 function percentile(arrs, q) {                              // linear interpolation between the sorted member values
-  const n = D.grid.nx * D.grid.ny, out = new Float32Array(n), m = arrs.length, buf = new Float32Array(m);
+  const n = arrs[0].length, out = new Float32Array(n), m = arrs.length, buf = new Float32Array(m);
   for (let i = 0; i < n; i++) {
     let c = 0;
     for (let k = 0; k < m; k++) { const v = arrs[k][i]; if (v === v) buf[c++] = v; }
@@ -345,7 +345,7 @@ function percentile(arrs, q) {                              // linear interpolat
 }
 function reduce(arrs, mode, thr, dir) {
   if (mode in PCT_MODES) return percentile(arrs, PCT_MODES[mode]);
-  const n = D.grid.nx * D.grid.ny, out = new Float32Array(n), m = arrs.length;
+  const n = arrs[0].length, out = new Float32Array(n), m = arrs.length;
   for (let i = 0; i < n; i++) {
     let c = 0, s = 0, s2 = 0, mn = Infinity, mx = -Infinity, hit = 0;
     for (let k = 0; k < m; k++) {
@@ -361,16 +361,22 @@ function reduce(arrs, mode, thr, dir) {
 }
 // Probability matching (Ebert 2001) and its localized, patch-wise form (Clark 2017; Snook et al. 2020; the PMM/LPMM products of the SPC HREF viewer):
 // the member-mean field supplies the spatial pattern, and its values are replaced by the pooled member values of equal rank.
-const lowerBound = (a, n, v) => { let lo = 0, hi = n; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < v) lo = m + 1; else hi = m; } return lo; };
-const upperBound = (a, n, v) => { let lo = 0, hi = n; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] <= v) lo = m + 1; else hi = m; } return lo; };
-function pmmRegion(arrs, mean, out, dx0, dx1, dy0, dy1, px0, px1, py0, py1) {   // domain box supplies the distributions, patch box receives the result
-  const { nx } = D.grid, M = arrs.length, cap = (dx1 - dx0) * (dy1 - dy0), mv = new Float32Array(cap), pool = new Float32Array(cap * M);
-  let K = 0, P = 0;
+// These functions touch no page state, so the same source runs inside Web Workers (see the worker pool below).
+function lowerBound(a, n, v) { let lo = 0, hi = n; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < v) lo = m + 1; else hi = m; } return lo; }
+function upperBound(a, n, v) { let lo = 0, hi = n; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] <= v) lo = m + 1; else hi = m; } return lo; }
+function pmmRegion(arrs, mean, out, nx, dx0, dx1, dy0, dy1, px0, px1, py0, py1) {   // domain box supplies the distributions, patch box receives the result
+  const M = arrs.length, cap = (dx1 - dx0) * (dy1 - dy0), mv = new Float32Array(cap), pool = new Float32Array(cap * M);
+  let K = 0, P = 0, pmin = Infinity, pmax = -Infinity;
   for (let y = dy0; y < dy1; y++) for (let x = dx0; x < dx1; x++) {
     const i = y * nx + x, m = mean[i]; if (m !== m) continue;
-    mv[K++] = m; for (let k = 0; k < M; k++) { const v = arrs[k][i]; if (v === v) pool[P++] = v; }
+    mv[K++] = m;
+    for (let k = 0; k < M; k++) { const v = arrs[k][i]; if (v === v) { pool[P++] = v; if (v < pmin) pmin = v; if (v > pmax) pmax = v; } }
   }
   if (!K || !P) return;
+  if (pmin === pmax) {                                      // flat neighbourhood (typically dry): every rank gets the same value, no sorting needed
+    for (let y = py0; y < py1; y++) for (let x = px0; x < px1; x++) { const i = y * nx + x; out[i] = mean[i] === mean[i] ? pmin : NaN; }
+    return;
+  }
   const sm = mv.subarray(0, K).sort(), sp = pool.subarray(0, P).sort();
   for (let y = py0; y < py1; y++) for (let x = px0; x < px1; x++) {
     const i = y * nx + x, m = mean[i]; if (m !== m) { out[i] = NaN; continue; }
@@ -378,16 +384,73 @@ function pmmRegion(arrs, mean, out, dx0, dx1, dy0, dy1, px0, px1, py0, py1) {   
     out[i] = sp[Math.min(P - 1, Math.floor((r + 0.5) * P / K))];
   }
 }
-function pmmField(arrs, domKm) {                            // domKm = 0: one global PMM; otherwise patches of domKm/3 using a domKm-wide neighbourhood (3 km cells)
-  const { nx, ny } = D.grid, out = new Float32Array(nx * ny).fill(NaN), mean = reduce(arrs, "mean");
-  if (!domKm) { pmmRegion(arrs, mean, out, 0, nx, 0, ny, 0, nx, 0, ny); return out; }
-  const ps = Math.max(4, Math.round(domKm / 9));
-  for (let py = 0; py < ny; py += ps) for (let px = 0; px < nx; px += ps)
-    pmmRegion(arrs, mean, out, Math.max(0, px - ps), Math.min(nx, px + 2 * ps), Math.max(0, py - ps), Math.min(ny, py + 2 * ps), px, Math.min(nx, px + ps), py, Math.min(ny, py + ps));
+function pmmPatch(domKm) { return Math.max(4, Math.round(domKm / 9)); }   // patch edge in 3 km cells: one third of the calculation domain
+function pmmField(arrs, domKm, nx, ny, r0, r1) {            // domKm = 0: one global PMM; otherwise LPMM, optionally only patch rows r0..r1 (the rest stays NaN)
+  const out = new Float32Array(nx * ny).fill(NaN), mean = reduce(arrs, "mean");
+  if (!domKm) { pmmRegion(arrs, mean, out, nx, 0, nx, 0, ny, 0, nx, 0, ny); return out; }
+  const ps = pmmPatch(domKm), rows = Math.ceil(ny / ps), a = r0 === undefined ? 0 : r0, z = r1 === undefined ? rows : r1;
+  for (let ry = a; ry < z; ry++) { const py = ry * ps;
+    for (let px = 0; px < nx; px += ps)
+      pmmRegion(arrs, mean, out, nx, Math.max(0, px - ps), Math.min(nx, px + 2 * ps), Math.max(0, py - ps), Math.min(ny, py + 2 * ps), px, Math.min(nx, px + ps), py, Math.min(ny, py + ps)); }
   return out;
 }
-const pmmCache = new Map();
-async function viewField(mode, fi = state.frame) {           // -> { values, style, unit, dec } or { error }
+
+// ---- worker pool: heavy fields are computed off the main thread, in parallel, and cached; neighbouring forecast hours are computed ahead of time
+const pool = { ok: null, workers: [], idle: [], queue: [] };
+let prefetchGen = 0, lastDir = 1;
+function initPool() {
+  if (pool.ok !== null) return pool.ok;
+  try {
+    const src = `"use strict";const PCT_MODES=${JSON.stringify(PCT_MODES)};\n` + [percentile, reduce, lowerBound, upperBound, pmmRegion, pmmPatch, pmmField].map(f => f.toString()).join("\n") +
+      `\nonmessage=e=>{const m=e.data,out=pmmField(m.arrs,m.km,m.nx,m.ny,m.r0,m.r1);postMessage({out},[out.buffer]);};`;
+    const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" })), n = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
+    for (let i = 0; i < n; i++) {
+      const w = new Worker(url);
+      w.onmessage = e => { const j = w.job; w.job = null; pool.idle.push(w); j.resolve(e.data.out); pump(); };
+      w.onerror = ev => { ev.preventDefault(); const j = w.job; w.job = null; pool.ok = false; if (j) { const m = j.msg; j.resolve(pmmField(m.arrs, m.km, m.nx, m.ny, m.r0, m.r1)); } };   // workers unavailable: compute in the page instead
+      pool.workers.push(w); pool.idle.push(w);
+    }
+    pool.ok = true;
+  } catch (e) { pool.ok = false; }
+  return pool.ok;
+}
+const staleJob = j => (j.tok !== undefined && j.tok !== renderToken) || (j.gen !== undefined && j.gen !== prefetchGen);
+function pump() {
+  while (pool.idle.length && pool.queue.length) {
+    pool.queue.sort((a, b) => a.prio - b.prio);               // visible map first, read-ahead second (stable)
+    const j = pool.queue.shift();
+    if (staleJob(j)) { j.resolve(null); continue; }           // the user has moved on: drop the work
+    const w = pool.idle.pop(); w.job = j; w.postMessage(j.msg);
+  }
+}
+function runMatched(arrs, km, nx, ny, opt, jobsOut) {
+  if (!initPool() || !pool.workers.length) return Promise.resolve(pmmField(arrs, km, nx, ny));
+  const ps = km ? pmmPatch(km) : ny, rows = km ? Math.ceil(ny / ps) : 1, nch = km ? Math.min(rows, pool.workers.length * 2) : 1, per = Math.ceil(rows / nch), parts = [];
+  for (let r0 = 0; r0 < rows; r0 += per) {
+    const r1 = Math.min(rows, r0 + per);
+    parts.push({ r0, r1, p: new Promise(resolve => {
+      const job = { prio: opt.tok !== undefined ? 0 : 1, tok: opt.tok, gen: opt.gen, resolve, msg: { arrs, km, nx, ny, r0: km ? r0 : undefined, r1: km ? r1 : undefined } };
+      jobsOut.push(job); pool.queue.push(job); }) });
+  }
+  pump();
+  return Promise.all(parts.map(x => x.p)).then(res => {
+    if (res.some(r => !r)) return null;
+    if (!km) return res[0];
+    const out = new Float32Array(nx * ny);
+    res.forEach((r, k) => { const y0 = parts[k].r0 * ps, y1 = Math.min(ny, parts[k].r1 * ps); out.set(r.subarray(y0 * nx, y1 * nx), y0 * nx); });
+    return out;
+  });
+}
+const matchCache = new Map();                               // key -> { promise, jobs }; the newest 24 fields are kept
+function matched(key, arrs, km, opt) {
+  let e = matchCache.get(key);
+  if (e) { if (opt.tok !== undefined) for (const j of e.jobs) { j.prio = 0; j.tok = opt.tok; j.gen = undefined; } return e.promise; }   // join a read-ahead already queued
+  e = { jobs: [] };
+  e.promise = runMatched(arrs, km, D.grid.nx, D.grid.ny, opt, e.jobs).then(v => { if (!v && matchCache.get(key) === e) matchCache.delete(key); return v; });
+  matchCache.set(key, e); if (matchCache.size > 24) matchCache.delete(matchCache.keys().next().value);
+  return e.promise;
+}
+async function viewField(mode, fi = state.frame, opt = {}) {           // -> { values, style, unit, dec } or { error }
   const p = prod(), win = p.kind === "cum" ? state.win : 0, plain = { style: p, unit: p.unit, dec: p.decimals };
   const none = "No data for this field at this time (the source file does not provide it).";
   if (mode === "refs" || mode.startsWith("m0")) {
@@ -403,8 +466,8 @@ async function viewField(mode, fi = state.frame) {           // -> { values, sty
   let values;
   if (mode === "pmm" || mode === "lpmm") {
     const km = mode === "lpmm" ? state.lpmm : 0, key = [p.key, win, fi, mode, km, mem.join()].join("|");
-    if (!pmmCache.has(key)) { pmmCache.set(key, pmmField(arrs, km)); if (pmmCache.size > 16) pmmCache.delete(pmmCache.keys().next().value); }
-    values = pmmCache.get(key);
+    values = await matched(key, arrs, km, opt);
+    if (!values) return { error: "Interrupted - try again." };
   } else values = reduce(arrs, mode, thr, p.thr_dir);
   if (!finite(values)) return { error: none };
   if (mode === "prob") return { values, style: PROB, unit: "%", dec: 0, thr };
@@ -500,9 +563,9 @@ function drawMain(ctx, v, mode, markers) {
 }
 
 // ---------------------------------------------------------------- main render
-let renderToken = 0;
+let renderToken = 0, loadTimer = null;
 async function render() {
-  const token = ++renderToken, p = prod();
+  const token = ++renderToken, p = prod(); prefetchGen++;
   writeHash(); statusLine(); controls();
   $("#mapwrap").hidden = state.layout !== "map"; $("#stampwrap").hidden = state.layout === "map"; $("#p-summary").hidden = state.layout !== "map";
   $("#blurb").textContent = p.desc;
@@ -520,15 +583,18 @@ async function render() {
   if (notes.length) { notice.hidden = false; notice.textContent = notes.join(" "); }
   mapHeader(mode);
   if (state.layout !== "map") return renderStamps(token, p);
-  msg.hidden = false; msg.textContent = "Loading…";
+  clearTimeout(loadTimer);                                   // keep the old map on screen unless the new one is slow
+  const showMsg = text => { if (token === renderToken) { msg.hidden = false; msg.textContent = text; } };
+  if (!current) showMsg("Loading…"); else loadTimer = setTimeout(() => showMsg("Computing…"), 250);
   let v;
-  try { v = await viewField(mode); } catch (e) { msg.textContent = "Could not load data (" + e.message + ")"; return; }
+  try { v = await viewField(mode, state.frame, { tok: token }); } catch (e) { clearTimeout(loadTimer); showMsg("Could not load data (" + e.message + ")"); return; }
   if (token !== renderToken) return;
+  clearTimeout(loadTimer);
   if (v.error) { msg.textContent = v.error; msg.hidden = false; tiles(null); chart(); return; }
   msg.hidden = true;
   drawMain($("#map").getContext("2d"), v, mode, true);
   current = { v, mode };
-  tiles(v); chart(); evictOthers();
+  tiles(v); chart(); evictOthers(); prefetch();
 }
 let current = null;
 
@@ -536,7 +602,7 @@ async function renderStamps(token, p) {
   const defs = state.layout === "pctl" ? MODES.filter(x => !["refs", "spread", "prob", "pmm", "lpmm"].includes(x[0])).map(x => [x[0], x[1].replace("Median (50th percentile)", "Median (P50)").replace(" percentile", "")])
     : [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ["pmm", "PMM"], ["lpmm", "LPMM"], ["spread", "Spread (σ)"], ["prob", "Probability"], ...D.members.map(m => [m, m])];
   const grid = $("#stamps"); grid.replaceChildren(); grid.className = state.layout === "pctl" ? "pctl" : "";
-  const first = await viewField("mean"); if (token !== renderToken) return;
+  const first = await viewField("mean", state.frame, { tok: token }); if (token !== renderToken) return;
   const lg = $("#slegend").getContext("2d"); lg.fillStyle = "#fff"; lg.fillRect(0, 0, 1200, 96);
   if (!first.error) { const [tb, tr] = titleParts(p, "mean", first); bold(lg, 25, 24, "RRFS winter weather", `: ${p.title} (${p.unit}) · valid ${zfmt(D.valid[state.frame])} · ${fcap()}`, 15); drawLegend(lg, 50, 40, 1000, 22, p, 12); }
   for (const [m, label] of defs) {
@@ -547,7 +613,7 @@ async function renderStamps(token, p) {
     const open = () => { state.mode = m === "refs" || m === "mean" || m === "spread" || m === "prob" ? m : m; state.layout = "map"; render(); };
     cv.addEventListener("click", open);
     st.addEventListener("keydown", e => { if (e.key === "Enter") open(); });
-    viewField(m).then(v => {
+    viewField(m, state.frame, { tok: token }).then(v => {
       if (token !== renderToken) return; const c = cv.getContext("2d"); c.fillStyle = "#fff"; c.fillRect(0, 0, 575, 371);
       if (v.error) { c.fillStyle = "#59636e"; c.font = "15px system-ui"; c.textAlign = "center"; c.fillText(m === "refs" ? "not in the REFS mean file" : "no data", 287, 190); return; }
       paintField(c, 0, 0, 575, 371, v.values, v.style); if (overlay.complete) c.drawImage(overlay, 0, 0, 575, 371);
@@ -717,7 +783,12 @@ function readHash() {
   if (layout === "stamps" || layout === "pctl") state.layout = layout;
 }
 const writeHash = () => history.replaceState(null, "", `#${state.product}/${state.mode}/${state.frame}/${state.win}/${state.layout}`);
-function set(patch) { Object.assign(state, patch); if (patch.frame === undefined || true) render(); }
+function set(patch) { if (patch.frame !== undefined && patch.frame !== state.frame) lastDir = Math.sign(patch.frame - state.frame); Object.assign(state, patch); render(); }
+function prefetch() {                                       // heavy views: compute the neighbouring hours in the background so stepping and playing are instant
+  if (state.layout !== "map" || (state.mode !== "pmm" && state.mode !== "lpmm")) return;
+  const gen = prefetchGen, nf = D.frames.length, d = lastDir || 1;
+  for (const f of [state.frame + d, state.frame + 2 * d, state.frame - d, state.frame + 3 * d]) if (f >= 0 && f < nf) viewField(state.mode, f, { gen }).catch(() => {});
+}
 
 // ---------------------------------------------------------------- events
 $("#btn-prev").addEventListener("click", () => step(-1));
