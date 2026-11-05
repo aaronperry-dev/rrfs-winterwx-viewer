@@ -3,160 +3,247 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>New England winter weather · RRFS ensemble</title>
+<title>RRFS Winter Weather Ensemble Viewer · New England</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%231f6feb%27/%3E%3Cpath d=%27M16 6v20M7.3 11l17.4 10M7.3 21l17.4-10%27 fill=%27none%27 stroke=%27white%27 stroke-width=%272.4%27 stroke-linecap=%27round%27/%3E%3C/svg%3E">
 <meta name="description" content="RRFS ensemble winter-weather dashboard for New England: QPF, snowfall by four ratio methods, ice and precipitation type, dendritic growth zone, blizzard criteria, wind chill - REFS mean, member mean, spread and probabilities.">
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #f4f6f8; --surface: #ffffff; --ink: #1c2128; --muted: #59636e; --line: #d8dee4;
-    --accent: #1f6feb; --accent-ink: #ffffff; --soft: #eaeef2; --warn-bg: #fff4d6; --warn-ink: #6a4b00;
-    --radius: 10px;
+    --font: Roboto, "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    --bg: #ffffff; --surface: #ffffff; --ink: #1c2128; --muted: #59636e; --line: #c4ccd6; --soft: #eef2f7; --track: #cfd5dd;
+    --blue: #2c6bb3; --blue-h: #245a97; --navy: #1d3f7a; --red: #8f1d1d; --title: #1a4f9c; --head: #7a2a12;
+    --on: #a8dca2; --sub: #dce7f7; --subink: #17376b; --warn-bg: #fff4d6; --warn-ink: #6a4b00;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0d1117; --surface: #161b22; --ink: #e6edf3; --muted: #9198a1; --line: #30363d;
-      --accent: #58a6ff; --accent-ink: #0d1117; --soft: #21262d; --warn-bg: #3a2f10; --warn-ink: #f2cc60;
+      --bg: #10151c; --surface: #171d26; --ink: #e6edf3; --muted: #9aa3ad; --line: #34414f; --soft: #1e2631; --track: #3a4452;
+      --blue: #2f5f9e; --blue-h: #3a70b6; --navy: #27487f; --red: #b02a2a; --title: #7db0f5; --head: #e8a07f;
+      --on: #2d6a3a; --sub: #243246; --subink: #cfe1fb; --warn-bg: #3a2f10; --warn-ink: #f2cc60;
     }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--ink);
-         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
-  .wrap { max-width: 1240px; margin: 0 auto; padding: 20px 20px 40px; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.4 var(--font); }
+  .wrap { max-width: 1760px; margin: 0 auto; padding: 0 0 28px; }
+  button, select { font-family: inherit; }
+  button:focus-visible, .stamp:focus-visible, canvas:focus-visible, select:focus-visible { outline: 2px solid #f0a020; outline-offset: 1px; }
+  [hidden] { display: none !important; }
 
-  header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 8px 24px; margin-bottom: 16px; }
-  h1 { font-size: 22px; line-height: 1.2; margin: 0; letter-spacing: -0.01em; }
-  .sub { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
-  .status { text-align: right; color: var(--muted); font-size: 13px; }
-  .status strong { color: var(--ink); font-weight: 600; }
-  .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--warn-bg); color: var(--warn-ink); font-size: 12px; font-weight: 600; margin-left: 6px; }
+  /* ---- top bar */
+  .topbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 24px; padding: 10px 14px 6px; }
+  .selects { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; }
+  .selects label { font-weight: 700; font-size: 15px; display: flex; align-items: center; gap: 6px; }
+  .selects select { font-size: 15px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--ink); min-width: 92px; }
+  .titlebox { text-align: right; }
+  h1 { margin: 0; font-size: 28px; line-height: 1.1; font-weight: 800; color: var(--title); letter-spacing: -0.01em; }
+  .status { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--warn-bg); color: var(--warn-ink); font-size: 12px; font-weight: 700; margin-left: 6px; }
 
-  .controls { display: flex; flex-wrap: wrap; gap: 12px 22px; padding: 12px 14px; background: var(--surface);
-              border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 12px; }
-  .group { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-  .group > span { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
-  .seg { display: inline-flex; flex-wrap: wrap; max-width: 100%; background: var(--soft); border-radius: 8px; padding: 2px; gap: 2px; }
-  .seg button { appearance: none; border: 0; background: transparent; color: var(--ink); font: inherit; font-size: 14px;
-                padding: 5px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
-  .seg button:hover:not([aria-pressed="true"]):not(:disabled) { background: color-mix(in srgb, var(--ink) 8%, transparent); }
-  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
-  .seg button:disabled { opacity: .4; cursor: not-allowed; }
-  .seg.members button[aria-pressed="false"] { text-decoration: line-through; opacity: .55; }
-  button:focus-visible, .stamp:focus-visible, canvas:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* ---- topic tabs + product sub-bar */
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 14px 4px; }
+  .tabs button { appearance: none; border: 0; border-radius: 10px; background: var(--blue); color: #fff; font: 600 17px/1.1 var(--font);
+                 padding: 12px 22px; cursor: pointer; }
+  .tabs button:hover:not([aria-pressed="true"]) { background: var(--blue-h); }
+  .tabs button[aria-pressed="true"] { background: var(--red); }
+  .subtabs { display: flex; flex-wrap: wrap; gap: 5px; padding: 4px 14px 8px; }
+  .subtabs button { appearance: none; border: 1px solid color-mix(in srgb, var(--subink) 30%, transparent); border-radius: 7px; background: var(--sub); color: var(--subink);
+                    font: 600 14px/1.1 var(--font); padding: 7px 12px; cursor: pointer; }
+  .subtabs button:hover:not([aria-pressed="true"]) { background: color-mix(in srgb, var(--sub) 70%, var(--blue)); }
+  .subtabs button[aria-pressed="true"] { background: var(--red); border-color: var(--red); color: #fff; }
 
-  .timebar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: var(--surface); border: 1px solid var(--line);
-             border-radius: var(--radius); margin-bottom: 16px; }
-  .timebar .seg button { padding: 5px 12px; }
-  .timebar input[type=range] { flex: 1; min-width: 120px; accent-color: var(--accent); }
-  .timebar .when { min-width: 250px; font-variant-numeric: tabular-nums; font-size: 14px; }
-  .timebar .when small { color: var(--muted); display: block; font-size: 12px; }
+  /* ---- timeline */
+  .timeline { display: flex; align-items: flex-end; gap: 14px; padding: 2px 14px 10px; }
+  .tl-scroll { flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; }
+  #tl-inner { position: relative; }
+  #tl-days, #tl-cells { display: grid; }
+  #tl-days div { font-size: 12.5px; font-weight: 700; text-align: center; padding: 3px 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                 background: var(--soft); border-left: 1px solid var(--line); }
+  #tl-days div:first-child { border-left: 0; }
+  #tl-mrow { position: relative; height: 32px; }
+  #tl-mark { position: absolute; top: 3px; transform: translateX(-50%); background: #fff; color: #111; border: 1px solid #7d8791; border-radius: 4px;
+             padding: 3px 9px; font: 700 13.5px/1.2 ui-monospace, Menlo, Consolas, monospace; box-shadow: 0 1px 3px rgba(0,0,0,.25); white-space: nowrap; pointer-events: none; }
+  #tl-cells button { appearance: none; border: 0; border-left: 1px solid color-mix(in srgb, var(--ink) 18%, transparent); background: var(--track); color: var(--ink);
+                     height: 28px; padding: 0; font: 600 11.5px/1 var(--font); cursor: pointer; }
+  #tl-cells button:first-child { border-left: 0; }
+  #tl-cells button:hover:not(.sel) { background: color-mix(in srgb, var(--track) 70%, var(--blue)); }
+  #tl-cells button.sel { background: var(--red); color: #fff; }
+  .tl-ctrl { display: flex; flex-direction: column; gap: 6px; align-items: stretch; flex: none; }
+  .tl-ctrl .row { display: flex; align-items: center; justify-content: center; gap: 6px; font-weight: 700; font-size: 13.5px; white-space: nowrap; }
+  .tl-ctrl button { appearance: none; border: 0; border-radius: 6px; background: var(--navy); color: #fff; font: 700 16px/1 var(--font); min-width: 36px; padding: 7px 10px; cursor: pointer; }
+  .tl-ctrl button:hover { background: var(--blue); }
+  #speed { display: inline-block; min-width: 1.2em; text-align: center; }
 
-  main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
-  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
-  .mapcard { position: relative; background: #fff; border-radius: var(--radius); border: 1px solid var(--line); overflow: hidden; }
+  /* ---- main layout */
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 390px; gap: 16px; align-items: start; padding: 0 14px; }
+  .maphead { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 4px 20px; margin: 2px 0 6px; }
+  #mh-title { font-size: 23px; font-weight: 800; color: var(--head); line-height: 1.15; }
+  #mh-sub { display: block; font-size: 14px; font-weight: 500; color: var(--muted); margin-top: 1px; }
+  #mh-run { font: 13px/1.35 ui-monospace, Menlo, Consolas, monospace; white-space: pre; text-align: left; }
+  .mapcard { position: relative; background: #fff; border: 1px solid var(--line); overflow: hidden; }
   .mapcard canvas { display: block; width: 100%; height: auto; cursor: crosshair; }
   .mapcard .msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px;
-                  background: rgba(255,255,255,.82); color: #1c2128; font-size: 15px; }
-  .notice { margin: 8px 0 0; padding: 6px 10px; border-radius: 8px; background: var(--warn-bg); color: var(--warn-ink); font-size: 13px; }
+                  background: rgba(255,255,255,.84); color: #1c2128; font-size: 15px; }
+  .notice { margin: 8px 0 0; padding: 6px 10px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-ink); font-size: 13px; }
   .tip { position: fixed; z-index: 5; pointer-events: none; padding: 3px 8px; border-radius: 6px; background: #1c2128; color: #fff; font-size: 12.5px; font-variant-numeric: tabular-nums; }
 
-  h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
-  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 18px; }
-  .tile { background: var(--soft); border-radius: 8px; padding: 8px 10px; }
+  /* ---- sidebar */
+  .panel { border: 1px solid var(--line); background: var(--surface); margin-bottom: 12px; }
+  .panel > h2 { margin: 0; padding: 6px 10px; font-size: 15.5px; font-weight: 800; color: var(--title); background: var(--soft); border-bottom: 1px solid var(--line); }
+  .panel > .body { padding: 8px; }
+  .rows { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+  .rows.three { grid-template-columns: repeat(3, 1fr); }
+  .rows button { appearance: none; text-align: left; padding: 6px 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); color: var(--ink);
+                 font: 500 13.5px/1.2 var(--font); cursor: pointer; }
+  .rows button::before { content: "\2610\00a0"; }
+  .rows button[aria-pressed="true"] { background: var(--on); border-color: color-mix(in srgb, var(--on) 60%, #000); font-weight: 700; }
+  .rows button[aria-pressed="true"]::before { content: "\2611\00a0"; }
+  .rows button:hover:not(:disabled):not([aria-pressed="true"]) { background: var(--soft); }
+  .rows button:disabled { opacity: .42; cursor: not-allowed; }
+  .rows.members button[aria-pressed="false"] { text-decoration: line-through; opacity: .7; }
+  .btns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+  .btns.five { grid-template-columns: repeat(5, 1fr); }
+  .btns button { appearance: none; border: 0; border-radius: 5px; background: var(--navy); color: #fff; font: 600 14px/1.15 var(--font); padding: 9px 6px; cursor: pointer; }
+  .btns button:hover:not(:disabled):not([aria-pressed="true"]) { background: var(--blue); }
+  .btns button[aria-pressed="true"] { background: var(--red); }
+  .btns button:disabled { opacity: .4; cursor: not-allowed; }
+  .sublabel { font-size: 12px; font-weight: 700; color: var(--muted); margin: 10px 0 4px; }
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 10px; }
+  .tile { background: var(--soft); border-radius: 4px; padding: 6px 8px; }
   .tile .k { font-size: 12px; color: var(--muted); }
-  .tile .v { font-size: 20px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .tile .v { font-size: 19px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
   .tile .u { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: 2px; }
-  .note { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
-  #chart { width: 100%; height: auto; display: block; }
+  .note { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+  #chart { width: 100%; height: auto; display: block; cursor: crosshair; }
+  #chartwrap { position: relative; }
+  #chart-cursor { position: absolute; width: 0; border-left: 1.5px dashed var(--muted); pointer-events: none; }
+  .ctip { line-height: 1.55; padding: 6px 10px; font-size: 12.5px; }
+  .ctip b { font-weight: 700; }
+  .ctip .t2 { color: #aab4bf; font-size: 11.5px; margin-bottom: 3px; }
+  .ctip .row { display: flex; justify-content: space-between; gap: 18px; }
+  .ctip .sw { display: inline-block; width: 12px; height: 0; border-top: 3px solid; vertical-align: middle; margin-right: 6px; }
+  .ctip .off { opacity: .55; }
   .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); margin-top: 6px; }
   .legend i { display: inline-block; width: 18px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 4px; }
+  .keys { margin: 0; padding: 0; list-style: none; font-size: 13.5px; }
+  .keys li { padding: 2px 0; }
+  kbd { display: inline-block; min-width: 1.6em; text-align: center; padding: 0 5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--soft); font: 600 12.5px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  .links { margin: 0; padding: 0; list-style: none; font-size: 14px; }
+  .links li { padding: 3px 0; }
+  .links a { color: var(--title); font-weight: 600; }
 
+  /* ---- member grids */
   #stamps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-  .stamp { background: #fff; border: 2px solid var(--line); border-radius: var(--radius); padding: 4px; text-align: center; overflow: hidden; }
+  .stamp { background: #fff; border: 2px solid var(--line); border-radius: 4px; padding: 4px; text-align: center; overflow: hidden; }
   .stamp canvas { width: 100%; height: auto; display: block; cursor: pointer; }
-  .stamp .cap { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: #59636e; padding: 2px 6px 4px; font-weight: 600; }
+  .stamp .cap { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: #59636e; padding: 2px 6px 4px; font-weight: 700; }
   .stamp.off { opacity: .35; }
   #stamps.pctl { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
   #stamps.pctl .cap { font-size: 12px; }
   #stamplegend { margin-bottom: 12px; }
-  #stamplegend canvas { width: 100%; max-width: 900px; height: auto; display: block; margin: 0 auto; background: #fff; border-radius: 8px; border: 1px solid var(--line); }
+  #stamplegend canvas { width: 100%; max-width: 900px; height: auto; display: block; margin: 0 auto; background: #fff; border: 1px solid var(--line); }
 
-  footer { margin-top: 28px; color: var(--muted); font-size: 12.5px; }
+  footer { margin: 18px 14px 0; color: var(--muted); font-size: 12.5px; }
   footer a { color: inherit; }
-  [hidden] { display: none !important; }
-  @media (max-width: 960px) {
-    main { grid-template-columns: minmax(0, 1fr); }
+  .hidetop .topbar, .hidetop .tabs, .hidetop .subtabs { display: none; }
+  @media (max-width: 1060px) {
+    .layout { grid-template-columns: minmax(0, 1fr); }
     #stamps, #stamps.pctl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .status { text-align: left; }
-    .timebar { flex-wrap: wrap; }
+    .titlebox { text-align: left; }
+    .topbar { flex-direction: column-reverse; align-items: flex-start; }
+    .timeline { flex-direction: column; align-items: stretch; }
+    .tl-ctrl { flex-direction: row; justify-content: space-between; }
+    .tabs button { font-size: 15px; padding: 10px 14px; }
   }
 </style>
 </head>
-<body>
+<body class="app">
 <div class="wrap">
-  <header>
-    <div>
-      <h1>New England winter weather</h1>
-      <p class="sub">NOAA RRFS ensemble · 3&nbsp;km · REFS mean + members m001–m005 · QPF, snowfall, ice, snow growth, blizzard</p>
+  <header class="topbar">
+    <div class="selects">
+      <label>Date: <select id="sel-date" aria-label="Run date"></select></label>
+      <label>Run: <select id="sel-run" aria-label="Run hour"></select></label>
+      <label>Sector: <select id="sel-sector" aria-label="Sector"><option>New England</option></select></label>
     </div>
-    <div class="status" id="status" aria-live="polite">Loading…</div>
+    <div class="titlebox">
+      <h1>RRFS Winter Weather Ensemble Viewer</h1>
+      <div class="status" id="status" aria-live="polite">Loading…</div>
+    </div>
   </header>
 
-  <section class="controls" aria-label="Product">
-    <div class="group"><span>Topic</span><div class="seg" id="seg-group" role="group" aria-label="Topic"></div></div>
-    <div class="group"><span>Product</span><div class="seg" id="seg-product" role="group" aria-label="Product"></div></div>
-    <div class="group" id="g-window"><span>Accumulation window</span><div class="seg" id="seg-window" role="group" aria-label="Accumulation window"></div></div>
-  </section>
-  <section class="controls" aria-label="Ensemble">
-    <div class="group"><span>Ensemble view</span><div class="seg" id="seg-mode" role="group" aria-label="Ensemble view"></div></div>
-    <div class="group" id="g-thr"><span>Probability of</span><div class="seg" id="seg-thr" role="group" aria-label="Probability threshold"></div></div>
-    <div class="group"><span>Members in the member mean (click to toggle)</span><div class="seg members" id="seg-members" role="group" aria-label="Members"></div></div>
-    <div class="group"><span>Single member</span><div class="seg" id="seg-single" role="group" aria-label="Single member"></div></div>
-    <div class="group"><span>Layout</span><div class="seg" id="seg-layout" role="group" aria-label="Layout"></div></div>
-  </section>
-  <section class="timebar" aria-label="Forecast time">
-    <div class="seg"><button type="button" id="btn-prev" aria-label="Previous time">◀</button><button type="button" id="btn-play" aria-label="Play">▶ Play</button><button type="button" id="btn-next" aria-label="Next time">▶</button></div>
-    <input type="range" id="slider" min="0" max="0" value="0" aria-label="Forecast hour">
-    <div class="when" id="when"></div>
-  </section>
+  <nav class="tabs" id="seg-group" aria-label="Topic"></nav>
+  <nav class="subtabs" id="seg-product" aria-label="Product"></nav>
 
-  <main id="single">
-    <div>
-      <div class="mapcard"><canvas id="map" width="1200" height="876" tabindex="0" aria-label="Map"></canvas><div class="msg" id="msg" hidden></div></div>
-      <p class="notice" id="notice" hidden></p>
+  <section class="timeline" aria-label="Forecast time">
+    <div class="tl-scroll">
+      <div id="tl-inner">
+        <div id="tl-days"></div>
+        <div id="tl-mrow"><div id="tl-mark"></div></div>
+        <div id="tl-cells" role="group" aria-label="Forecast hour"></div>
+      </div>
     </div>
-    <aside class="card" aria-label="Summary">
-      <h2 id="sum-title">New England land area</h2>
-      <div class="tiles" id="tiles"></div>
-      <h2>Point forecast <span id="pt-name" style="text-transform:none;letter-spacing:0"></span></h2>
-      <canvas id="chart" width="680" height="440" aria-label="Point forecast by member"></canvas>
-      <div class="legend" id="chart-legend"></div>
-      <p class="note" id="blurb"></p>
-    </aside>
-  </main>
-
-  <section id="stampwrap" hidden>
-    <div id="stamplegend"><canvas id="slegend" width="1200" height="96"></canvas></div>
-    <div id="stamps"></div>
+    <div class="tl-ctrl">
+      <div class="row"><button type="button" id="spd-down" aria-label="Slower">−</button><span>SPEED: <span id="speed">3</span></span><button type="button" id="spd-up" aria-label="Faster">+</button></div>
+      <div class="row"><button type="button" id="btn-prev" aria-label="Previous time">&lt;</button><button type="button" id="btn-play" aria-label="Play">▶</button><button type="button" id="btn-next" aria-label="Next time">&gt;</button></div>
+    </div>
   </section>
+
+  <div class="layout">
+    <section class="mapcol" aria-label="Map">
+      <div class="maphead">
+        <div><span id="mh-title"></span><span id="mh-sub"></span></div>
+        <div id="mh-run"></div>
+      </div>
+      <div id="mapwrap">
+        <div class="mapcard"><canvas id="map" width="1200" height="836" tabindex="0" aria-label="Map"></canvas><div class="msg" id="msg" hidden></div></div>
+      </div>
+      <p class="notice" id="notice" hidden></p>
+      <section id="stampwrap" hidden>
+        <div id="stamplegend"><canvas id="slegend" width="1200" height="96"></canvas></div>
+        <div id="stamps"></div>
+      </section>
+    </section>
+
+    <aside class="side" aria-label="Options">
+      <div class="panel"><h2>Ensemble View</h2><div class="body"><div class="rows" id="seg-mode" role="group" aria-label="Ensemble view"></div>
+        <div id="g-lpmm"><div class="sublabel">LPMM calculation domain (patches are 1/3 of it)</div><div class="rows three" id="seg-lpmm" role="group" aria-label="LPMM calculation domain"></div></div>
+        <div id="g-thr"><div class="sublabel">Probability of</div><div class="rows" id="seg-thr" role="group" aria-label="Probability threshold"></div></div></div></div>
+      <div class="panel" id="g-window"><h2>Accumulation Window</h2><div class="body"><div class="rows three" id="seg-window" role="group" aria-label="Accumulation window"></div></div></div>
+      <div class="panel"><h2>Members</h2><div class="body">
+        <div class="rows members" id="seg-members" role="group" aria-label="Members in the member mean"></div>
+        <div class="sublabel">Show one member alone</div><div class="btns five" id="seg-single" role="group" aria-label="Single member"></div></div></div>
+      <div class="panel"><h2>Other Views</h2><div class="body"><div class="btns" id="seg-layout" role="group" aria-label="Layout"></div></div></div>
+      <div class="panel" id="p-summary"><h2 id="sum-title">New England land area</h2><div class="body">
+        <div class="tiles" id="tiles"></div>
+        <div class="sublabel" style="margin-top:2px">Point forecast <span id="pt-name" style="font-weight:500"></span></div>
+        <div id="chartwrap"><canvas id="chart" width="680" height="440" aria-label="Point forecast by member"></canvas><div id="chart-cursor" hidden></div></div>
+        <div class="legend" id="chart-legend"></div>
+        <p class="note" id="blurb"></p></div></div>
+      <div class="panel"><h2>Keyboard Shortcuts</h2><div class="body"><ul class="keys">
+        <li><kbd>&lt;</kbd> / <kbd>←</kbd> previous time</li><li><kbd>&gt;</kbd> / <kbd>→</kbd> next time</li>
+        <li><kbd>p</kbd> / <kbd>space</kbd> play / pause</li><li><kbd>h</kbd> toggle top menu</li><li>Click the map for a point forecast</li></ul></div></div>
+      <div class="panel"><h2>More Information</h2><div class="body"><ul class="links">
+        <li><a href="https://registry.opendata.aws/noaa-rrfs/">RRFS data on NOAA Open Data (AWS)</a></li>
+        <li><a href="https://github.com/aaronperry-dev/rrfs-winterwx-viewer#readme">Products and methods (README)</a></li>
+        <li><a href="https://github.com/aaronperry-dev/rrfs-winterwx-viewer">Source code</a></li></ul></div></div>
+    </aside>
+  </div>
 
   <footer>
     Data: NOAA/NCEP RRFS v1 ensemble members and REFS mean from the <a href="https://registry.opendata.aws/noaa-rrfs/">NOAA Open Data (AWS S3)</a> bucket,
-    fetched field by field with byte-range requests. The member mean, spread, minimum, maximum and probabilities are computed in your browser from the members
+    fetched field by field with byte-range requests. The member mean, spread, minimum, maximum, percentiles and probabilities are computed in your browser from the members
     you leave switched on; the REFS mean is NOAA's own (it also blends time-lagged members and the HRRR). Fields that need pressure-level profiles
-    (Kuchera and max-T-aloft snowfall, DGZ metrics, warm nose, gusts, blizzard) exist only for the members. Click the map for a point forecast;
-    ← / → step through time, space plays. <span id="demo-note"></span>
+    (Kuchera and max-T-aloft snowfall, DGZ metrics, warm nose, gusts, blizzard) exist only for the members. <span id="demo-note"></span>
   </footer>
 </div>
 <div class="tip" id="tip" hidden></div>
+<div class="tip ctip" id="ctip" hidden></div>
 
 <script>
 "use strict";
 const $ = (s, el = document) => el.querySelector(s);
 const TZ = "America/New_York";
-const MAP = { x: 25, y: 52, w: 1150, h: 742 };            // map frame inside the 1200 x 876 composition
-const state = { group: null, product: "snow_kuchera", mode: "mean", thr: null, win: 0, frame: 0, layout: "map", on: {}, point: null };
-let D, overlay, landMask, playTimer = null;
+const MAP = { x: 25, y: 14, w: 1150, h: 742 };            // map frame inside the 1200 x 836 composition (title lives in the page header)
+const state = { group: null, product: "snow_kuchera", mode: "mean", thr: null, win: 0, lpmm: 180, frame: 0, layout: "map", on: {}, point: null };
+let D, overlay, landMask, playTimer = null, speed = 3;
 const store = new Map();                                    // "product.source" -> Promise<{u: Uint8Array|Uint16Array, p}>
 
 // ---------------------------------------------------------------- helpers
@@ -169,7 +256,7 @@ const fnum = (v, d) => { const s = v.toFixed(d); return /^-0(\.0*)?$/.test(s) ? 
 const tick = v => (Math.abs(v) < 1e-9 ? "0" : String(+v.toPrecision(6)));
 const MODES = [["refs", "RRFS Mean (REFS)", "RRFS Mean (REFS)"], ["min", "Minimum", "Min"], ["p05", "5th percentile", "P5"],
   ["p10", "10th percentile", "P10"], ["p25", "25th percentile", "P25"], ["p50", "Median (50th percentile)", "P50"],
-  ["mean", "Member mean", "Mean"], ["p75", "75th percentile", "P75"], ["p90", "90th percentile", "P90"],
+  ["mean", "Member mean", "Mean"], ["pmm", "Probability-matched mean (PMM)", "PMM"], ["lpmm", "Localized probability-matched mean (LPMM)", "LPMM"], ["p75", "75th percentile", "P75"], ["p90", "90th percentile", "P90"],
   ["p95", "95th percentile", "P95"], ["max", "Maximum", "Max"], ["spread", "Spread (σ)", "Spread (σ)"], ["prob", "Probability", "Probability"]];
 const PCT_MODES = { p05: 0.05, p10: 0.10, p25: 0.25, p50: 0.50, p75: 0.75, p90: 0.90, p95: 0.95 };
 const modeLabel = m => m.startsWith("m0") ? m : MODES.find(x => x[0] === m)[1];
@@ -272,6 +359,34 @@ function reduce(arrs, mode, thr, dir) {
   }
   return out;
 }
+// Probability matching (Ebert 2001) and its localized, patch-wise form (Clark 2017; Snook et al. 2020; the PMM/LPMM products of the SPC HREF viewer):
+// the member-mean field supplies the spatial pattern, and its values are replaced by the pooled member values of equal rank.
+const lowerBound = (a, n, v) => { let lo = 0, hi = n; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < v) lo = m + 1; else hi = m; } return lo; };
+const upperBound = (a, n, v) => { let lo = 0, hi = n; while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] <= v) lo = m + 1; else hi = m; } return lo; };
+function pmmRegion(arrs, mean, out, dx0, dx1, dy0, dy1, px0, px1, py0, py1) {   // domain box supplies the distributions, patch box receives the result
+  const { nx } = D.grid, M = arrs.length, cap = (dx1 - dx0) * (dy1 - dy0), mv = new Float32Array(cap), pool = new Float32Array(cap * M);
+  let K = 0, P = 0;
+  for (let y = dy0; y < dy1; y++) for (let x = dx0; x < dx1; x++) {
+    const i = y * nx + x, m = mean[i]; if (m !== m) continue;
+    mv[K++] = m; for (let k = 0; k < M; k++) { const v = arrs[k][i]; if (v === v) pool[P++] = v; }
+  }
+  if (!K || !P) return;
+  const sm = mv.subarray(0, K).sort(), sp = pool.subarray(0, P).sort();
+  for (let y = py0; y < py1; y++) for (let x = px0; x < px1; x++) {
+    const i = y * nx + x, m = mean[i]; if (m !== m) { out[i] = NaN; continue; }
+    const r = (lowerBound(sm, K, m) + upperBound(sm, K, m) - 1) / 2;              // rank of the mean value (middle of any tie)
+    out[i] = sp[Math.min(P - 1, Math.floor((r + 0.5) * P / K))];
+  }
+}
+function pmmField(arrs, domKm) {                            // domKm = 0: one global PMM; otherwise patches of domKm/3 using a domKm-wide neighbourhood (3 km cells)
+  const { nx, ny } = D.grid, out = new Float32Array(nx * ny).fill(NaN), mean = reduce(arrs, "mean");
+  if (!domKm) { pmmRegion(arrs, mean, out, 0, nx, 0, ny, 0, nx, 0, ny); return out; }
+  const ps = Math.max(4, Math.round(domKm / 9));
+  for (let py = 0; py < ny; py += ps) for (let px = 0; px < nx; px += ps)
+    pmmRegion(arrs, mean, out, Math.max(0, px - ps), Math.min(nx, px + 2 * ps), Math.max(0, py - ps), Math.min(ny, py + 2 * ps), px, Math.min(nx, px + ps), py, Math.min(ny, py + ps));
+  return out;
+}
+const pmmCache = new Map();
 async function viewField(mode, fi = state.frame) {           // -> { values, style, unit, dec } or { error }
   const p = prod(), win = p.kind === "cum" ? state.win : 0, plain = { style: p, unit: p.unit, dec: p.decimals };
   const none = "No data for this field at this time (the source file does not provide it).";
@@ -284,7 +399,13 @@ async function viewField(mode, fi = state.frame) {           // -> { values, sty
   if (!mem.length) return { error: "All members are switched off - turn at least one on." };
   const arrs = (await Promise.all(mem.map(m => srcField(p, m, fi, win)))).filter(Boolean);
   if (!arrs.length) return { error: "No member data for this field." };
-  const thr = thrOf(p), values = reduce(arrs, mode, thr, p.thr_dir);
+  const thr = thrOf(p);
+  let values;
+  if (mode === "pmm" || mode === "lpmm") {
+    const km = mode === "lpmm" ? state.lpmm : 0, key = [p.key, win, fi, mode, km, mem.join()].join("|");
+    if (!pmmCache.has(key)) { pmmCache.set(key, pmmField(arrs, km)); if (pmmCache.size > 16) pmmCache.delete(pmmCache.keys().next().value); }
+    values = pmmCache.get(key);
+  } else values = reduce(arrs, mode, thr, p.thr_dir);
   if (!finite(values)) return { error: none };
   if (mode === "prob") return { values, style: PROB, unit: "%", dec: 0, thr };
   if (mode === "spread") return { values, style: spreadStyle(p), unit: p.unit, dec: Math.max(p.decimals, 1) };
@@ -356,11 +477,8 @@ function titleParts(p, mode, v) {
 }
 const fcap = () => `F${String(D.frames[state.frame]).padStart(3, "0")}`;
 function drawMain(ctx, v, mode, markers) {
-  const p = prod(), W = 1200, H = 876;
+  const W = 1200, H = 836;
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
-  const [tb, tr] = titleParts(p, mode, v);
-  bold(ctx, 25, 33, tb, tr, 16);
-  bold(ctx, W - 25, 33, "Valid", `: ${zfmt(D.valid[state.frame])} · ${fcap()} · run ${String(new Date(D.cycle).getUTCHours()).padStart(2, "0")}z`, 16, true);
   paintField(ctx, MAP.x, MAP.y, MAP.w, MAP.h, v.values, v.style);
   if (overlay.complete) ctx.drawImage(overlay, MAP.x, MAP.y, MAP.w, MAP.h);
   // station values (nearest cell), bold with a white halo
@@ -386,7 +504,7 @@ let renderToken = 0;
 async function render() {
   const token = ++renderToken, p = prod();
   writeHash(); statusLine(); controls();
-  $("#single").hidden = state.layout !== "map"; $("#stampwrap").hidden = state.layout === "map";
+  $("#mapwrap").hidden = state.layout !== "map"; $("#stampwrap").hidden = state.layout === "map"; $("#p-summary").hidden = state.layout !== "map";
   $("#blurb").textContent = p.desc;
   const msg = $("#msg"), notice = $("#notice");
   notice.hidden = true;
@@ -395,8 +513,12 @@ async function render() {
   if (mode === "refs" && !p.available.refs) { mode = "mean"; notes.push("The official REFS mean file does not carry this field, so the member mean is shown."); }
   if (p.kind === "cum" && state.win === 1) notes.push("1-hour accumulation in the hour ending at the valid time; the maps step every 3 hours.");
   else if (p.kind === "cum" && state.win > 1 && state.frame - state.win / D.frame_step < 0) notes.push(`The ${state.win}-hour window starts before the run began, so the run total so far is shown.`);
+  if (mode === "pmm" || mode === "lpmm") { const n = activeMembers().length; notes.push(mode === "pmm"
+    ? `PMM keeps the member-mean pattern but takes its amounts from the pooled member values over the whole map, restoring the amplitude the plain mean smooths away. With ${n} member${n === 1 ? "" : "s"} the pooled distribution is coarse.`
+    : `LPMM does the same within local patches (${Math.round(state.lpmm / 3)} km) using a ${state.lpmm} km neighbourhood, so distant regimes do not set the amounts. With ${n} member${n === 1 ? "" : "s"} the pooled distribution is coarse.`); }
   if (mode in PCT_MODES) { const n = activeMembers().length; notes.push(`Percentiles are interpolated across the ${n} member${n === 1 ? "" : "s"} switched on, so with so few members P5/P10 sit close to the minimum and P90/P95 close to the maximum.`); }
   if (notes.length) { notice.hidden = false; notice.textContent = notes.join(" "); }
+  mapHeader(mode);
   if (state.layout !== "map") return renderStamps(token, p);
   msg.hidden = false; msg.textContent = "Loading…";
   let v;
@@ -411,8 +533,8 @@ async function render() {
 let current = null;
 
 async function renderStamps(token, p) {
-  const defs = state.layout === "pctl" ? MODES.filter(x => x[0] !== "refs" && x[0] !== "spread" && x[0] !== "prob").map(x => [x[0], x[1].replace("Median (50th percentile)", "Median (P50)").replace(" percentile", "")])
-    : [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ["spread", "Spread (σ)"], ["prob", "Probability"], ...D.members.map(m => [m, m])];
+  const defs = state.layout === "pctl" ? MODES.filter(x => !["refs", "spread", "prob", "pmm", "lpmm"].includes(x[0])).map(x => [x[0], x[1].replace("Median (50th percentile)", "Median (P50)").replace(" percentile", "")])
+    : [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ["pmm", "PMM"], ["lpmm", "LPMM"], ["spread", "Spread (σ)"], ["prob", "Probability"], ...D.members.map(m => [m, m])];
   const grid = $("#stamps"); grid.replaceChildren(); grid.className = state.layout === "pctl" ? "pctl" : "";
   const first = await viewField("mean"); if (token !== renderToken) return;
   const lg = $("#slegend").getContext("2d"); lg.fillStyle = "#fff"; lg.fillRect(0, 0, 1200, 96);
@@ -451,9 +573,35 @@ function tiles(v) {
   $("#sum-title").textContent = "New England land area";
   el.innerHTML = t("Low", lo) + t("Average", s / Math.max(c, 1)) + t("High", hi);
 }
+let chartInfo = null;
+function chartFrameAt(ev) {
+  const cv = $("#chart"), i = chartInfo; if (!i) return -1;
+  const x = (ev.clientX - cv.getBoundingClientRect().left) * cv.width / cv.getBoundingClientRect().width;
+  if (x < i.L - 12 || x > i.W - i.R + 12) return -1;
+  return Math.max(0, Math.min(i.nf - 1, Math.round((x - i.L) / (i.W - i.L - i.R) * (i.nf - 1))));
+}
+function hideChartTip() { $("#ctip").hidden = true; $("#chart-cursor").hidden = true; }
+function showChartTip(ev) {
+  const f = chartFrameAt(ev), i = chartInfo, tip = $("#ctip"), cur = $("#chart-cursor");
+  if (f < 0) { hideChartTip(); return; }
+  const cv = $("#chart"), k = cv.getBoundingClientRect().width / i.W, p = i.p, val = y => { const v = y && y[f]; return v === v && v != null ? `${fnum(v, p.decimals)} ${p.unit}` : "—"; };
+  const row = (col, name, v, dash, off) => `<div class="row${off ? " off" : ""}"><span><i class="sw" style="border-color:${col};${dash ? "border-top-style:dashed;" : ""}"></i>${name}${off ? " (off)" : ""}</span><b>${v}</b></div>`;
+  tip.innerHTML = `<b>${fcap2(f)}</b><div class="t2">${fmtDate(D.valid[f], "UTC")} · ${fmtDate(D.valid[f], TZ)}</div>` +
+    (i.mean ? row("#fff", "Member mean", val(i.mean)) : "") + (i.ry ? row("#fff", "REFS mean", val(i.ry), true) : "") +
+    i.series.map(s => row(s.col, s.m, val(s.y), false, !s.on)).join("");
+  tip.hidden = false;
+  const w = tip.offsetWidth, h = tip.offsetHeight, x = ev.clientX + 16 + w > innerWidth ? ev.clientX - 16 - w : ev.clientX + 16;
+  tip.style.left = Math.max(4, x) + "px"; tip.style.top = Math.max(4, Math.min(innerHeight - h - 4, ev.clientY - h / 2)) + "px";
+  cur.hidden = false; cur.style.left = i.X(f) * k + "px"; cur.style.top = i.T * k + "px"; cur.style.height = (i.H - i.T - i.B) * k + "px";
+}
+const fcap2 = f => `F${String(D.frames[f]).padStart(3, "0")}`;
+$("#chart").addEventListener("pointermove", showChartTip);
+$("#chart").addEventListener("pointerleave", hideChartTip);
+$("#chart").addEventListener("click", ev => { const f = chartFrameAt(ev); if (f >= 0) set({ frame: f }); });
 const MCOL = ["#e8590c", "#2f9e44", "#7048e8", "#c2255c", "#0c8599"];
 async function chart() {
   const cv = $("#chart"), ctx = cv.getContext("2d"), W = cv.width, H = cv.height, p = prod();
+  chartInfo = null; hideChartTip();
   ctx.clearRect(0, 0, W, H); $("#chart-legend").innerHTML = ""; $("#pt-name").textContent = "";
   const dark = matchMedia("(prefers-color-scheme: dark)").matches, ink = dark ? "#e6edf3" : "#1c2128", grid = dark ? "#30363d" : "#d8dee4", muted = dark ? "#9198a1" : "#59636e";
   if (!state.point) { ctx.fillStyle = muted; ctx.font = "26px system-ui"; ctx.textAlign = "center"; ctx.fillText("Click the map for a point forecast", W / 2, H / 2); return; }
@@ -478,6 +626,7 @@ async function chart() {
   for (const s of series) line(s.y, s.on ? s.col : grid, s.on ? 3 : 2, s.on ? [] : [6, 6]);
   if (ry) line(ry, ink, 4, [12, 8]);
   if (mean) line(mean, ink, 6);
+  chartInfo = { L, R, T, B, W, H, nf, X, series, ry, mean, p };
   ctx.strokeStyle = muted; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(X(state.frame), T); ctx.lineTo(X(state.frame), H - B); ctx.stroke();
   const st = D.stations.length ? nearestStation(r, c) : null;
   $("#pt-name").textContent = `· ${p.kind === "cum" && state.win ? state.win + "-hr " : ""}${p.title} (${p.unit}) ${st ? "near " + st : ""}`;
@@ -509,18 +658,55 @@ function controls() {
   seg($("#seg-mode"), MODES.map(([k, , l]) => ({ value: k, label: l, title: modeLabel(k), disabled: k === "refs" && !p.available.refs })),
       state.mode.startsWith("m0") ? null : state.mode, m => set({ mode: m }));
   $("#g-thr").hidden = state.mode !== "prob";
+  $("#g-lpmm").hidden = state.mode !== "lpmm";
+  seg($("#seg-lpmm"), [120, 180, 240].map(k => ({ value: k, label: `${k} km` })), state.lpmm, k => set({ lpmm: k }));
   seg($("#seg-thr"), thrList(p).map(t => ({ value: t, label: `${p.thr_dir === "le" ? "≤" : "≥"} ${t} ${p.unit}` })), thrOf(p), t => set({ thr: t }));
   seg($("#seg-members"), D.members.map(m => ({ value: m, label: m, on: state.on[m], disabled: !p.available[m] })), null, m => set({ on: { ...state.on, [m]: !state.on[m] } }), true);
   seg($("#seg-single"), D.members.map(m => ({ value: m, label: m, disabled: !p.available[m] })), state.mode, m => set({ mode: m }));
   seg($("#seg-layout"), [{ value: "map", label: "Map" }, { value: "stamps", label: "All members" }, { value: "pctl", label: "Percentiles" }], state.layout, l => set({ layout: l }));
-  const sl = $("#slider"); sl.max = D.frames.length - 1; sl.value = state.frame;
-  $("#when").innerHTML = `<strong>${fcap()}</strong> · ${fmtDate(D.valid[state.frame], "UTC")}<small>${fmtDate(D.valid[state.frame], TZ)}</small>`;
+  updateTimeline();
+}
+const hhmm = iso => { const t = new Date(iso); return String(t.getUTCHours()).padStart(2, "0") + String(t.getUTCMinutes()).padStart(2, "0"); };
+const dayLabel = (iso, short) => { const t = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short", month: "2-digit", day: "2-digit" }).format(new Date(iso)).replace(",", "");
+  return short ? t.split(" ")[1] : t; };
+function buildTimeline() {
+  const n = D.frames.length, cols = `repeat(${n}, minmax(0, 1fr))`, days = $("#tl-days"), cells = $("#tl-cells");
+  $("#tl-inner").style.minWidth = n * 40 + "px";
+  days.style.gridTemplateColumns = cols; cells.style.gridTemplateColumns = cols; days.replaceChildren(); cells.replaceChildren();
+  for (let i = 0; i < n;) {                                   // one label per UTC calendar day
+    const key = D.valid[i].slice(0, 10); let j = i;
+    while (j + 1 < n && D.valid[j + 1].slice(0, 10) === key) j++;
+    const el = document.createElement("div"); el.textContent = dayLabel(D.valid[i], j - i < 2); el.style.gridColumn = `${i + 1} / ${j + 2}`; days.append(el); i = j + 1;
+  }
+  D.frames.forEach((h, f) => {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = "F" + String(h).padStart(3, "0"); b.title = fmtDate(D.valid[f], "UTC") + " · " + fmtDate(D.valid[f], TZ);
+    b.addEventListener("click", () => set({ frame: f }));
+    b.addEventListener("pointerenter", e => { if (e.buttons === 1 && e.pointerType === "mouse") set({ frame: f }); });   // drag across the bar
+    cells.append(b);
+  });
+}
+function updateTimeline() {
+  const n = D.frames.length, f = state.frame, cells = $("#tl-cells").children;
+  for (let i = 0; i < cells.length; i++) { cells[i].classList.toggle("sel", i === f); if (i === f) cells[i].setAttribute("aria-current", "true"); else cells[i].removeAttribute("aria-current"); }
+  const m = $("#tl-mark"); m.textContent = hhmm(D.valid[f]) + " UTC";
+  m.style.left = `clamp(40px, ${((f + 0.5) / n * 100).toFixed(3)}%, calc(100% - 40px))`;
+  const sel = cells[f]; if (sel && sel.scrollIntoView) { const sc = $(".tl-scroll"), r = sel.getBoundingClientRect(), q = sc.getBoundingClientRect();
+    if (r.left < q.left || r.right > q.right) sc.scrollLeft += (r.left + r.right) / 2 - (q.left + q.right) / 2; }
+}
+function mapHeader(mode) {
+  const p = prod(), win = p.kind === "cum" && state.win ? `${state.win}-hr ` : "";
+  $("#mh-title").textContent = win + p.title;
+  $("#mh-sub").textContent = state.layout === "pctl" ? "Percentiles across the members switched on"
+    : state.layout === "stamps" ? "REFS mean, member mean, spread, probability and each member"
+    : mode === "prob" ? `Probability ${p.thr_dir === "le" ? "≤" : "≥"} ${thrOf(p)} ${p.unit}` : `${modeLabel(mode)}${mode === "lpmm" ? ` · ${state.lpmm} km domain` : ""} (${p.unit})`;
+  $("#mh-run").textContent = `Run:   ${zfmt(D.cycle)}\nValid: ${zfmt(D.valid[state.frame])} (${fcap()})`;
 }
 function statusLine() {
   const age = Math.max(0, Math.round((Date.now() - Date.parse(D.generated)) / 60000)), a = age < 90 ? `${age} min ago` : `${Math.round(age / 60)} h ago`;
-  $("#status").innerHTML = `<strong>RRFS ensemble</strong> run ${fmtDate(D.cycle, "UTC")} · ${fmtDate(D.cycle, TZ)}<br>to F${String(D.max_fhr).padStart(3, "0")} · site built ${a}` +
-    (D.demo ? '<span class="chip">synthetic demo data</span>' : "");
+  $("#status").innerHTML = `NOAA RRFS ensemble · 3 km · to F${String(D.max_fhr).padStart(3, "0")} · site built ${a}` + (D.demo ? '<span class="chip">synthetic demo data</span>' : "");
   $("#demo-note").textContent = D.demo ? "Showing synthetic demo data, not a real forecast." : "";
+  const c = new Date(D.cycle), z = String(c.getUTCHours()).padStart(2, "0") + "Z";
+  $("#sel-date").innerHTML = `<option>${c.toISOString().slice(0, 10)}</option>`; $("#sel-run").innerHTML = `<option>${z}</option>`;
 }
 function readHash() {
   const [pk, mode, f, w, layout] = location.hash.slice(1).split("/");
@@ -534,18 +720,25 @@ const writeHash = () => history.replaceState(null, "", `#${state.product}/${stat
 function set(patch) { Object.assign(state, patch); if (patch.frame === undefined || true) render(); }
 
 // ---------------------------------------------------------------- events
-$("#slider").addEventListener("input", e => set({ frame: +e.target.value }));
 $("#btn-prev").addEventListener("click", () => step(-1));
 $("#btn-next").addEventListener("click", () => step(1));
 function step(d) { set({ frame: Math.min(D.frames.length - 1, Math.max(0, state.frame + d)) }); }
 function play(on) {
-  clearInterval(playTimer); playTimer = null; $("#btn-play").textContent = on ? "❚❚ Pause" : "▶ Play";
-  if (on) playTimer = setInterval(() => { if (state.frame >= D.frames.length - 1) set({ frame: 0 }); else step(1); }, 700);
+  clearInterval(playTimer); playTimer = null; const b = $("#btn-play"); b.textContent = on ? "❚❚" : "▶"; b.setAttribute("aria-label", on ? "Pause" : "Play");
+  if (on) playTimer = setInterval(() => { if (state.frame >= D.frames.length - 1) set({ frame: 0 }); else step(1); }, Math.round(2100 / speed));
 }
+function setSpeed(d) { speed = Math.min(10, Math.max(1, speed + d)); $("#speed").textContent = speed; if (playTimer) play(true); }
 $("#btn-play").addEventListener("click", () => play(!playTimer));
+$("#spd-down").addEventListener("click", () => setSpeed(-1));
+$("#spd-up").addEventListener("click", () => setSpeed(1));
 document.addEventListener("keydown", e => {
-  if (e.altKey || e.ctrlKey || e.metaKey || !D || e.target.tagName === "INPUT") return;
-  if (e.key === "ArrowRight") step(1); else if (e.key === "ArrowLeft") step(-1); else if (e.key === " " && e.target.tagName !== "BUTTON") { e.preventDefault(); play(!playTimer); }
+  if (e.altKey || e.ctrlKey || e.metaKey || !D || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  const k = e.key;
+  if (k === "ArrowRight" || k === ">" || k === ".") step(1);
+  else if (k === "ArrowLeft" || k === "<" || k === ",") step(-1);
+  else if (k === "p" || k === "P") play(!playTimer);
+  else if (k === "h" || k === "H") document.body.classList.toggle("hidetop");
+  else if (k === " " && e.target.tagName !== "BUTTON") { e.preventDefault(); play(!playTimer); }
 });
 function cellAt(ev) {
   const cv = $("#map"), rc = cv.getBoundingClientRect(), k = 1200 / rc.width;
@@ -576,6 +769,7 @@ window.addEventListener("hashchange", () => { readHash(); render(); });
     const bits = await inflate(`data/land.bin?v=${D.version}`), n = D.grid.nx * D.grid.ny; landMask = new Uint8Array(n);
     for (let i = 0; i < n; i++) landMask[i] = (bits[i >> 3] >> (7 - (i & 7))) & 1;
     state.frame = Math.min(state.frame, D.frames.length - 1);
+    buildTimeline();
     render();
   } catch (err) { $("#status").textContent = "Could not load data.json (" + err.message + ")"; }
 })();

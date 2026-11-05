@@ -13,18 +13,23 @@ directory and deploys it as a Pages artifact.
 | Control | What it does |
 |---|---|
 | **Topic / Product** | 7 topics, 30 products (table below). |
-| **Ensemble view** | `RRFS Mean (REFS)` · `Min` · `P5` · `P10` · `P25` · `P50` · `Mean` · `P75` · `P90` · `P95` · `Max` · `Spread (σ)` · `Probability`, for every product. Percentiles are linearly interpolated across the members switched on, so with five members P5/P10 sit near the minimum and P90/P95 near the maximum. |
+| **Ensemble view** | `RRFS Mean (REFS)` · `Min` · `P5` · `P10` · `P25` · `P50` · `Mean` · `PMM` · `LPMM` · `P75` · `P90` · `P95` · `Max` · `Spread (σ)` · `Probability`, for every product. Percentiles are linearly interpolated across the members switched on, so with five members P5/P10 sit near the minimum and P90/P95 near the maximum. |
+| **PMM / LPMM** | Probability-matched mean (Ebert 2001): the member-mean field supplies the spatial pattern and its values are replaced by the pooled member values of equal rank, which restores the amplitude the plain mean smooths away. LPMM (Clark 2017) does this within local patches, so distant regimes do not set the amounts. Implemented patch-wise as in Snook et al. (2020): patches are one third of the calculation domain; choose 120, 180 (default: 60 km patches, 180 km domain) or 240 km. Available for every product, computed in the browser from the members switched on (global PMM ~0.1 s, LPMM ~0.5 s per map); also shown in the *All members* layout. With only five members the pooled distribution is coarse. |
 | **Members** | Click `m001`–`m005` to switch members **on or off**; mean, spread, min, max and probabilities are recomputed instantly in your browser from the members left on. |
 | **Single member** | Look at one member on its own. |
 | **Probability of** | Threshold buttons per product (e.g. ≥ 6 in of Kuchera snow, ≥ 0.25 in QPF, ≥ 50 mph gust, ≤ 0 °F wind chill). |
 | **Accumulation window** | **1 h**, 3 h, 6 h, 12 h, 24 h or run total, for QPF and every snowfall method. 1-h maps are the hour ending at the valid time (a stored field, so the maps step every 3 h); 3/6/12/24-h windows are differences of stored totals. |
 | **All members** layout | Postage-stamp grid: REFS mean, member mean, spread, probability and every member side by side. |
 | **Percentiles** layout | All ten statistics (Min, P5, P10, P25, P50, Mean, P75, P90, P95, Max) side by side for the current product, window and time; click one to open it. |
-| **Time** | Slider, ◀ ▶ buttons, ← / → keys, space to play; valid times in UTC and Eastern. |
+| **Time** | Timeline bar in the style of the SPC HREF viewer: day labels, one `Fnnn` cell per forecast hour (click or drag), a floating box with the valid time in UTC, `< ▶ >` buttons and a `- SPEED: n +` control. Keys: `<` `>` or ← → step, `p` or space plays, `h` hides the top menu. Hover a cell for UTC and Eastern times. |
 | **Click the map** | Point forecast: every member, the member mean and the REFS mean as lines over the forecast. |
+| Hover the point-forecast graph | Tooltip with the valid time (UTC and Eastern) and the value of every member, the member mean and the REFS mean at that forecast hour, with a cursor line; click the graph to jump the map to that time. |
 | Hover | Value under the cursor. Land-area low / average / high tiles for the current map. |
 
 The URL hash stores the state (`#snow_kuchera/mean/12/0/map`), so a view can be bookmarked or shared.
+
+The layout follows the SPC HREF viewer: Date / Run / Sector selectors and title across the top, large topic tabs with a product bar beneath, the timeline,
+then the map with a right-hand sidebar of checkbox-style options (ensemble view, accumulation window, members), view buttons, keyboard shortcuts and links.
 
 ## Products
 
@@ -102,7 +107,7 @@ Designed so that scheduled generation is never stopped by GitHub:
   `concurrency` group prevents overlap.
 * Data is never committed; the site is built in the runner and deployed with `upload-pages-artifact` + `deploy-pages`. The
   deployed site is on the order of 100 MB (see *Size*), far under the 1 GB Pages limit, and the repo itself stays tiny.
-* Runs are scheduled after each cycle and twice more for slow cycles. A run that finds the site already showing the newest complete cycle
+* Runs are scheduled about 3 h 50 min after each cycle (03:50, 09:50, 15:50, 21:50 UTC), with retries at +4 h 30 and +5 h 30 for slow cycles. A run that finds the site already showing the newest complete cycle
   exits in about a minute without deploying (`--skip-if-deployed`).
 * GitHub disables scheduled workflows in public repos after 60 days without repository activity. A best-effort step re-enables
   the workflow on every run. If scheduled runs stop anyway, push any commit or press *Run workflow*.
