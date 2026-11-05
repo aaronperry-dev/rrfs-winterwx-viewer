@@ -44,3 +44,15 @@ def test_keys():
 def test_frames():
     assert frames(60)[0] == 3 and frames(60)[-1] == 60 and len(frames(60)) == 20
     assert frames(9) == (3, 6, 9)
+
+
+def test_skip_logic():
+    from rrfs_viewer.build import code_version, up_to_date
+    code = code_version()
+    m = {"cycle": "2026-11-05T12:00:00Z", "code": code, "demo": False}
+    assert up_to_date(m, "2026-11-05T12:00:00Z", code)
+    assert not up_to_date(m, "2026-11-05T18:00:00Z", code)                 # newer cycle
+    assert not up_to_date({**m, "code": "oldcode"}, "2026-11-05T12:00:00Z", code)   # new code
+    assert not up_to_date({k: v for k, v in m.items() if k != "code"}, "2026-11-05T12:00:00Z", code)   # pre-fingerprint site
+    assert not up_to_date({**m, "demo": True}, "2026-11-05T12:00:00Z", code)
+    assert not up_to_date(None, "2026-11-05T12:00:00Z", code)

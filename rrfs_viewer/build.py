@@ -64,36 +64,31 @@ def _report(s: str, blobs: dict, info: dict) -> None:
         log.warning("%s: field not found %s -> %s", s, k, h)
 
 
-def deployed_cycle(url: str) -> str | None:
-    """Cycle shown by the live site (its data.json), or None when it cannot be read - then we simply build."""
+def code_version() -> str:
+    """Fingerprint of everything that shapes the output (python package + dashboard page), so a code change forces a rebuild."""
+    import hashlib
+    h = hashlib.sha1()
+    root = Path(__file__).resolve().parent
+    for f in sorted([*root.glob("*.py"), root / "data" / "stations.csv", SITE_DIR / "index.html"]):
+        h.update(f.name.encode())
+        h.update(f.read_bytes())
+    return h.hexdigest()[:12]
+
+
+def deployed_manifest(url: str) -> dict | None:
+    """The live site's data.json, or None when it cannot be read - then we simply build."""
     import urllib.request
     try:
         with urllib.request.urlopen(url.rstrip("/") + "/data.json", timeout=20) as r:
-            m = json.load(r)
-        return None if m.get("demo") else m.get("cycle")
+            return json.load(r)
     except Exception as e:                       # first run, Pages not enabled yet, network hiccup ...
         log.info("could not read the deployed manifest (%s)", e)
         return None
 
 
-def ensure_regrid(src: S3Source, cycle: datetime, cache: Path, first_fhr: int) -> grib.Regrid:
-    from .basemap import EXTENT, PROJ
-    from .config import OUT_DX_M
-
-    path = cache / "regrid.npz"
-    rg = grib.Regrid.load(path)
-    # one message with geometry: the surface-pressure field of member m001
-    loc = src.locate(FILE_2D, MEMBERS[0], cycle, first_fhr)
-    if loc is None:
-        raise RuntimeError("cannot read the grid definition: no member file for the chosen cycle")
-    data = src.fetch_message(loc, "PRES", "surface")
-    vals, geo = grib.decode(data, want_geometry=True)
-    if rg is not None and rg.native_shape == vals.shape:
-        return rg
-    log.info("building native -> display grid mapping (%s)", vals.shape)
-    rg = grib.build_regrid(geo[0], geo[1], PROJ, EXTENT, OUT_DX_M)
-    rg.save(path)
-    return rg
+def up_to_date(manifest: dict | None, cycle_iso: str, code: str) -> bool:
+    """Skip the build only when the live site shows this cycle, was built by this version of the code, and is not demo data."""
+    return bool(manifest) and not manifest.get("demo") and manifest.get("cycle") == cycle_iso and manifest.get("code") == code
 
 
 def main(argv=None) -> int:
@@ -106,7 +101,7 @@ def main(argv=None) -> int:
     ap.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
     ap.add_argument("--sources", default="refs," + ",".join(MEMBERS))
     ap.add_argument("--cycle", help="force a cycle (YYYYMMDDHH) instead of the newest complete one")
-    ap.add_argument("--skip-if-deployed", metavar="URL", help="exit early (code 0, no output directory) when the site at URL already shows this cycle")
+    ap.add_argument("--skip-if-deployed", metavar="URL", help="exit early (code 0, no output directory) when the site at URL already shows this cycle built by this code version")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
@@ -126,8 +121,9 @@ def main(argv=None) -> int:
         log.error("no complete RRFS/REFS cycle (through F%03d) found in the last 48 h", args.max_fhr)
         return 1
     log.info("cycle %s (F%03d), %d frames", cycle, args.max_fhr, len(F))
-    if args.skip_if_deployed and deployed_cycle(args.skip_if_deployed) == iso(cycle):
-        log.info("the deployed site already shows this cycle - nothing to do")
+    code = code_version()
+    if args.skip_if_deployed and up_to_date(deployed_manifest(args.skip_if_deployed), iso(cycle), code):
+        log.info("the deployed site already shows this cycle and this code version (%s) - nothing to do", code)
         return 0
 
     cache, out = Path(args.cache), Path(args.out)
@@ -167,7 +163,7 @@ def main(argv=None) -> int:
     (out / "data" / "land.bin").write_bytes(encode.pack_mask(basemap.land_mask(layers, rg.lon, rg.lat)))
 
     manifest = {
-        "generated": iso(now), "version": int(now.timestamp()), "demo": args.demo,
+        "generated": iso(now), "version": int(now.timestamp()), "demo": args.demo, "code": code,
         "cycle": iso(cycle), "max_fhr": args.max_fhr, "frames": list(F),
         "valid": [iso(cycle + timedelta(hours=h)) for h in F],
         "grid": {"nx": nx, "ny": ny}, "overlay": "overlay.png", "overlay_px": list(basemap.OVERLAY_PX),
