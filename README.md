@@ -12,12 +12,12 @@ directory and deploys it as a Pages artifact.
 
 | Control | What it does |
 |---|---|
-| **Topic / Product** | 7 topics, 25 products (table below). |
+| **Topic / Product** | 7 topics, 30 products (table below). |
 | **Ensemble view** | `RRFS Mean (REFS)` · `Member mean` · `Spread (σ)` · `Minimum` · `Maximum` · `Probability`. |
 | **Members** | Click `m001`–`m005` to switch members **on or off**; mean, spread, min, max and probabilities are recomputed instantly in your browser from the members left on. |
 | **Single member** | Look at one member on its own. |
 | **Probability of** | Threshold buttons per product (e.g. ≥ 6 in of Kuchera snow, ≥ 0.25 in QPF, ≥ 50 mph gust, ≤ 0 °F wind chill). |
-| **Accumulation window** | Run total, or any 3/6/12/24-h window of an accumulation (computed by differencing stored totals). |
+| **Accumulation window** | **1 h**, 3 h, 6 h, 12 h, 24 h or run total, for QPF and every snowfall method. 1-h maps are the hour ending at the valid time (a stored field, so the maps step every 3 h); 3/6/12/24-h windows are differences of stored totals. |
 | **All members** layout | Postage-stamp grid: REFS mean, member mean, spread, probability and every member side by side. |
 | **Time** | Slider, ◀ ▶ buttons, ← / → keys, space to play; valid times in UTC and Eastern. |
 | **Click the map** | Point forecast: every member, the member mean and the REFS mean as lines over the forecast. |
@@ -29,12 +29,15 @@ The URL hash stores the state (`#snow_kuchera/mean/12/0/map`), so a view can be 
 
 | Topic | Product | How it is made |
 |---|---|---|
-| Precipitation | **QPF** | Sum of hourly `APCP` (members) · REFS mean `APCP` |
-| Snowfall | **Model snowfall** | RRFS `ASNOW` run total (the model's own variable ratio; includes sleet) |
-| | **10:1 snowfall** | Snow-type liquid × 10. Snow-type liquid = hourly `APCP` × precipitation-type flag (`CSNOW`) |
-| | **Kuchera snowfall** | Snow-type liquid × Kuchera ratio, `12 + 2 (271.16 K − Tmax)` for Tmax > 271.16 K, `12 + (271.16 K − Tmax)` otherwise, Tmax = warmest temperature from 2 m up to 500 hPa; ratio clipped to 3:1–40:1 |
-| | **Max-T-aloft snowfall** | Snow-type liquid × 5th-degree polynomial in the warmest temperature from ~610 m AGL to 500 hPa (Veals et al. 2025) |
-| | **Kuchera / Max-T-aloft ratio** | The ratios themselves, at the valid time |
+| Precipitation | **QPF** (1 h … run total) | Sum of hourly `APCP` (members) · REFS mean `APCP` |
+| Snowfall (1 h … run total) | **Model snowfall** | RRFS `ASNOW` (the model's own variable ratio; includes sleet) |
+| | **12:1 snowfall** | Snow-type liquid × 12 (closer to New England climatology than 10:1). Snow-type liquid = hourly `APCP` × precipitation-type flag (`CSNOW`); REFS mean: its `WEASD` × 12 |
+| | **Kuchera snowfall** | Snow-type liquid × Kuchera ratio, `12 + 2 (271.16 K − Tmax)` for Tmax > 271.16 K, `12 + (271.16 K − Tmax)` otherwise, Tmax = warmest temperature from 2 m up to 500 hPa; clipped to 3:1–40:1 |
+| | **Max-T-aloft snowfall** | Snow-type liquid × 5th-degree polynomial in the warmest temperature from ~610 m AGL to 500 hPa (Veals et al. 2025; experimental) |
+| | **Thickness snowfall** | Snow-type liquid × the CMC thickness ratio: 10:1, reduced by the Murphy relation `10 × (30.6 − 0.1057 × Z1000–700[dam])` wherever the 850–700 hPa thickness exceeds 1540 m. Thickness from model `HGT` (1000/850/700 hPa), falling back to the hypsometric equation on the temperature levels |
+| | **Multi-method mean** | Mean of the five estimates above (needs at least four) |
+| Snow ratio (SLR) | **12:1, Kuchera, max-T-aloft, thickness** | The ratio each method used at the valid time |
+| | **Model-implied ratio** | Run-total `ASNOW` ÷ run-total snow-type liquid, where ≥ 0.02 in of snow liquid has fallen (two different model diagnostics; a diagnostic, not a measurement) |
 | Ice & p-type | **Freezing rain, sleet** | Hourly `APCP` × `CFRZR` / `CICEP` flag (liquid equivalent) |
 | | **Snow / sleet / freezing rain / rain** | Precipitation-type probability (members: 0 or 100; mean: % of members) |
 | | **Warm nose** | Warmest temperature 925–700 hPa |
@@ -47,7 +50,7 @@ The URL hash stores the state (`#snow_kuchera/mean/12/0/map`), so a view can be 
 | | **Blizzard duration** | Longest run of blizzard samples so far (the NWS criteria need ≥ 3 h) |
 | Temperature | **2 m temperature, wind chill** | `TMP`; NWS wind-chill formula (T ≤ 50 °F, wind > 3 mph) |
 
-Colour ramps are fixed physical bins (a colour always means the same value in every frame and for every member). Wind and
+Colour ramps are fixed physical bins (a colour always means the same value in every frame and for every member). QPF and snowfall use the NWS Gray/Portland legends; wind and
 wind-chill legends are the same NWS-style ramps as the RTMA dashboard.
 
 ## Data and the "lean fetch"
@@ -82,12 +85,13 @@ fall back to the member mean with a notice.
 
 ## Size
 
-Measured on the offline demo (455 × 293 display grid, 3 frames, 6 sources): 8.4 MB of data files + a 46 kB overlay. Scaled to the 20
-frames of a full run that is roughly 55 MB for the whole site (synthetic fields; real fields may compress differently), and a
-visitor downloads only the product being viewed: about 3–6 MB for all six sources, cached afterwards.
-What a build **downloads** from S3 is much larger than what it publishes (every needed message at full CONUS resolution); the
-demo transferred ≈ 50 MB per member for 3 frames, and the real grid is about 7× larger. Expect several GB per run, which is
-free on a public repository but is the main thing to check in the first live log.
+Measured on the offline demo (455 × 293 display grid, 4 frames, 6 sources, 37 stored series including the 1-hour ones): 19 MB of data
+files + a 46 kB overlay. Scaled to the 20 frames of a full run that is roughly 95 MB for the whole site (synthetic fields; real fields
+may compress differently). A visitor downloads only the product being viewed, and 1-hour fields only when the 1 h window is chosen:
+about 3-6 MB for all six sources, cached afterwards.
+What a build **downloads** from S3 is much larger than what it publishes (every needed message at full CONUS resolution). The first live
+run's REFS-mean pass fetched 73 MB; expect a few GB for the five members, which is free on a public repository but is the thing to
+check in the Actions log.
 
 ## GitHub Actions limits
 
@@ -96,7 +100,7 @@ Designed so that scheduled generation is never stopped by GitHub:
 * The repository is **public** (Actions minutes are free), runs finish in minutes, the job has a hard `timeout-minutes`, and a
   `concurrency` group prevents overlap.
 * Data is never committed; the site is built in the runner and deployed with `upload-pages-artifact` + `deploy-pages`. The
-  deployed site is on the order of 50 MB (see *Size*), far under the 1 GB Pages limit, and the repo itself stays tiny.
+  deployed site is on the order of 100 MB (see *Size*), far under the 1 GB Pages limit, and the repo itself stays tiny.
 * Runs are scheduled after each cycle and twice more for slow cycles. A run that finds the site already showing the newest complete cycle
   exits in about a minute without deploying (`--skip-if-deployed`).
 * GitHub disables scheduled workflows in public repos after 60 days without repository activity. A best-effort step re-enables
@@ -126,10 +130,15 @@ in demo mode is synthetic and marked as such on the page.
 
 ## Limitations: read before trusting a number
 
-* **Not yet validated against the live bucket.** The field names and `.idx` descriptors (`APCP` 1-hour windows, `ASNOW` totals, `MAXUVV`,
+* **Accumulation windows are auto-detected.** For `APCP`, `WEASD` and `ASNOW` the code reads each file's `.idx` and uses run totals, 1-hour or longer tiling windows, whichever the file has. If a field is still not found, the Actions log prints a `field not found … ->` line listing what the file does contain.
+* **Partly validated against the live bucket.** The field names and `.idx` descriptors (`APCP` 1-hour windows, `ASNOW` totals, `MAXUVV`,
   `VIS`, pressure-level `TMP`/`RH`) follow the published RRFS/REFS product tables and the layout of comparable NCEP files; they were
-  developed offline. Missing messages are not fatal: the product is simply empty for that frame/member (a hole in the hourly
+  developed offline; the first live run found the REFS-mean precipitation windows were not as assumed (now handled adaptively). Missing messages are not fatal: the product is simply empty for that frame/member (a hole in the hourly
   `APCP` withholds all later accumulations rather than under-reporting them), and the Actions log lists what was missing.
+* **Snowfall methods are guidance, not forecasts.** A ratio is applied to model QPF, so all of them inherit its errors. The ratio at the
+  end of each 3-hour block is used for the whole block. The 850–700 mb "thickness" method here is the published CMC/Murphy relation (the
+  National Blend of Models' own thickness mapping is not published in the sources I could find), and it only *lowers* the ratio in
+  marginal, warm-layer snow.
 * **No Cobb SLR.** It needs omega on pressure levels, which the RRFS files don't carry. `Peak upward motion` (`MAXUVV`, a column maximum)
   is a proxy for lift and cannot say *where* in the column the lift is relative to the DGZ.
 * **Max-T-aloft ratio is experimental.** The polynomial was fitted to Alaska observations and is untested for New England;

@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from . import encode, grib, pipeline
-from .catalog import BY_KEY, GROUPS, PRODUCTS
+from .catalog import BY_KEY, GROUPS, PRODUCTS, STORE
 from .config import FILE_2D, MEMBERS, frames
 from .s3 import S3Source
 
@@ -57,6 +57,13 @@ def run_source(args) -> tuple[str, dict[str, bytes], dict]:
 
 
 # ============================================================================== main
+def _report(s: str, blobs: dict, info: dict) -> None:
+    log.info("%s done in %.0fs: %d products, %.0f MB downloaded, %d requests, missing=%s", s, info["seconds"],
+             len(blobs), info["bytes"] / 1e6, info["requests"], info.get("missing") or "-")
+    for k, h in sorted((info.get("hints") or {}).items()):          # what the files really contain for fields that were not found
+        log.warning("%s: field not found %s -> %s", s, k, h)
+
+
 def deployed_cycle(url: str) -> str | None:
     """Cycle shown by the live site (its data.json), or None when it cannot be read - then we simply build."""
     import urllib.request
@@ -139,16 +146,16 @@ def main(argv=None) -> int:
         for j in jobs:
             s, blobs, info = run_source(j)
             results[s] = (blobs, info)
+            _report(s, blobs, info)
     else:
         with ProcessPoolExecutor(args.workers, mp_context=mp.get_context("spawn")) as pool:
             for s, blobs, info in pool.map(run_source, jobs):
                 results[s] = (blobs, info)
-                log.info("%s done in %.0fs: %d products, %.0f MB downloaded, %d requests, missing=%s", s, info["seconds"],
-                         len(blobs), info["bytes"] / 1e6, info["requests"], info.get("missing") or "-")
+                _report(s, blobs, info)
 
     # ---------------------------------------------------------------- write data files + manifest
     total = 0
-    avail: dict[str, dict[str, bool]] = {p.key: {} for p in PRODUCTS}
+    avail: dict[str, dict[str, bool]] = {p.key: {} for p in STORE}
     for s, (blobs, info) in results.items():
         for key, blob in blobs.items():
             (out / "data" / f"{key}.{s}.bin").write_bytes(blob)
@@ -172,6 +179,8 @@ def main(argv=None) -> int:
             "desc": p.desc, "decimals": p.decimals, "dtype": p.dtype, "lo": p.lo, "step": p.step, "refs": p.refs,
             "levels": p.style.levels, "colors": p.style.colors, "ticks": p.style.ticks, "equal": p.style.equal_width,
             "thr": list(p.thr), "thr_dir": p.thr_dir, "available": avail[p.key],
+            "has1h": p.has1h, "step1h": (p.step1h or p.step) if p.has1h else None,
+            "available_1h": avail.get(p.key + "_1h", {}) if p.has1h else {},
         } for p in PRODUCTS],
         "stats": {"data_bytes": total, "overlay_bytes": overlay_bytes,
                   "downloaded_bytes": {s: results[s][1]["bytes"] for s in results},

@@ -1,13 +1,13 @@
 import numpy as np
 
 from rrfs_viewer import encode
-from rrfs_viewer.catalog import BY_KEY, GROUPS, PRODUCTS
+from rrfs_viewer.catalog import BY_KEY, GROUPS, ONE_HOUR, PRODUCTS, STORE
 
 
 def test_roundtrip_all_products():
     rng = np.random.default_rng(1)
     shape = (3, 40, 50)
-    for p in PRODUCTS:
+    for p in STORE:
         hi = p.lo + p.step * (250 if p.dtype == "u8" else 60000)
         a = np.cumsum(rng.random(shape), axis=2).astype(np.float32)
         a = p.lo + (a / a.max()) * (hi - p.lo) * 0.9
@@ -41,6 +41,15 @@ def test_catalog_is_consistent():
         # the legend range must be representable in the stored range
         top = p.lo + p.step * (254 if p.dtype == "u8" else 65534)
         assert s.levels[0] >= p.lo - 1e-9 and s.levels[-1] <= top + 1e-9, p.key
+
+
+def test_one_hour_variants():
+    assert {p.key for p in ONE_HOUR} == {p.key + "_1h" for p in PRODUCTS if p.has1h}
+    assert {"qpf", "snow_model", "snow_12", "snow_kuchera", "snow_maxt", "snow_thick", "snow_mean"} == {p.key for p in PRODUCTS if p.has1h}
+    for p in ONE_HOUR:
+        assert p.dtype == "u16" and p.step <= BY_KEY[p.key[:-3]].step
+        assert p.style is BY_KEY[p.key[:-3]].style
+    assert "snow_10" not in BY_KEY and "slr_12" in BY_KEY
 
 
 def test_mask_pack():

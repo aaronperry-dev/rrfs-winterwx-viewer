@@ -185,15 +185,16 @@ async function inflate(url) {
   if (!r.ok) throw new Error(url + " " + r.status);
   return new Uint8Array(await new Response(r.body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
 }
-function load(p, src) {
-  if (!p.available[src]) return Promise.resolve(null);
-  const key = `${p.key}.${src}`;
+function load(p, src, one) {                                // one: the stored 1-hour accumulation series of a product
+  const av = one ? p.available_1h : p.available;
+  if (!av || !av[src]) return Promise.resolve(null);
+  const key = `${p.key}${one ? "_1h" : ""}.${src}`, pe = one ? { ...p, step: p.step1h } : p;
   if (!store.has(key)) store.set(key, inflate(`data/${key}.bin?v=${D.version}`).then(raw => {
     const { nx, ny } = D.grid, nf = D.frames.length, n = nf * nx * ny;
-    if (p.dtype === "u16") {
+    if (pe.dtype === "u16") {
       const u = new Uint16Array(n);
       for (let i = 0; i < n; i++) u[i] = (raw[i] << 8) | raw[n + i];
-      return { u, p };
+      return { u, p: pe };
     }
     // undo 2-D delta (mod 256): cumulative sum down the rows, then along the columns
     const u = raw.subarray(0, n).slice();
@@ -202,30 +203,42 @@ function load(p, src) {
       for (let y = 1; y < ny; y++) for (let x = 0; x < nx; x++) u[o + y * nx + x] += u[o + (y - 1) * nx + x];
       for (let y = 0; y < ny; y++) for (let x = 1; x < nx; x++) u[o + y * nx + x] += u[o + y * nx + x - 1];
     }
-    return { u, p };
+    return { u, p: pe };
   }));
   return store.get(key);
 }
-function evictOthers() { for (const k of [...store.keys()]) if (!k.startsWith(state.product + ".")) store.delete(k); }
+function evictOthers() { for (const k of [...store.keys()]) if (!k.startsWith(state.product + ".") && !k.startsWith(state.product + "_1h.")) store.delete(k); }
 
 function frameField(d, fi) {                                // dequantised Float32Array of one frame
   const { nx, ny } = D.grid, n = nx * ny, p = d.p, top = p.dtype === "u8" ? 255 : 65535, o = fi * n, out = new Float32Array(n);
   for (let i = 0; i < n; i++) { const q = d.u[o + i]; out[i] = q === top ? NaN : p.lo + p.step * q; }
   return out;
 }
-function sourceField(d, fi, win) {                          // one source, windowed for accumulations
-  const a = frameField(d, fi), p = d.p;
-  if (p.kind !== "cum" || !win) return a;
+const WINDOWS = [1, 3, 6, 12, 24, 0];                         // hours; 0 = run total
+async function srcField(p, src, fi, win) {                  // one source, honouring the accumulation window; null = no data
+  const cum = p.kind === "cum";
+  if (cum && win === 1) { const d1 = await load(p, src, true); return d1 ? frameField(d1, fi) : null; }
+  const d = await load(p, src);
+  if (!d) return null;
+  const a = frameField(d, fi);
+  if (!cum || !win) return a;
   const bi = fi - win / D.frame_step;
-  if (bi < 0) return a;                                     // window reaches back before initialisation: run total
+  if (bi < 0) return a;                                     // window reaches back before initialisation: run total so far
   const b = frameField(d, bi);
   for (let i = 0; i < a.length; i++) { const v = a[i] - b[i]; a[i] = v < 0.0005 ? 0 : v; }
   return a;
 }
+const finite = v => { for (let i = 0; i < v.length; i += 7) if (v[i] === v[i]) return true; return false; };
+const THR_SHORT = { qpf: { 1: [0.05, 0.1, 0.25, 0.5, 1], 3: [0.1, 0.25, 0.5, 1, 2], 6: [0.25, 0.5, 1, 2, 3] },
+                    snow: { 1: [0.5, 1, 2, 3, 4], 3: [1, 2, 4, 6, 8], 6: [1, 3, 6, 12, 18] } };
+function thrList(p) {
+  if (p.kind !== "cum" || !p.has1h || !state.win || state.win > 6) return p.thr;
+  return (THR_SHORT[p.key === "qpf" ? "qpf" : "snow"][state.win]) || p.thr;
+}
 
 // ---------------------------------------------------------------- ensemble reductions
 function activeMembers() { return D.members.filter(m => state.on[m]); }
-function thrOf(p) { return state.thr != null && p.thr.includes(state.thr) ? state.thr : p.thr[0]; }
+function thrOf(p) { const l = thrList(p); return state.thr != null && l.includes(state.thr) ? state.thr : l[Math.min(1, l.length - 1)]; }
 function reduce(arrs, mode, thr, dir) {
   const n = D.grid.nx * D.grid.ny, out = new Float32Array(n), m = arrs.length;
   for (let i = 0; i < n; i++) {
@@ -241,26 +254,23 @@ function reduce(arrs, mode, thr, dir) {
   }
   return out;
 }
-async function viewField(mode, fi = state.frame) {           // -> { values, style, unit, label } or { error }
-  const p = prod(), win = p.kind === "cum" ? state.win : 0;
-  if (mode === "refs") {
-    const d = await load(p, "refs");
-    return d ? { values: sourceField(d, fi, win), style: p, unit: p.unit, dec: p.decimals } : { error: "The official REFS mean file does not carry this field - use the member mean." };
-  }
-  if (mode.startsWith("m0")) {
-    const d = await load(p, mode);
-    return d ? { values: sourceField(d, fi, win), style: p, unit: p.unit, dec: p.decimals } : { error: `${mode} has no data for this field.` };
+async function viewField(mode, fi = state.frame) {           // -> { values, style, unit, dec } or { error }
+  const p = prod(), win = p.kind === "cum" ? state.win : 0, plain = { style: p, unit: p.unit, dec: p.decimals };
+  const none = "No data for this field at this time (the source file does not provide it).";
+  if (mode === "refs" || mode.startsWith("m0")) {
+    const values = await srcField(p, mode, fi, win);
+    if (!values) return { error: mode === "refs" ? "The official REFS mean file does not carry this field - use the member mean." : `${mode} has no data for this field.` };
+    return finite(values) ? { values, ...plain } : { error: none };
   }
   const mem = activeMembers();
   if (!mem.length) return { error: "All members are switched off - turn at least one on." };
-  const ds = (await Promise.all(mem.map(m => load(p, m)))).filter(Boolean);
-  if (!ds.length) return { error: "No member data for this field." };
-  const arrs = ds.map(d => sourceField(d, fi, win));
-  const thr = thrOf(p);
-  const values = reduce(arrs, mode, thr, p.thr_dir);
+  const arrs = (await Promise.all(mem.map(m => srcField(p, m, fi, win)))).filter(Boolean);
+  if (!arrs.length) return { error: "No member data for this field." };
+  const thr = thrOf(p), values = reduce(arrs, mode, thr, p.thr_dir);
+  if (!finite(values)) return { error: none };
   if (mode === "prob") return { values, style: PROB, unit: "%", dec: 0, thr };
   if (mode === "spread") return { values, style: spreadStyle(p), unit: p.unit, dec: Math.max(p.decimals, 1) };
-  return { values, style: p, unit: p.unit, dec: p.decimals };
+  return { values, ...plain };
 }
 
 const PROB = { levels: [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95], ticks: [10, 30, 50, 70, 90],
@@ -363,7 +373,11 @@ async function render() {
   const msg = $("#msg"), notice = $("#notice");
   notice.hidden = true;
   let mode = state.mode;
-  if (mode === "refs" && !p.available.refs) { mode = "mean"; notice.hidden = false; notice.textContent = "The official REFS mean file does not carry this field, so the member mean is shown."; }
+  const notes = [];
+  if (mode === "refs" && !p.available.refs) { mode = "mean"; notes.push("The official REFS mean file does not carry this field, so the member mean is shown."); }
+  if (p.kind === "cum" && state.win === 1) notes.push("1-hour accumulation in the hour ending at the valid time; the maps step every 3 hours.");
+  else if (p.kind === "cum" && state.win > 1 && state.frame - state.win / D.frame_step < 0) notes.push(`The ${state.win}-hour window starts before the run began, so the run total so far is shown.`);
+  if (notes.length) { notice.hidden = false; notice.textContent = notes.join(" "); }
   if (state.layout === "stamps") return renderStamps(token, p);
   msg.hidden = false; msg.textContent = "Loading…";
   let v;
@@ -425,8 +439,8 @@ async function chart() {
   if (!state.point) { ctx.fillStyle = muted; ctx.font = "26px system-ui"; ctx.textAlign = "center"; ctx.fillText("Click the map for a point forecast", W / 2, H / 2); return; }
   const { r, c } = state.point, { nx } = D.grid, idx = r * nx + c, nf = D.frames.length;
   const series = [];
-  for (const [i, m] of D.members.entries()) { const d = await load(p, m); if (!d) continue; series.push({ m, col: MCOL[i], on: !!state.on[m], y: D.frames.map((_, f) => frameField1(d, f, idx)) }); }
-  const refs = await load(p, "refs"), ry = refs ? D.frames.map((_, f) => frameField1(refs, f, idx)) : null;
+  for (const [i, m] of D.members.entries()) { const y = await pointSeries(p, m, idx); if (y) series.push({ m, col: MCOL[i], on: !!state.on[m], y }); }
+  const ry = await pointSeries(p, "refs", idx);
   const act = series.filter(s => s.on), mean = act.length ? D.frames.map((_, f) => { let s = 0, k = 0; for (const a of act) { const v = a.y[f]; if (v === v) { s += v; k++; } } return k ? s / k : NaN; }) : null;
   const all = [...series.flatMap(s => s.y), ...(ry || []), ...(mean || [])].filter(v => v === v);
   if (!all.length) { ctx.fillStyle = muted; ctx.font = "26px system-ui"; ctx.textAlign = "center"; ctx.fillText("No data at this point", W / 2, H / 2); return; }
@@ -446,9 +460,19 @@ async function chart() {
   if (mean) line(mean, ink, 6);
   ctx.strokeStyle = muted; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(X(state.frame), T); ctx.lineTo(X(state.frame), H - B); ctx.stroke();
   const st = D.stations.length ? nearestStation(r, c) : null;
-  $("#pt-name").textContent = `· ${p.title} (${p.unit}) ${st ? "near " + st : ""}`;
+  $("#pt-name").textContent = `· ${p.kind === "cum" && state.win ? state.win + "-hr " : ""}${p.title} (${p.unit}) ${st ? "near " + st : ""}`;
   $("#chart-legend").innerHTML = series.map(s => `<span><i style="border-color:${s.on ? s.col : grid}"></i>${s.m}</span>`).join("") +
     (mean ? `<span><i style="border-color:${ink};border-top-width:3px"></i>member mean</span>` : "") + (ry ? `<span><i style="border-color:${ink};border-top-style:dashed"></i>REFS mean</span>` : "");
+}
+async function pointSeries(p, src, idx) {                  // value at one grid cell for every frame, honouring the window
+  const win = p.kind === "cum" ? state.win : 0;
+  if (win === 1) { const d1 = await load(p, src, true); return d1 ? D.frames.map((_, f) => frameField1(d1, f, idx)) : null; }
+  const d = await load(p, src);
+  if (!d) return null;
+  const tot = D.frames.map((_, f) => frameField1(d, f, idx));
+  if (!win) return tot;
+  const k = win / D.frame_step;
+  return tot.map((v, f) => f - k < 0 ? v : Math.max(0, v - tot[f - k]));
 }
 function frameField1(d, f, idx) { const n = D.grid.nx * D.grid.ny, q = d.u[f * n + idx], top = d.p.dtype === "u8" ? 255 : 65535; return q === top ? NaN : d.p.lo + d.p.step * q; }
 function niceStep(x) { const e = Math.pow(10, Math.floor(Math.log10(x))), f = x / e; return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * e; }
@@ -460,11 +484,12 @@ function controls() {
   seg($("#seg-group"), groups.map(g => ({ value: g, label: g })), p.group, g => { const q = D.products.find(x => x.group === g); set({ product: q.key }); });
   seg($("#seg-product"), D.products.filter(x => x.group === p.group).map(x => ({ value: x.key, label: x.label, title: x.desc })), p.key, k => set({ product: k }));
   $("#g-window").hidden = p.kind !== "cum";
-  seg($("#seg-window"), [0, 3, 6, 12, 24].map(w => ({ value: w, label: w ? `${w} h` : "Run total" })), state.win, w => set({ win: w }));
+  seg($("#seg-window"), WINDOWS.map(w => ({ value: w, label: w ? `${w} h` : "Run total", disabled: w === 1 && !p.has1h,
+      title: w === 1 ? "Accumulation in the hour ending at the valid time" : undefined })), state.win, w => set({ win: w }));
   seg($("#seg-mode"), MODES.map(([k, l]) => ({ value: k, label: l, disabled: k === "refs" && !p.available.refs })),
       state.mode.startsWith("m0") ? null : state.mode, m => set({ mode: m }));
   $("#g-thr").hidden = state.mode !== "prob";
-  seg($("#seg-thr"), p.thr.map(t => ({ value: t, label: `${p.thr_dir === "le" ? "≤" : "≥"} ${t} ${p.unit}` })), thrOf(p), t => set({ thr: t }));
+  seg($("#seg-thr"), thrList(p).map(t => ({ value: t, label: `${p.thr_dir === "le" ? "≤" : "≥"} ${t} ${p.unit}` })), thrOf(p), t => set({ thr: t }));
   seg($("#seg-members"), D.members.map(m => ({ value: m, label: m, on: state.on[m], disabled: !p.available[m] })), null, m => set({ on: { ...state.on, [m]: !state.on[m] } }), true);
   seg($("#seg-single"), D.members.map(m => ({ value: m, label: m, disabled: !p.available[m] })), state.mode, m => set({ mode: m }));
   seg($("#seg-layout"), [{ value: "map", label: "Map" }, { value: "stamps", label: "All members" }], state.layout, l => set({ layout: l }));
@@ -482,7 +507,7 @@ function readHash() {
   if (D.products.some(p => p.key === pk)) state.product = pk;
   if (mode && (MODES.some(m => m[0] === mode) || D.members.includes(mode))) state.mode = mode;
   if (f !== undefined && f !== "" && +f >= 0 && +f < D.frames.length) state.frame = +f;
-  if ([0, 3, 6, 12, 24].includes(+w) && w !== undefined && w !== "") state.win = +w;
+  if (WINDOWS.includes(+w) && w !== undefined && w !== "") state.win = +w;
   if (layout === "stamps") state.layout = "stamps";
 }
 const writeHash = () => history.replaceState(null, "", `#${state.product}/${state.mode}/${state.frame}/${state.win}/${state.layout}`);

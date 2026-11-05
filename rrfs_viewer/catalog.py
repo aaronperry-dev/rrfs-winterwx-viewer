@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from . import colors as C
 
@@ -32,6 +32,8 @@ class Product:
     thr: tuple[float, ...] = ()
     thr_dir: str = "ge"
     title: str = ""             # map title (defaults to label)
+    has1h: bool = False         # also stored as a separate "1-hour accumulation ending at the valid time" field (key + "_1h")
+    step1h: float = 0.0         # quantisation step of that 1-hour field (0 = same as ``step``)
 
     @property
     def map_title(self) -> str:
@@ -39,31 +41,53 @@ class Product:
 
 
 _P = Product
-G_PRECIP, G_SNOW, G_MIX, G_DGZ, G_WIND, G_TEMP = "Precipitation", "Snowfall", "Ice & p-type", "Snow growth (DGZ)", "Wind & blizzard", "Temperature"
+G_PRECIP, G_SNOW, G_SLR, G_MIX, G_DGZ, G_WIND, G_TEMP = ("Precipitation", "Snowfall", "Snow ratio (SLR)", "Ice & p-type", "Snow growth (DGZ)",
+                                                          "Wind & blizzard", "Temperature")
 
 PRODUCTS: tuple[Product, ...] = (
     # ------------------------------------------------------------------ precipitation
     _P("qpf", "QPF", G_PRECIP, "in", "cum", C.QPF, "u16", 0.0, 0.005, 2, True,
-       "Total liquid-equivalent precipitation (all types).", (0.1, 0.25, 0.5, 1, 2), "ge", "Liquid Precipitation (QPF)"),
-    # ------------------------------------------------------------------ snowfall, four ratio methods
+       "Liquid-equivalent precipitation, all types. Choose a 1, 3, 6, 12 or 24 hour window or the run total.",
+       (0.1, 0.25, 0.5, 1, 2), "ge", "Liquid Precipitation (QPF)", has1h=True),
+    # ------------------------------------------------------------------ snowfall: model + five ratio methods + their mean
     _P("snow_model", "Model snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, True,
        "RRFS physical snow accumulation (variable snow-liquid ratio; snow + sleet). The model's own answer, not a post-processed ratio.",
-       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - RRFS model (ASNOW)"),
-    _P("snow_10", "10:1 snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, True,
-       "Snow-type liquid equivalent x 10. Members: hourly QPF x snow flag; REFS mean: its WEASD field.",
-       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - fixed 10:1"),
+       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - RRFS model (ASNOW)", has1h=True, step1h=0.02),
+    _P("snow_12", "12:1 snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, True,
+       "Snow-type liquid equivalent x 12, a ratio closer to New England climatology than 10:1. Members: hourly QPF x snow flag; "
+       "REFS mean: its WEASD field.",
+       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - fixed 12:1", has1h=True, step1h=0.02),
     _P("snow_kuchera", "Kuchera snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
-       "Snow-type liquid equivalent x Kuchera ratio (12 + 2/1 x (271.16 K - warmest temperature, surface to 500 hPa)).",
-       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - Kuchera ratio"),
+       "Snow-type liquid equivalent x Kuchera ratio (12 + 2 x (271.16 K - warmest temperature from the surface to 500 hPa) when that "
+       "temperature is above 271.16 K, 12 + (271.16 K - T) otherwise).",
+       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - Kuchera ratio", has1h=True, step1h=0.02),
     _P("snow_maxt", "Max-T-aloft snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
-       "Snow-type liquid equivalent x max-temperature-aloft polynomial ratio (Veals et al. 2025; max T from ~610 m AGL to 500 hPa).",
-       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - max-T-aloft ratio"),
-    _P("slr_kuchera", "Kuchera ratio", G_SNOW, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
+       "Snow-type liquid equivalent x max-temperature-aloft polynomial ratio (Veals et al. 2025; max T from ~610 m AGL to 500 hPa). "
+       "Experimental: fitted to Alaska data.",
+       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - max-T-aloft ratio", has1h=True, step1h=0.02),
+    _P("snow_thick", "Thickness snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
+       "Snow-type liquid equivalent x the CMC thickness ratio: 10:1, reduced by the Murphy (Ontario) relation "
+       "10 x (30.6 - 0.1057 x Z1000-700 [dam]) wherever the 850-700 hPa thickness exceeds 1540 m (marginal, wet snow).",
+       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - 850-700 mb thickness ratio", has1h=True, step1h=0.02),
+    _P("snow_mean", "Multi-method mean", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
+       "Average of the five snowfall estimates above (model, 12:1, Kuchera, max-T-aloft, thickness): the middle of the method spread.",
+       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - mean of methods", has1h=True, step1h=0.02),
+    # ------------------------------------------------------------------ snow-to-liquid ratios
+    _P("slr_12", "12:1 ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
+       "The fixed 12:1 ratio (a constant field, shown for comparison with the others).", (10, 12, 15, 20), "ge", "Snow-to-Liquid Ratio - fixed 12:1"),
+    _P("slr_kuchera", "Kuchera ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
        "Kuchera snow-to-liquid ratio from the warmest temperature between the surface and 500 hPa (clipped 3:1 - 40:1).",
        (10, 12, 15, 20), "ge", "Snow-to-Liquid Ratio - Kuchera"),
-    _P("slr_maxt", "Max-T-aloft ratio", G_SNOW, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
+    _P("slr_maxt", "Max-T-aloft ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
        "Snow-to-liquid ratio from the max-temperature-aloft polynomial (clipped 3:1 - 40:1).",
        (10, 12, 15, 20), "ge", "Snow-to-Liquid Ratio - max T aloft"),
+    _P("slr_thick", "Thickness ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
+       "CMC thickness ratio: 10:1 unless the 850-700 hPa thickness is above 1540 m, then 10 x (30.6 - 0.1057 x Z1000-700 [dam]) (min 3:1).",
+       (6, 8, 10), "le", "Snow-to-Liquid Ratio - 850-700 mb thickness"),
+    _P("slr_model", "Model-implied ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
+       "Run-total ASNOW divided by the run-total snow-type liquid (shown where at least 0.02 in of snow liquid has fallen). "
+       "The two come from different model diagnostics, so treat it as a diagnostic, not a measurement.",
+       (10, 12, 15, 20), "ge", "Model-Implied Snow-to-Liquid Ratio"),
     # ------------------------------------------------------------------ ice and precipitation type
     _P("frzr", "Freezing rain", G_MIX, "in", "cum", C.ICE, "u16", 0.0, 0.0025, 2, False,
        "Liquid-equivalent freezing-rain accumulation (hourly QPF x freezing-rain flag). Flat-surface liquid, not radial ice.",
@@ -113,5 +137,9 @@ PRODUCTS: tuple[Product, ...] = (
     _P("windchill", "Wind chill", G_TEMP, "°F", "inst", C.wind_chill_style(), "u8", -70.0, 0.75, 0, True,
        "NWS wind chill (T <= 50 F and wind > 3 mph), otherwise the air temperature.", (0, -10, -20, -30), "le", "Wind Chill"),
 )
-BY_KEY = {p.key: p for p in PRODUCTS}
+# Stored series: every product, plus the 1-hour variant of those that have one (the browser derives 3/6/12/24-h windows from totals).
+ONE_HOUR = tuple(replace(p, key=p.key + "_1h", label=p.label + " (1 h)", has1h=False, step1h=0.0, kind="inst",
+                         step=p.step1h or p.step) for p in PRODUCTS if p.has1h)
+STORE = PRODUCTS + ONE_HOUR
+BY_KEY = {p.key: p for p in STORE}
 GROUPS = tuple(dict.fromkeys(p.group for p in PRODUCTS))

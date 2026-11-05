@@ -6,6 +6,8 @@ Sources
   ``12 + (271.16 - Tmax)`` otherwise, Tmax = warmest temperature from the surface to 500 hPa.
 * Max-T-aloft SLR (Veals et al. 2025, eq. 1, fitted to Alaska data): 5th-degree polynomial in Tmax (degC), Tmax = maximum
   temperature between 610 m AGL (~ps-70 hPa here) and 400 hPa (we have 500 hPa as the top level).
+* Thickness ratio (CMC operational snow-depth guidance, "Murphy factor"): ``10 x (-0.1057 x Z1000-700[dam] + 30.6)`` replaces the
+  standard 10:1 when the 850-700 hPa thickness is above 154 dam (https://meteocentre.com/numerical-weather-prediction/cmc-map/sigwx-winter/tsh_e_doc.html).
 * Dendritic growth zone (DGZ): the layer between the -12 and -18 degC isotherms (Cobb & Waldstreicher 2005; NWS TA-1604).
 * NWS wind chill: https://www.weather.gov/safety/cold-wind-chill-chart
 * NWS blizzard criteria: sustained wind or frequent gusts >= 35 mph, falling/blowing snow reducing visibility to
@@ -65,6 +67,34 @@ def warm_nose_c(t_k, levels, ps_hpa, p_lo=700, p_hi=925):
     t = np.where(ok, t_k, np.nan)
     with np.errstate(all="ignore"):
         return (np.nanmax(t, axis=0) - 273.15).astype(np.float32)
+
+
+# --------------------------------------------------------------------------- layer thickness and the CMC thickness ratio
+RD_OVER_G = 287.04 / 9.80665                    # m K-1
+
+
+def layer_thickness_m(t_k, levels, p_bot, p_top):
+    """Hypsometric thickness (m) between two of the pressure ``levels`` (descending hPa) from layer temperatures.
+
+    Dry-air approximation (virtual temperature ignored, a few metres low); used only when height fields are not available.
+    Levels below ground are *not* masked, as for any standard-level thickness chart.
+    """
+    p = [float(x) for x in levels]
+    idx = [i for i, x in enumerate(p) if p_top <= x <= p_bot]
+    dz = np.zeros(np.shape(t_k)[1:], np.float64)
+    for i, j in zip(idx[:-1], idx[1:]):
+        dz += 0.5 * (np.asarray(t_k[i], np.float64) + t_k[j]) * np.log(p[i] / p[j])
+    return (RD_OVER_G * dz).astype(np.float32)
+
+
+CMC_CRITICAL_850_700_M = 1540.0
+
+
+def slr_thickness_cmc(dz_1000_700_m, dz_850_700_m):
+    """10:1 normally; the Murphy relation (a ratio below 10) where the 850-700 hPa thickness exceeds 1540 m."""
+    murphy = 10.0 * (-0.1057 * (np.asarray(dz_1000_700_m, np.float64) / 10.0) + 30.6)
+    slr = np.where(np.asarray(dz_850_700_m, np.float64) > CMC_CRITICAL_850_700_M, np.minimum(murphy, 10.0), 10.0)
+    return np.clip(slr, SLR_MIN, SLR_MAX).astype(np.float32)
 
 
 # --------------------------------------------------------------------------- humidity over ice, DGZ

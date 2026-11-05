@@ -2,7 +2,7 @@
 
 * OKLab-interpolated, fixed physical levels (a colour always means the same value, in every frame and for every member).
 * Wind / gust, wind chill and temperature use the same palettes as the RTMA dashboard (NWS legends / classic -40..120 F ramp).
-* Snowfall, QPF, ice, sleet, probabilities, visibility, SLR, DGZ, warm nose, lift and blizzard ramps are new, in the same spirit.
+* QPF and snowfall use the NWS Gray/Portland legends (sampled from the NWS maps); ice, sleet, probabilities, visibility, SLR, DGZ, warm nose, lift and blizzard ramps are new, in the same spirit.
 """
 from __future__ import annotations
 
@@ -116,14 +116,19 @@ def ramp_style(anchors, levels, under=None, over="same", ticks=None, equal_width
 
 
 # --------------------------------------------------------------------------- winter ramps
-SNOW = ramp_style(
-    [(0.1, "#dcedfb"), (2, "#78b8ee"), (4, "#2b78d6"), (8, "#2f45b0"), (12, "#6a2fa6"), (18, "#a82ca3"),
-     (24, "#d6357f"), (36, "#f08a5d"), (48, "#ffd27a"), (60, "#fff3d0")],
-    [0.1, 1, 2, 3, 4, 6, 8, 10, 12, 15, 18, 24, 30, 36, 48, 60])
-QPF = ramp_style(
-    [(0.01, "#d4f0c8"), (0.1, "#7fd18b"), (0.5, "#2fa36a"), (1, "#1f8f9a"), (2, "#2a62c0"), (3, "#5b3fb5"),
-     (4, "#9b2fa3"), (6, "#d8438f")],
-    [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6])
+# QPF: NWS "24-Hour Observed Precipitation" legend (sampled from the NWS Gray/Portland map).  Bins 0.01-0.09, 0.10-0.24,
+# 0.25-0.49, 0.50-0.99, 1.00-1.49, 1.50-1.99, 2.00-2.99, 3.00-3.99, 4.00-5.99, 6.00-7.99, 8.00-9.99, 10.00-14.99, 15.00+.
+_QPF_LEVELS = [0.01, 0.10, 0.25, 0.50, 1.00, 1.50, 2.00, 3.00, 4.00, 6.00, 8.00, 10.00, 15.00]
+_QPF_COLORS = ["#c7e9c0", "#a1d99b", "#74c476", "#31a353", "#006d2c", "#fffa8a", "#ffcc4f", "#fe8d3c", "#fc4e2a",
+               "#d61a1c", "#ad0026", "#700026", "#3b0030"]
+QPF = Style(list(_QPF_LEVELS), [None, *_QPF_COLORS], list(_QPF_LEVELS), True)
+
+# Snowfall: NWS "Total Snow Forecast" legend.  Bins <1 (> trace), 1-2, 2-3, 3-4, 4-6, 6-8, 8-12, 12-18, 18-24, 24-30, 30-36, 36+.
+_SNOW_LEVELS = [0.1, 1, 2, 3, 4, 6, 8, 12, 18, 24, 30, 36]
+_SNOW_COLORS = ["#bdd7e7", "#6baed6", "#3182bd", "#08519c", "#082694", "#ffff96", "#ffc400", "#ff8700", "#db1400",
+                "#9e0000", "#690000", "#360000"]
+SNOW = Style(list(_SNOW_LEVELS), [None, *_SNOW_COLORS], list(_SNOW_LEVELS), True)
+
 ICE = ramp_style([(0.01, "#ffd1ec"), (0.1, "#ff7ac8"), (0.25, "#e0309f"), (0.5, "#9a1f9a"), (1, "#4b1a6e")],
                  [0.01, 0.05, 0.1, 0.15, 0.25, 0.5, 0.75, 1])
 SLEET = ramp_style([(0.01, "#ffe9c2"), (0.1, "#ffb347"), (0.25, "#f07a1a"), (0.5, "#c14a00"), (1, "#7a2b00")],

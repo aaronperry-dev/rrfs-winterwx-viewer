@@ -102,3 +102,21 @@ def test_blizzard_clock_three_hour_rule():
 def test_precip_fractions_priority():
     sn, ip, zr = W.precip_fractions(a(1, 1, 1, np.nan), a(0, 1, 1, 0), a(0, 0, 1, 0))
     assert list(sn) == [1, 0, 0, 0] and list(ip) == [0, 1, 0, 0] and list(zr) == [0, 0, 1, 0]
+
+
+def test_layer_thickness_hypsometric():
+    levels = [1000, 975, 950, 925, 900, 850, 800, 750, 700, 600, 500]
+    t = np.full((len(levels), 1, 1), 273.15, np.float32)                         # isothermal 0 C column
+    dz = W.layer_thickness_m(t, levels, 850, 700)[0, 0]
+    assert dz == pytest.approx(29.2706 * 273.15 * np.log(850 / 700), rel=1e-4)    # ~1552 m
+    assert W.layer_thickness_m(t, levels, 1000, 700)[0, 0] > dz
+    assert 1540 < dz < 1560                                                      # the 1540 m rain/snow line is a ~0 C layer mean
+
+
+def test_cmc_thickness_ratio():
+    # cold: 10:1 whatever Z1000-700 is
+    assert W.slr_thickness_cmc(a(2800.0), a(1500.0))[0] == pytest.approx(10.0)
+    # warm 850-700: Murphy relation 10 * (30.6 - 0.1057 * dam); 2840 m -> 5.8:1, floor 3:1
+    assert W.slr_thickness_cmc(a(2840.0), a(1545.0))[0] == pytest.approx(10 * (30.6 - 0.1057 * 284.0), abs=0.01)
+    assert W.slr_thickness_cmc(a(2900.0), a(1560.0))[0] == 3.0
+    assert W.slr_thickness_cmc(a(2700.0), a(1545.0))[0] == 10.0                  # never above 10:1

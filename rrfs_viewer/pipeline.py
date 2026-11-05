@@ -3,8 +3,12 @@
 Per member and 3-hour block the pipeline downloads only the GRIB2 messages it needs:
 
 * hourly (3 per block): 1-h QPF and the rain / snow / sleet / freezing-rain flags  -> exact precipitation-type accounting,
-* at the block end: run-total ASNOW, 2 m T, 10 m wind, gust, visibility, surface pressure, max upward motion,
-  and 11 pressure levels of temperature + 8 of relative humidity (Kuchera, max-T-aloft, DGZ, warm nose).
+* at the block end: run-total and 1-h ASNOW, 2 m T, 10 m wind, gust, visibility, surface pressure, max upward motion,
+  1000/850/700 hPa heights, and 11 pressure levels of temperature + 8 of relative humidity (Kuchera, max-T-aloft, thickness,
+  DGZ, warm nose).
+
+Accumulation windows are discovered from each file's .idx (``Acc``), so a file that carries 1-hour windows, run totals or
+3-hour windows is handled without configuration.
 
 The REFS mean file is small (no profiles, no gust), so only its published fields are fetched.
 """
@@ -19,6 +23,7 @@ from datetime import datetime, timedelta
 import numpy as np
 
 from . import grib, winter
+from .catalog import STORE
 from .config import FILE_2D, FILE_PRS, MEMBERS, RH_LEVELS, T_LEVELS, frames
 from .s3 import S3Source
 
@@ -34,12 +39,21 @@ class Fetcher:
     def __init__(self, src: S3Source, cycle: datetime, source: str, regrid: grib.Regrid, threads: int = 16):
         self.src, self.cycle, self.source, self.rg, self.threads = src, cycle, source, regrid, threads
         self.missing: dict[str, int] = {}
+        self.hints: dict[str, dict] = {}            # what the file *does* contain, for fields that were not found
 
     def _one(self, r: Req) -> bytes | None:
         loc = self.src.locate(r.kind, self.source, self.cycle, r.fhr)
         if loc is None:
+            self.hints.setdefault(f"file:f{r.fhr:03d}", {"problem": "no .idx / file"})
             return None
-        return self.src.fetch_message(loc, r.var, r.level, r.info)
+        data = self.src.fetch_message(loc, r.var, r.level, r.info)
+        if data is None:
+            same_var = [e for e in loc.entries if e.var == r.var]
+            self.hints.setdefault(f"{r.var}:{r.level}", {
+                "wanted": r.info, "fhr": r.fhr,
+                "infos_at_level": sorted({e.info for e in same_var if e.level == r.level})[:8],
+                "other_levels": sorted({e.level for e in same_var})[:8]})
+        return data
 
     def bulk(self, reqs: list[Req]) -> dict[Req, bytes | None]:
         reqs = list(dict.fromkeys(reqs))
@@ -58,35 +72,122 @@ class Fetcher:
         return out
 
 
-def _acc(h: int, total: bool = False) -> str:
-    return rf"^0-{h} hour acc" if total else rf"^{h - 1}-{h} hour acc"
+# ============================================================================== accumulation windows
+_WIN = re.compile(r"^(\d+)-(\d+) hour acc")
+Plan = tuple  # (list[Req], combine(list[ndarray]) -> ndarray)
+
+
+class Acc:
+    """Accumulation windows ("a-b hour acc") of one variable, read from the .idx files themselves."""
+
+    def __init__(self, src: S3Source, source: str, cycle: datetime, kind, var: str, level: str = "surface"):
+        self.src, self.source, self.cycle, self.kind, self.var, self.level = src, source, cycle, kind, var, level
+
+    def windows(self, h: int) -> set[tuple[int, int]]:
+        loc = self.src.locate(self.kind, self.source, self.cycle, h) if h >= 1 else None
+        out = set()
+        for e in (loc.entries if loc else []):
+            if e.var == self.var and e.level == self.level and (m := _WIN.match(e.info)):
+                out.add((int(m[1]), int(m[2])))
+        return out
+
+    def req(self, h: int, a: int, b: int) -> Req:
+        return Req(self.kind, h, self.var, self.level, rf"^{a}-{b} hour acc")
+
+    def inc1(self, h: int) -> Plan | None:
+        """The accumulation in hour (h-1, h]: a 1-hour window, or the difference of two run totals."""
+        w = self.windows(h)
+        if (h - 1, h) in w:
+            return [self.req(h, h - 1, h)], lambda a: a[0]
+        if h > 1 and (0, h) in w and (0, h - 1) in self.windows(h - 1):
+            return [self.req(h, 0, h), self.req(h - 1, 0, h - 1)], lambda a: np.maximum(a[0] - a[1], 0.0)
+        return None
+
+    def total(self, h: int) -> Plan | None:
+        return ([self.req(h, 0, h)], lambda a: a[0]) if (0, h) in self.windows(h) else None
+
+
+def evaluate(plan: Plan | None, A: dict) -> np.ndarray | None:
+    if plan is None:
+        return None
+    vals = [A.get(r) for r in plan[0]]
+    return None if any(v is None for v in vals) else plan[1](vals)
+
+
+class RunTotal:
+    """Run-total accumulation at each frame, from a run-total window if the file has one, otherwise by summing windows."""
+
+    def __init__(self, acc: Acc, shape):
+        self.acc, self.shape = acc, shape
+        self.run, self.covered, self.dead = np.zeros(shape, np.float32), 0, False
+
+    def plan(self, fr: int):
+        t = self.acc.total(fr)
+        if t is not None:
+            return t[0], (lambda A, t=t: evaluate(t, A))
+        if self.dead:
+            return [], lambda A: None
+        if (self.covered, fr) in self.acc.windows(fr):               # a window that starts where we stopped
+            r = self.acc.req(fr, self.covered, fr)
+            return [r], lambda A, r=r, fr=fr: self._add(A.get(r), fr)
+        plans = [self.acc.inc1(h) for h in range(self.covered + 1, fr + 1)]      # hour by hour
+        if any(p is None for p in plans):
+            self.dead = True
+            return [], lambda A: None
+        return [r for p in plans for r in p[0]], lambda A, plans=plans, fr=fr: self._add(self._sum(plans, A), fr)
+
+    @staticmethod
+    def _sum(plans, A):
+        parts = [evaluate(p, A) for p in plans]
+        return None if any(x is None for x in parts) else np.sum(parts, axis=0)
+
+    def _add(self, inc, fr):
+        if inc is None:
+            self.dead = True
+            return None
+        self.run = self.run + inc
+        self.covered = fr
+        return self.run.copy()
 
 
 # ============================================================================== ensemble members
-MEMBER_KEYS = ("qpf", "snow_model", "snow_10", "snow_kuchera", "snow_maxt", "slr_kuchera", "slr_maxt", "frzr", "sleet",
-               "psnow", "psleet", "pfrzr", "prain", "warmnose", "dgz_depth", "dgz_sat", "dgz_rhi", "uvv", "gust", "wind10",
-               "vis", "blizzard_now", "blizzard_dur", "t2", "windchill")
+MEMBER_KEYS = tuple(p.key for p in STORE)
+SNOW_METHODS = ("snow_model", "snow_12", "snow_kuchera", "snow_maxt", "snow_thick")
+Z_LEVELS = (1000, 850, 700)
 
 
-def _member_requests(f: int) -> tuple[dict, list[Req]]:
+def _method_mean(arrs: list[np.ndarray | None], min_n: int = 4) -> np.ndarray | None:
+    ref = next(a for a in arrs if a is not None)
+    st = np.stack([a if a is not None else np.full_like(ref, np.nan) for a in arrs])
+    n = np.isfinite(st).sum(axis=0)
+    mean = np.where(n > 0, np.nansum(st, axis=0) / np.maximum(n, 1), np.nan)
+    return np.where(n >= min_n, mean, np.nan).astype(np.float32)
+
+
+def _plan_member(F, k, acc_p: Acc, acc_s: Acc):
+    fr = F[k]
     R: dict = {}
-    for h in range(f - 2, f + 1):
-        R[("apcp", h)] = Req(FILE_2D, h, "APCP", "surface", _acc(h))
+    plans: dict = {}
+    for h in range(fr - 2, fr + 1):
+        plans[("apcp", h)] = acc_p.inc1(h)
         for name, var in (("sn", "CSNOW"), ("ip", "CICEP"), ("zr", "CFRZR")):
             R[(name, h)] = Req(FILE_2D, h, var, "surface", None)
-    R["asnow"] = Req(FILE_2D, f, "ASNOW", "surface", _acc(f, total=True))
-    R["t2"] = Req(FILE_2D, f, "TMP", "2 m above ground", None)
-    R["u"] = Req(FILE_2D, f, "UGRD", "10 m above ground", None)
-    R["v"] = Req(FILE_2D, f, "VGRD", "10 m above ground", None)
-    R["gust"] = Req(FILE_2D, f, "GUST", "surface", None)
-    R["vis"] = Req(FILE_2D, f, "VIS", "surface", None)
-    R["ps"] = Req(FILE_2D, f, "PRES", "surface", None)
-    R["uvv"] = Req(FILE_2D, f, "MAXUVV", "100-1000 mb", None)
+    plans["asnow"], plans["asnow1"] = acc_s.total(fr), acc_s.inc1(fr)
+    R["t2"] = Req(FILE_2D, fr, "TMP", "2 m above ground", None)
+    R["u"] = Req(FILE_2D, fr, "UGRD", "10 m above ground", None)
+    R["v"] = Req(FILE_2D, fr, "VGRD", "10 m above ground", None)
+    R["gust"] = Req(FILE_2D, fr, "GUST", "surface", None)
+    R["vis"] = Req(FILE_2D, fr, "VIS", "surface", None)
+    R["ps"] = Req(FILE_2D, fr, "PRES", "surface", None)
+    R["uvv"] = Req(FILE_2D, fr, "MAXUVV", "100-1000 mb", None)
     for p in T_LEVELS:
-        R[("T", p)] = Req(FILE_PRS, f, "TMP", f"{p} mb", None)
+        R[("T", p)] = Req(FILE_PRS, fr, "TMP", f"{p} mb", None)
     for p in RH_LEVELS:
-        R[("RH", p)] = Req(FILE_PRS, f, "RH", f"{p} mb", None)
-    return R, list(R.values())
+        R[("RH", p)] = Req(FILE_PRS, fr, "RH", f"{p} mb", None)
+    for p in Z_LEVELS:
+        R[("Z", p)] = Req(FILE_PRS, fr, "HGT", f"{p} mb", None)
+    reqs = list(R.values()) + [r for p in plans.values() if p for r in p[0]]
+    return R, plans, reqs
 
 
 def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid, max_fhr: int,
@@ -97,22 +198,26 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
     nan = lambda: np.full((len(F), ny, nx), np.nan, np.float32)
     out = {k: nan() for k in MEMBER_KEYS}
     f = Fetcher(src, cycle, member, rg)
+    acc_p = Acc(src, member, cycle, FILE_2D, "APCP")
+    acc_s = Acc(src, member, cycle, FILE_2D, "ASNOW")
 
     z = lambda: np.zeros((ny, nx), np.float32)
     qpf, swe_sn, swe_ip, swe_zr = z(), z(), z(), z()           # mm
-    snow10, snowk, snowm = z(), z(), z()                       # inches
+    snow = {m: z() for m in SNOW_METHODS if m != "snow_model"}  # inches
     clock = winter.BlizzardClock((ny, nx), step=3)
     prev_flags = None
     broken = False                                             # a missing hourly QPF hole makes all later totals unreliable
 
-    plan = [_member_requests(fr) for fr in F]
+    def block(k):
+        R, plans, reqs = _plan_member(F, k, acc_p, acc_s)
+        return R, plans, f.bulk(reqs)
+
     pool = ThreadPoolExecutor(1)
-    nxt = pool.submit(f.bulk, plan[0][1])
+    nxt = pool.submit(block, 0)
     for k, fr in enumerate(F):
-        R, _ = plan[k]
-        blobs = nxt.result()
+        R, plans, blobs = nxt.result()
         if k + 1 < len(F):
-            nxt = pool.submit(f.bulk, plan[k + 1][1])
+            nxt = pool.submit(block, k + 1)
         A = f.decode(blobs)
         g = lambda key: A.get(R[key])
         del blobs
@@ -137,23 +242,38 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
         if g("uvv") is not None:
             out["uvv"][k] = np.clip(g("uvv"), 0, None)
 
-        slr_k = slr_m = None
+        slr = {"snow_12": np.full((ny, nx), 12.0, np.float32), "snow_kuchera": None, "snow_maxt": None, "snow_thick": None}
+        out["slr_12"][k] = slr["snow_12"]
         have_T = [g(("T", p)) for p in T_LEVELS]
-        if t2k is not None and ps_pa is not None and all(a is not None for a in have_T):
+        all_T = all(a is not None for a in have_T)
+        if t2k is not None and ps_pa is not None and all_T:
             ps = ps_pa / 100.0
             Tk = np.stack(have_T)
-            slr_k = winter.slr_kuchera(winter.tmax_column_k(t2k, Tk, T_LEVELS, ps))
-            slr_m = winter.slr_max_t_aloft(winter.tmax_aloft_c(t2k, Tk, T_LEVELS, ps))
-            out["slr_kuchera"][k], out["slr_maxt"][k] = slr_k, slr_m
+            slr["snow_kuchera"] = winter.slr_kuchera(winter.tmax_column_k(t2k, Tk, T_LEVELS, ps))
+            slr["snow_maxt"] = winter.slr_max_t_aloft(winter.tmax_aloft_c(t2k, Tk, T_LEVELS, ps))
+            out["slr_kuchera"][k], out["slr_maxt"][k] = slr["snow_kuchera"], slr["snow_maxt"]
             out["warmnose"][k] = winter.warm_nose_c(Tk, T_LEVELS, ps)
             rh = np.stack([g(("RH", p)) if p in RH_LEVELS and g(("RH", p)) is not None else np.full((ny, nx), np.nan, np.float32)
                            for p in T_LEVELS])
-            d, s, r = winter.dgz_metrics(Tk - 273.15, rh, T_LEVELS, ps)
-            out["dgz_depth"][k], out["dgz_sat"][k], out["dgz_rhi"][k] = d, s, r
+            d, s_, r_ = winter.dgz_metrics(Tk - 273.15, rh, T_LEVELS, ps)
+            out["dgz_depth"][k], out["dgz_sat"][k], out["dgz_rhi"][k] = d, s_, r_
+        # thickness ratio: model heights when present, otherwise the hypsometric equation on the temperature levels
+        Z = {p: g(("Z", p)) for p in Z_LEVELS}
+        if all(a is not None for a in Z.values()):
+            dz_1000_700, dz_850_700 = Z[700] - Z[1000], Z[700] - Z[850]
+        elif all_T:
+            Tk = np.stack(have_T)
+            dz_1000_700 = winter.layer_thickness_m(Tk, T_LEVELS, 1000, 700)
+            dz_850_700 = winter.layer_thickness_m(Tk, T_LEVELS, 850, 700)
+        else:
+            dz_1000_700 = dz_850_700 = None
+        if dz_1000_700 is not None:
+            slr["snow_thick"] = out["slr_thick"][k] = winter.slr_thickness_cmc(dz_1000_700, dz_850_700)
 
         # ---------------------------------------------------------------- hourly precipitation accounting
+        inc1 = {"qpf": None, "liq": None}
         for h in range(fr - 2, fr + 1):
-            apcp = g(("apcp", h))
+            apcp = evaluate(plans[("apcp", h)], A)
             flags = [g((n, h)) for n in ("sn", "ip", "zr")]
             if apcp is None or any(a is None for a in flags):
                 broken = True
@@ -167,21 +287,39 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
             swe_ip += mm * fr_use[1]
             swe_zr += mm * fr_use[2]
             sn_in = mm * fr_use[0] * KG_TO_IN                               # liquid equivalent of snow, inches
-            snow10 += sn_in * 10.0
-            snowk += sn_in * (slr_k if slr_k is not None else np.nan)
-            snowm += sn_in * (slr_m if slr_m is not None else np.nan)
+            for name in snow:
+                snow[name] += sn_in * (slr[name] if slr[name] is not None else np.nan)
+            if h == fr:                                                     # the last hour of the block -> the 1-hour maps
+                inc1 = {"qpf": mm * KG_TO_IN, "liq": sn_in}
 
+        asnow = evaluate(plans["asnow"], A)
+        asnow1 = evaluate(plans["asnow1"], A)
         if not broken:
             out["qpf"][k] = qpf * KG_TO_IN
             out["frzr"][k] = swe_zr * KG_TO_IN
             out["sleet"][k] = swe_ip * KG_TO_IN
-            out["snow_10"][k], out["snow_kuchera"][k], out["snow_maxt"][k] = snow10, snowk, snowm
-        if g("asnow") is not None:
-            out["snow_model"][k] = g("asnow") * IN_PER_M
+            for name in snow:
+                out[name][k] = snow[name]
+            if inc1["qpf"] is not None:
+                out["qpf_1h"][k] = inc1["qpf"]
+                for name in snow:
+                    out[name + "_1h"][k] = inc1["liq"] * (slr[name] if slr[name] is not None else np.nan)
+            liq = swe_sn * KG_TO_IN
+            if asnow is not None:
+                out["slr_model"][k] = np.where(liq >= 0.02, np.clip(asnow * IN_PER_M / np.maximum(liq, 1e-6), 0, 40), np.nan)
+        if asnow is not None:
+            out["snow_model"][k] = asnow * IN_PER_M
+        if asnow1 is not None:
+            out["snow_model_1h"][k] = asnow1 * IN_PER_M
+        if not broken:
+            out["snow_mean"][k] = _method_mean([out[m][k] if np.isfinite(out[m][k]).any() else None for m in SNOW_METHODS])
+            one = [out[m + "_1h"][k] if np.isfinite(out[m + "_1h"][k]).any() else None for m in SNOW_METHODS]
+            if any(a is not None for a in one):
+                out["snow_mean_1h"][k] = _method_mean(one)
 
         # ---------------------------------------------------------------- precipitation type at the frame time + blizzard
         fl = [g((n, fr)) for n in ("sn", "ip", "zr")]
-        ap = g(("apcp", fr))
+        ap = evaluate(plans[("apcp", fr)], A)
         if ap is not None and all(a is not None for a in fl):
             sn, ip, zr = winter.precip_fractions(*fl)
             wet = np.nan_to_num(ap, nan=0.0) >= 0.1
@@ -196,63 +334,48 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
         if progress:
             progress(member, fr)
     pool.shutdown()
-    info = {"missing": f.missing, "bytes": src.bytes_downloaded, "requests": src.requests}
+    info = {"missing": f.missing, "hints": f.hints, "bytes": src.bytes_downloaded, "requests": src.requests}
     return out, info
 
 
 # ============================================================================== REFS mean
-REFS_KEYS = ("qpf", "snow_model", "snow_10", "psnow", "psleet", "pfrzr", "prain", "wind10", "vis", "t2", "windchill")
+REFS_KEYS = ("qpf", "qpf_1h", "snow_model", "snow_model_1h", "snow_12", "snow_12_1h", "psnow", "psleet", "pfrzr", "prain",
+             "wind10", "vis", "t2", "windchill")
 
 
 def process_refs(src: S3Source, cycle: datetime, rg: grib.Regrid, max_fhr: int, progress=None):
-    """Official REFS mean (``refs.*/ensprod/refs.tCCz.mean.fFF.conus.grib2``): fields that exist in the file only.
+    """Official REFS mean (``refs.*/ensprod/refs.tCCz.mean.fFF.conus.grib2``): the fields that exist in the file only.
 
-    Accumulations use the run-total record when the file has one; otherwise the 1-h records are summed over all hours.
+    Accumulation windows are discovered from each file's index (run totals, 1-hour or longer tiling windows).
     """
     F = frames(max_fhr)
     ny, nx = rg.shape
     out = {k: np.full((len(F), ny, nx), np.nan, np.float32) for k in REFS_KEYS}
     f = Fetcher(src, cycle, "refs", rg)
-    info: dict = {"mode": {}}
+    shape = (ny, nx)
+    accs = {v: Acc(src, "refs", cycle, FILE_2D, v) for v in ("APCP", "WEASD", "ASNOW")}
+    runs = {v: RunTotal(a, shape) for v, a in accs.items()}
+    info: dict = {"mode": {v: ("total" if a.total(F[0]) else "sum") for v, a in accs.items()}}
 
-    def f2(h, var, level, inf=None):
-        return Req(FILE_2D, h, var, level, inf)            # the kind is irrelevant for "refs": one file per hour
+    def f2(h, var, level):
+        return Req(FILE_2D, h, var, level, None)
 
-    # does this file carry run totals?  (decided once, on the first frame)
-    loc0 = src.locate(FILE_2D, "refs", cycle, F[0])
-    from .s3 import find_entry
-    totals = {v: bool(loc0 and find_entry(loc0.entries, v, "surface", _acc(F[0], True))) for v in ("APCP", "WEASD")}
-    info["mode"] = {v: "total" if t else "hourly-sum" for v, t in totals.items()}
-
-    run = {"APCP": np.zeros((ny, nx), np.float32), "WEASD": np.zeros((ny, nx), np.float32)}
-    last_h = 0
     for k, fr in enumerate(F):
-        reqs = {
-            "t2": f2(fr, "TMP", "2 m above ground"), "wind": f2(fr, "WIND", "10 m above ground"),
-            "vis": f2(fr, "VIS", "surface"), "asnow": f2(fr, "ASNOW", "surface", _acc(fr, True)),
-            "sn": f2(fr, "CSNOW", "surface"), "ip": f2(fr, "CICEP", "surface"), "zr": f2(fr, "CFRZR", "surface"),
-            "rn": f2(fr, "CRAIN", "surface"),
-        }
-        for v in ("APCP", "WEASD"):
-            if totals[v]:
-                reqs[v] = f2(fr, v, "surface", _acc(fr, True))
-            else:
-                for h in range(last_h + 1, fr + 1):
-                    reqs[(v, h)] = f2(h, v, "surface", _acc(h))
-        A = f.decode(f.bulk(list(reqs.values())))
+        reqs = {"t2": f2(fr, "TMP", "2 m above ground"), "wind": f2(fr, "WIND", "10 m above ground"), "vis": f2(fr, "VIS", "surface"),
+                "sn": f2(fr, "CSNOW", "surface"), "ip": f2(fr, "CICEP", "surface"), "zr": f2(fr, "CFRZR", "surface"),
+                "rn": f2(fr, "CRAIN", "surface")}
+        tot = {v: runs[v].plan(fr) for v in runs}
+        one = {v: accs[v].inc1(fr) for v in runs}
+        allreq = list(reqs.values()) + [r for p, _ in tot.values() for r in p] + [r for p in one.values() if p for r in p[0]]
+        A = f.decode(f.bulk(allreq))
         g = lambda key: A.get(reqs[key])
-        for v in ("APCP", "WEASD"):
-            if totals[v]:
-                run[v] = g(v) if g(v) is not None else np.full((ny, nx), np.nan, np.float32)
-            else:
-                for h in range(last_h + 1, fr + 1):
-                    a = g((v, h))
-                    run[v] = run[v] + (a if a is not None else np.nan)
-        last_h = fr
-        out["qpf"][k] = run["APCP"] * KG_TO_IN
-        out["snow_10"][k] = run["WEASD"] * KG_TO_IN * 10.0
-        if g("asnow") is not None:
-            out["snow_model"][k] = g("asnow") * IN_PER_M
+        T = {v: tot[v][1](A) for v in runs}
+        I = {v: evaluate(one[v], A) for v in runs}
+        for key, v, mul in (("qpf", "APCP", KG_TO_IN), ("snow_12", "WEASD", KG_TO_IN * 12.0), ("snow_model", "ASNOW", IN_PER_M)):
+            if T[v] is not None:
+                out[key][k] = T[v] * mul
+            if I[v] is not None:
+                out[key + "_1h"][k] = I[v] * mul
         for key, name in (("sn", "psnow"), ("ip", "psleet"), ("zr", "pfrzr"), ("rn", "prain")):
             if g(key) is not None:
                 out[name][k] = np.clip(100.0 * g(key), 0, 100)
@@ -267,7 +390,7 @@ def process_refs(src: S3Source, cycle: datetime, rg: grib.Regrid, max_fhr: int, 
                 out["windchill"][k] = winter.wind_chill_f(t2f, w)
         if progress:
             progress("refs", fr)
-    info.update(missing=f.missing, bytes=src.bytes_downloaded, requests=src.requests)
+    info.update(missing=f.missing, hints=f.hints, bytes=src.bytes_downloaded, requests=src.requests)
     return out, info
 
 

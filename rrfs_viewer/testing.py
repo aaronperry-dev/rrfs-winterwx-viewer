@@ -21,6 +21,7 @@ CENTRE = (-71.4, 44.2)
 LEVELS_ALL = (250, 300, 400, 500, 600, 700, 750, 800, 850, 900, 925, 950, 975, 1000)
 T_LEV = (1000, 975, 950, 925, 900, 850, 800, 750, 700, 600, 500)
 RH_LEV = (925, 900, 850, 800, 750, 700, 600, 500)
+HGT_LEV = (1000, 850, 700, 500)
 
 
 def _noise(shape, seed, sigma):
@@ -162,10 +163,11 @@ class FakeS3:
         r"(?P<idx>\.idx)?$")
 
     def __init__(self, now: datetime, lag_hours: int = 4, refs_totals: bool = False, grid: DemoGrid | None = None,
-                 missing: set[tuple[str, int]] | None = None):
+                 missing: set[tuple[str, int]] | None = None, member_hourly_apcp: bool = True):
         self.now = now.astimezone(timezone.utc)
         self.lag = lag_hours
         self.refs_totals = refs_totals
+        self.member_hourly_apcp = member_hourly_apcp      # False: members publish run-total APCP only (no 1-hour windows)
         self.missing = missing or set()          # {(var, forecast_hour)} messages that are "not in the file"
         self.grid = grid or DemoGrid()
         self._storms: dict = {}
@@ -229,10 +231,16 @@ class FakeS3:
                     ("CICEP", "surface", _info("inst", h), f32(x["ip"])),
                     ("CFRZR", "surface", _info("inst", h), f32(x["zr"])),
                     ("CRAIN", "surface", _info("inst", h), f32(x["rain"])),
-                    ("APCP", "surface", _info("acc1", h), x["rate"]),
                     ("APCP", "surface", _info("acc0", h), s.cum_rate(h))]
+            if self.member_hourly_apcp:
+                msgs.append(("APCP", "surface", _info("acc1", h), x["rate"]))
         else:
-            msgs = [("HGT", "500 mb", _info("inst", h), np.full_like(x["t2"], 5400.0))]
+            msgs = []
+            z = np.full_like(x["t2"], 100.0, dtype=np.float64)                    # heights from the hypsometric equation, 1000 hPa up
+            for lo, hi in zip(HGT_LEV[:-1], HGT_LEV[1:]):
+                z = z + 29.2706 * 0.5 * (x["T"][lo].astype(np.float64) + x["T"][hi]) * np.log(lo / hi)
+                msgs.append(("HGT", f"{hi} mb", _info("inst", h), z.astype(np.float32)))
+            msgs.insert(0, ("HGT", "1000 mb", _info("inst", h), np.full_like(x["t2"], 100.0)))
             msgs += [("TMP", f"{p} mb", _info("inst", h), x["T"][p]) for p in T_LEV]
             msgs += [("RH", f"{p} mb", _info("inst", h), x["RH"][p]) for p in RH_LEV]
         return [t for t in msgs if (t[0], h) not in self.missing]
