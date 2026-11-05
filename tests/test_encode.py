@@ -21,6 +21,39 @@ def test_roundtrip_all_products():
         assert np.nanmax(np.abs(deq[ok] - a[ok])) <= p.step / 2 + 2e-7 * max(abs(hi), 1.0) + 1e-6, p.key
 
 
+def _mode(blob):
+    import gzip
+    return gzip.decompress(blob)[0]
+
+
+def test_mode_choice_and_exact_roundtrip():
+    rng = np.random.default_rng(7)
+    ny, nx = 60, 80
+    # a running total that grows frame by frame over a sharp-edged, stationary pattern: the frame-to-frame delta is far cheaper than the total
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    blob = ((yy // 8 + xx // 8) % 3) * 1.5
+    total = np.stack([blob * (f + 1) for f in range(6)]).astype(np.float32)
+    # a noisy instantaneous field: deltas in time only add noise
+    noisy = (20 + 10 * rng.standard_normal((6, ny, nx))).astype(np.float32)
+    for key, a, want in (("snow_kuchera", total, 3), ("snow_12_1h", total, 3), ("t2", noisy, 1), ("gust", noisy, 1)):
+        p = BY_KEY[key]
+        q = encode.quantize(a, p)
+        blobbed = encode.pack(q)
+        assert _mode(blobbed) == want, key
+        assert np.array_equal(encode.unpack(blobbed, p, q.shape), q), key
+
+
+def test_roundtrip_wraparound_and_single_frame():
+    rng = np.random.default_rng(3)
+    for key, top in (("gust", 255), ("qpf", 65535)):
+        p = BY_KEY[key]
+        dt = np.uint8 if top == 255 else np.uint16
+        for shape in ((1, 9, 11), (4, 9, 11)):
+            q = rng.integers(0, top + 1, shape).astype(dt)          # extremes in neighbouring cells force modular wrap-around
+            q[0, 0, :3] = (0, top, 0)
+            assert np.array_equal(encode.unpack(encode.pack(q), p, shape), q), (key, shape)
+
+
 def test_clipping_and_missing_code():
     p = BY_KEY["gust"]
     q = encode.quantize(np.array([-5.0, 1e6, np.nan], np.float32), p)

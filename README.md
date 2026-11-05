@@ -21,7 +21,8 @@ directory and deploys it as a Pages artifact.
 | **Accumulation window** | **1 h**, 3 h, 6 h, 12 h, 24 h or run total, for QPF and every snowfall method. 1-h maps are the hour ending at the valid time (a stored field, so the maps step every 3 h); 3/6/12/24-h windows are differences of stored totals. |
 | **All members** layout | Postage-stamp grid: REFS mean, member mean, spread, probability and every member side by side. |
 | **Percentiles** layout | All ten statistics (Min, P5, P10, P25, P50, Mean, P75, P90, P95, Max) side by side for the current product, window and time; click one to open it. |
-| **Time** | Timeline bar in the style of the SPC HREF viewer: day labels, one `Fnnn` cell per forecast hour (click or drag), a floating box with the valid time in UTC, `< ▶ >` buttons and a `- SPEED: n +` control. Keys: `<` `>` or ← → step, `p` or space plays, `h` hides the top menu. Hover a cell for UTC and Eastern times. |
+| **Time** | Timeline bar in the style of the SPC HREF viewer: day labels, one `Fnnn` cell per forecast hour (click or drag), a floating box with the valid time in UTC, `< ▶ >` buttons and a `- SPEED: n +` control. Keys: `<` `>` or ← → step, `p` or space plays, `h` hides the top menu, `s` saves the map as a PNG. Hover a cell for UTC and Eastern times. |
+| **Export PNG** | **Download PNG** in the sidebar (or key `s`) saves the current map, in Map view, as a 1200 px image with a header above it: the title (product and window), the subtitle (ensemble view, unit or probability threshold, run total, the members used, and a *synthetic demo data* flag on demo builds), the init (run) time, and the valid time with forecast hour in UTC and Eastern. The image is rendered from the same data as the page, without the point-forecast marker, and named like `rrfs_snow_kuchera_mean_6h_20261105_12z_f018.png`. |
 | **Click the map** | Point forecast: every member, the member mean and the REFS mean as lines over the forecast. |
 | Hover the point-forecast graph | Tooltip with the valid time (UTC and Eastern) and the value of every member, the member mean and the REFS mean at that forecast hour, with a cursor line; click the graph to jump the map to that time. |
 | Hover | Value under the cursor. Land-area low / average / high tiles for the current map. |
@@ -72,8 +73,10 @@ wind-chill legends are the same NWS-style ramps as the RTMA dashboard.
 * The newest cycle (00/06/12/18 UTC) whose **last forecast hour (F060)** exists for the REFS mean and every member is used.
 * Fields are re-projected from the 3 km Lambert grid onto a fixed New England raster (3 km, nearest neighbour, indices
   pre-computed and cached), then quantised (8/16 bit) and gzip-compressed per product and source. The browser decodes them with
-  the native `DecompressionStream`; 8-bit fields are stored as a 2-D delta, 16-bit fields byte-shuffled, which roughly halves the
-  gzip size.
+  the native `DecompressionStream`. Each file starts with a mode byte: the fields are stored as a 2-D spatial delta, and, where a cheap
+  bit-cost estimate says it is smaller (running totals such as QPF and snowfall: the increment between frames is much sparser than the
+  total), also as a delta between frames; 16-bit fields are then byte-shuffled. Both together roughly halve the gzip size, and the
+  frame delta takes a further ~30% off the 16-bit files in the offline demo.
 
 ### Why the member mean is computed in the browser
 
@@ -93,7 +96,8 @@ fall back to the member mean with a notice.
 
 Measured on the offline demo (455 × 293 display grid, 4 frames, 6 sources, 37 stored series including the 1-hour ones): 19 MB of data
 files + a 46 kB overlay. Scaled to the 20 frames of a full run that is roughly 95 MB for the whole site (synthetic fields; real fields
-may compress differently). A visitor downloads only the product being viewed, and 1-hour fields only when the 1 h window is chosen:
+may compress differently). Before the frame delta was added, a 24 h demo build (8 frames) wrote 45.8 MB of data files; with it, 35.2 MB (-23%;
+-30% on the 16-bit QPF/snowfall files, -5% on the 8-bit ones). Real fields are noisier, so check `stats.data_bytes` in `data.json` after the first live run. A visitor downloads only the product being viewed, and 1-hour fields only when the 1 h window is chosen:
 about 3-6 MB for all six sources, cached afterwards.
 What a build **downloads** from S3 is much larger than what it publishes (every needed message at full CONUS resolution). The first live
 run's REFS-mean pass fetched 73 MB; expect a few GB for the five members, which is free on a public repository but is the thing to
@@ -169,7 +173,7 @@ rrfs_viewer/
   pipeline.py    per-member and REFS processing -> (frames, ny, nx) products
   catalog.py     the product list: units, quantisation, thresholds, text
   colors.py      colour ramps (OKLab)
-  encode.py      quantise, delta/shuffle, gzip
+  encode.py      quantise, spatial/temporal delta, shuffle, gzip
   basemap.py     cartopy overlay (boundaries, frame), land mask, METAR layout
   build.py       cycle choice, parallel workers, data.json, site assembly
   testing.py     offline fake S3 with real GRIB2 (demo + tests)

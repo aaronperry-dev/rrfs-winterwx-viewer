@@ -101,6 +101,7 @@
   .rows.members button[aria-pressed="false"] { text-decoration: line-through; opacity: .7; }
   .btns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
   .btns.five { grid-template-columns: repeat(5, 1fr); }
+  .btns.one { grid-template-columns: 1fr; }
   .btns button { appearance: none; border: 0; border-radius: 5px; background: var(--navy); color: #fff; font: 600 14px/1.15 var(--font); padding: 9px 6px; cursor: pointer; }
   .btns button:hover:not(:disabled):not([aria-pressed="true"]) { background: var(--blue); }
   .btns button[aria-pressed="true"] { background: var(--red); }
@@ -211,6 +212,8 @@
         <div class="rows members" id="seg-members" role="group" aria-label="Members in the member mean"></div>
         <div class="sublabel">Show one member alone</div><div class="btns five" id="seg-single" role="group" aria-label="Single member"></div></div></div>
       <div class="panel"><h2>Other Views</h2><div class="body"><div class="btns" id="seg-layout" role="group" aria-label="Layout"></div></div></div>
+      <div class="panel"><h2>Export</h2><div class="body"><div class="btns one"><button type="button" id="btn-png" disabled title="Save the current map as a PNG with title, subtitle, init time and valid time">⬇ Download PNG</button></div>
+        <p class="note">Map view only. The image has the title, subtitle, init (run) time and valid time on top.</p></div></div>
       <div class="panel" id="p-summary"><h2 id="sum-title">New England land area</h2><div class="body">
         <div class="tiles" id="tiles"></div>
         <div class="sublabel" style="margin-top:2px">Point forecast <span id="pt-name" style="font-weight:500"></span></div>
@@ -219,7 +222,7 @@
         <p class="note" id="blurb"></p></div></div>
       <div class="panel"><h2>Keyboard Shortcuts</h2><div class="body"><ul class="keys">
         <li><kbd>&lt;</kbd> / <kbd>←</kbd> previous time</li><li><kbd>&gt;</kbd> / <kbd>→</kbd> next time</li>
-        <li><kbd>p</kbd> / <kbd>space</kbd> play / pause</li><li><kbd>h</kbd> toggle top menu</li><li>Click the map for a point forecast</li></ul></div></div>
+        <li><kbd>p</kbd> / <kbd>space</kbd> play / pause</li><li><kbd>h</kbd> toggle top menu</li><li><kbd>s</kbd> save the map as a PNG</li><li>Click the map for a point forecast</li></ul></div></div>
       <div class="panel"><h2>More Information</h2><div class="body"><ul class="links">
         <li><a href="https://registry.opendata.aws/noaa-rrfs/">RRFS data on NOAA Open Data (AWS)</a></li>
         <li><a href="https://github.com/aaronperry-dev/rrfs-winterwx-viewer#readme">Products and methods (README)</a></li>
@@ -282,25 +285,31 @@ function load(p, src, one) {                                // one: the stored 1
   const av = one ? p.available_1h : p.available;
   if (!av || !av[src]) return Promise.resolve(null);
   const key = `${p.key}${one ? "_1h" : ""}.${src}`, pe = one ? { ...p, step: p.step1h } : p;
-  if (!store.has(key)) store.set(key, inflate(`data/${key}.bin?v=${D.version}`).then(raw => {
-    const { nx, ny } = D.grid, nf = D.frames.length, n = nf * nx * ny;
-    if (pe.dtype === "u16") {
-      const u = new Uint16Array(n);
-      for (let i = 0; i < n; i++) u[i] = (raw[i] << 8) | raw[n + i];
+  if (!store.has(key)) {
+    const pr = inflate(`data/${key}.bin?v=${D.version}`).then(raw => {
+      // byte 0 = mode (see encode.py): bit 0 = 2-D delta, bit 1 = delta along the frames; 16-bit data is byte-shuffled after it.
+      // Typed arrays wrap modulo 2^8 / 2^16, which is exactly the arithmetic of the encoder.
+      const { nx, ny } = D.grid, nf = D.frames.length, N = nx * ny, n = nf * N, mode = raw[0];
+      let u;
+      if (pe.dtype === "u16") { u = new Uint16Array(n); for (let i = 0; i < n; i++) u[i] = (raw[1 + i] << 8) | raw[1 + n + i]; }
+      else u = raw.subarray(1, 1 + n).slice();
+      if (mode & 2) for (let i = N; i < n; i++) u[i] += u[i - N];
+      if (mode & 1) for (let f = 0; f < nf; f++) {
+        const o = f * N;
+        for (let y = 1; y < ny; y++) for (let x = 0; x < nx; x++) u[o + y * nx + x] += u[o + (y - 1) * nx + x];
+        for (let y = 0; y < ny; y++) for (let x = 1; x < nx; x++) u[o + y * nx + x] += u[o + y * nx + x - 1];
+      }
       return { u, p: pe };
-    }
-    // undo 2-D delta (mod 256): cumulative sum down the rows, then along the columns
-    const u = raw.subarray(0, n).slice();
-    for (let f = 0; f < nf; f++) {
-      const o = f * nx * ny;
-      for (let y = 1; y < ny; y++) for (let x = 0; x < nx; x++) u[o + y * nx + x] += u[o + (y - 1) * nx + x];
-      for (let y = 0; y < ny; y++) for (let x = 1; x < nx; x++) u[o + y * nx + x] += u[o + y * nx + x - 1];
-    }
-    return { u, p: pe };
-  }));
+    });
+    pr.catch(() => store.delete(key));                      // a failed download is retried on the next render instead of failing until reload
+    store.set(key, pr);
+  }
   return store.get(key);
 }
-function evictOthers() { for (const k of [...store.keys()]) if (!k.startsWith(state.product + ".") && !k.startsWith(state.product + "_1h.")) store.delete(k); }
+function evictOthers() {
+  for (const k of [...store.keys()]) if (!k.startsWith(state.product + ".") && !k.startsWith(state.product + "_1h.")) store.delete(k);
+  for (const k of [...fieldCache.keys()]) if (!k.startsWith(state.product + "|")) fieldCache.delete(k);
+}
 
 function frameField(d, fi) {                                // dequantised Float32Array of one frame
   const { nx, ny } = D.grid, n = nx * ny, p = d.p, top = p.dtype === "u8" ? 255 : 65535, o = fi * n, out = new Float32Array(n);
@@ -308,7 +317,17 @@ function frameField(d, fi) {                                // dequantised Float
   return out;
 }
 const WINDOWS = [1, 3, 6, 12, 24, 0];                         // hours; 0 = run total
-async function srcField(p, src, fi, win) {                  // one source, honouring the accumulation window; null = no data
+const fieldCache = new Map();                               // "product|source|frame|window" -> Promise<Float32Array | null>, newest 48 kept (arrays are never modified)
+function srcField(p, src, fi, win) {                        // one source, honouring the accumulation window; null = no data
+  const key = `${p.key}|${src}|${fi}|${p.kind === "cum" ? win : 0}`;
+  let e = fieldCache.get(key);
+  if (e) fieldCache.delete(key);                            // re-insert: most recently used last
+  else { e = srcFieldNow(p, src, fi, win); e.catch(() => fieldCache.delete(key)); }
+  fieldCache.set(key, e);
+  if (fieldCache.size > 48) fieldCache.delete(fieldCache.keys().next().value);
+  return e;
+}
+async function srcFieldNow(p, src, fi, win) {
   const cum = p.kind === "cum";
   if (cum && win === 1) { const d1 = await load(p, src, true); return d1 ? frameField(d1, fi) : null; }
   const d = await load(p, src);
@@ -493,27 +512,30 @@ function geometry(W, H) {                                   // bilinear sampling
   for (let j = 0; j < H; j++) { const g = Math.min(ny - 1.001, Math.max(0, (ny - (j + 0.5) * ny / H) - 0.5)); yi[j] = g | 0; yf[j] = g - yi[j]; }   // row 0 of the data is the south edge
   return (geom = { W, H, xi, xf, yi, yf });
 }
-function paintField(ctx, x0, y0, W, H, values, style) {
+const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1, imgBuf = new Map();   // imgBuf: "WxH" -> ImageData reused between paints
+function paintField(ctx, x0, y0, W, H, values, style) {    // always paints onto white (no data / below the first level = white), so the pixels can be written directly
   const { nx } = D.grid, g = geometry(W, H), lv = style.levels, nl = lv.length;
-  let lut = lutCache.get(style);
-  if (!lut) { lut = style.colors.map(c => c ? [...hex(c), 255] : null); lutCache.set(style, lut); }
-  const img = ctx.createImageData(W, H), px = img.data;
+  let lut = lutCache.get(style);                            // one packed 32-bit colour per level interval
+  if (!lut) { lut = style.colors.map(c => { if (!c) return 0; const [r, gr, b] = hex(c); return (LITTLE ? (255 << 24 | b << 16 | gr << 8 | r) : (r << 24 | gr << 16 | b << 8 | 255)) >>> 0; }); lutCache.set(style, lut); }
+  let img = imgBuf.get(W + "x" + H); if (!img) imgBuf.set(W + "x" + H, img = new ImageData(W, H));
+  const px = new Uint32Array(img.data.buffer).fill(0xFFFFFFFF);
   for (let j = 0; j < H; j++) {
-    const r0 = g.yi[j] * nx, r1 = r0 + nx, fy = g.yf[j];
+    const r0 = g.yi[j] * nx, fy = g.yf[j], row = j * W;
     for (let i = 0; i < W; i++) {
-      const c0 = g.xi[i], fx = g.xf[i];
-      const a = values[r0 + c0], b = values[r0 + c0 + 1], c = values[r1 + c0], d = values[r1 + c0 + 1];
+      const k = r0 + g.xi[i], fx = g.xf[i], a = values[k], b = values[k + 1], c = values[k + nx], d = values[k + nx + 1];
       let v;
       if (a === a && b === b && c === c && d === d) v = (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
-      else { const t = [a, b, c, d].filter(z => z === z); if (!t.length) continue; v = (fx < .5 ? (fy < .5 ? a : c) : (fy < .5 ? b : d)); if (v !== v) v = t[0]; }
+      else {                                                // next to missing data: the nearest valid corner, else any valid one
+        v = fx < .5 ? (fy < .5 ? a : c) : (fy < .5 ? b : d);
+        if (v !== v) v = a === a ? a : b === b ? b : c === c ? c : d;
+        if (v !== v) continue;
+      }
       let lo = 0, hi = nl;                                  // number of edges <= v  ==  colour index
       while (lo < hi) { const m = (lo + hi) >> 1; if (lv[m] <= v) lo = m + 1; else hi = m; }
-      const col = lut[lo]; if (!col) continue;
-      const o = (j * W + i) * 4; px[o] = col[0]; px[o + 1] = col[1]; px[o + 2] = col[2]; px[o + 3] = 255;
+      const col = lut[lo]; if (col) px[row + i] = col;
     }
   }
-  const off = document.createElement("canvas"); off.width = W; off.height = H; off.getContext("2d").putImageData(img, 0, 0);
-  ctx.drawImage(off, x0, y0);
+  ctx.putImageData(img, x0, y0);
 }
 function bold(ctx, x, y, b, r, size, right) {
   ctx.textBaseline = "alphabetic";
@@ -532,13 +554,7 @@ function drawLegend(ctx, x, y, w, h, style, fs) {
   for (const t of style.ticks) { const i = lv.indexOf(t); if (i < 0) continue; const tx = x + i * bw;
     ctx.beginPath(); ctx.moveTo(tx, y + h); ctx.lineTo(tx, y + h + 4); ctx.stroke(); ctx.fillText(tick(t), tx, y + h + 5); }
 }
-function titleParts(p, mode, v) {
-  const win = p.kind === "cum" && state.win ? `${state.win}-hr ` : "";
-  const ml = mode === "prob" ? `Probability${v.thr != null ? " " + (p.thr_dir === "le" ? "≤" : "≥") + " " + v.thr + " " + p.unit : ""}` : modeLabel(mode);
-  const unit = mode === "prob" ? "%" : v.unit;
-  return [ml, `: ${win}${p.title} (${unit})`];
-}
-const fcap = () => `F${String(D.frames[state.frame]).padStart(3, "0")}`;
+const fcap = (f = state.frame) => `F${String(D.frames[f]).padStart(3, "0")}`;
 function drawMain(ctx, v, mode, markers) {
   const W = 1200, H = 836;
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
@@ -562,12 +578,42 @@ function drawMain(ctx, v, mode, markers) {
   bold(ctx, W - 25, MAP.y + MAP.h + 42, "aaronperry-dev.github.io", " (Aaron Perry)", 13, true);
 }
 
+// ---------------------------------------------------------------- PNG export: title, subtitle, init and valid time above the map
+const EXPORT_HEAD = 88;                                     // px of header above the 1200 x 836 map composition
+function fitFont(ctx, text, weight, size, maxW, family = "system-ui, sans-serif") {   // largest size <= `size` at which `text` fits `maxW`
+  for (; size > 11; size--) { ctx.font = `${weight} ${size}px ${family}`; if (ctx.measureText(text).width <= maxW) break; }
+}
+function exportPNG() {
+  if (!current || state.layout !== "map") return;
+  const { v, mode, hdr: h } = current, W = 1200, H = 836, ctx = document.createElement("canvas").getContext("2d");
+  ctx.canvas.width = W; ctx.canvas.height = EXPORT_HEAD + H;
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, EXPORT_HEAD + H);
+  const map = document.createElement("canvas"); map.width = W; map.height = H;
+  drawMain(map.getContext("2d"), v, mode, false);           // the same drawing as on the page, without the point-forecast marker
+  ctx.drawImage(map, 0, EXPORT_HEAD);
+  const mono = "ui-monospace, Menlo, Consolas, monospace", lines = [`Init:  ${h.init}`, `Valid: ${h.valid} (${h.fh})`, `       ${h.local}`];
+  ctx.font = `13.5px ${mono}`; const rw = Math.max(...lines.map(l => ctx.measureText(l).width)), left = W - 25 - rw;
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic"; ctx.fillStyle = "#000";
+  lines.forEach((l, i) => ctx.fillText(l, left, 30 + i * 21));
+  const textW = left - 25 - 24;                              // title and subtitle shrink rather than run into the time block
+  fitFont(ctx, h.title, 800, 30, textW); ctx.fillStyle = "#7a2a12"; ctx.fillText(h.title, 25, 42);
+  fitFont(ctx, h.exportSub, 500, 17, textW); ctx.fillStyle = "#59636e"; ctx.fillText(h.exportSub, 25, 68);
+  ctx.fillStyle = "#c4ccd6"; ctx.fillRect(25, EXPORT_HEAD - 6, W - 50, 1.5);
+  ctx.canvas.toBlob(blob => {
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = h.file + ".png";
+    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }, "image/png");
+}
+const syncExport = () => { $("#btn-png").disabled = state.layout !== "map" || !current; };
+$("#btn-png").addEventListener("click", exportPNG);
+
 // ---------------------------------------------------------------- main render
 let renderToken = 0, loadTimer = null;
 async function render() {
   const token = ++renderToken, p = prod(); prefetchGen++;
   writeHash(); statusLine(); controls();
   $("#mapwrap").hidden = state.layout !== "map"; $("#stampwrap").hidden = state.layout === "map"; $("#p-summary").hidden = state.layout !== "map";
+  syncExport();
   $("#blurb").textContent = p.desc;
   const msg = $("#msg"), notice = $("#notice");
   notice.hidden = true;
@@ -590,11 +636,11 @@ async function render() {
   try { v = await viewField(mode, state.frame, { tok: token }); } catch (e) { clearTimeout(loadTimer); showMsg("Could not load data (" + e.message + ")"); return; }
   if (token !== renderToken) return;
   clearTimeout(loadTimer);
-  if (v.error) { msg.textContent = v.error; msg.hidden = false; tiles(null); chart(); return; }
+  if (v.error) { msg.textContent = v.error; msg.hidden = false; current = null; syncExport(); tiles(null); chart(); return; }
   msg.hidden = true;
   drawMain($("#map").getContext("2d"), v, mode, true);
-  current = { v, mode };
-  tiles(v); chart(); evictOthers(); prefetch();
+  current = { v, mode, hdr: header(mode) };                 // the title block is captured with the map it describes (the state may move on while the next map computes)
+  syncExport(); tiles(v); chart(); evictOthers(); prefetch();
 }
 let current = null;
 
@@ -604,13 +650,13 @@ async function renderStamps(token, p) {
   const grid = $("#stamps"); grid.replaceChildren(); grid.className = state.layout === "pctl" ? "pctl" : "";
   const first = await viewField("mean", state.frame, { tok: token }); if (token !== renderToken) return;
   const lg = $("#slegend").getContext("2d"); lg.fillStyle = "#fff"; lg.fillRect(0, 0, 1200, 96);
-  if (!first.error) { const [tb, tr] = titleParts(p, "mean", first); bold(lg, 25, 24, "RRFS winter weather", `: ${p.title} (${p.unit}) · valid ${zfmt(D.valid[state.frame])} · ${fcap()}`, 15); drawLegend(lg, 50, 40, 1000, 22, p, 12); }
+  if (!first.error) { bold(lg, 25, 24, "RRFS winter weather", `: ${p.title} (${p.unit}) · valid ${zfmt(D.valid[state.frame])} · ${fcap()}`, 15); drawLegend(lg, 50, 40, 1000, 22, p, 12); }
   for (const [m, label] of defs) {
     const st = document.createElement("div"); st.className = "stamp"; st.tabIndex = 0;
     const isMember = m.startsWith("m0"); if (isMember && !state.on[m]) st.classList.add("off");
     const cv = document.createElement("canvas"); cv.width = 575; cv.height = 371;
     st.innerHTML = `<div class="cap"><span>${label}</span><span>${isMember ? (state.on[m] ? "in mean" : "off") : ""}</span></div>`; st.append(cv); grid.append(st);
-    const open = () => { state.mode = m === "refs" || m === "mean" || m === "spread" || m === "prob" ? m : m; state.layout = "map"; render(); };
+    const open = () => { state.mode = m; state.layout = "map"; render(); };
     cv.addEventListener("click", open);
     st.addEventListener("keydown", e => { if (e.key === "Enter") open(); });
     viewField(m, state.frame, { tok: token }).then(v => {
@@ -652,7 +698,7 @@ function showChartTip(ev) {
   if (f < 0) { hideChartTip(); return; }
   const cv = $("#chart"), k = cv.getBoundingClientRect().width / i.W, p = i.p, val = y => { const v = y && y[f]; return v === v && v != null ? `${fnum(v, p.decimals)} ${p.unit}` : "—"; };
   const row = (col, name, v, dash, off) => `<div class="row${off ? " off" : ""}"><span><i class="sw" style="border-color:${col};${dash ? "border-top-style:dashed;" : ""}"></i>${name}${off ? " (off)" : ""}</span><b>${v}</b></div>`;
-  tip.innerHTML = `<b>${fcap2(f)}</b><div class="t2">${fmtDate(D.valid[f], "UTC")} · ${fmtDate(D.valid[f], TZ)}</div>` +
+  tip.innerHTML = `<b>${fcap(f)}</b><div class="t2">${fmtDate(D.valid[f], "UTC")} · ${fmtDate(D.valid[f], TZ)}</div>` +
     (i.mean ? row("#fff", "Member mean", val(i.mean)) : "") + (i.ry ? row("#fff", "REFS mean", val(i.ry), true) : "") +
     i.series.map(s => row(s.col, s.m, val(s.y), false, !s.on)).join("");
   tip.hidden = false;
@@ -660,7 +706,6 @@ function showChartTip(ev) {
   tip.style.left = Math.max(4, x) + "px"; tip.style.top = Math.max(4, Math.min(innerHeight - h - 4, ev.clientY - h / 2)) + "px";
   cur.hidden = false; cur.style.left = i.X(f) * k + "px"; cur.style.top = i.T * k + "px"; cur.style.height = (i.H - i.T - i.B) * k + "px";
 }
-const fcap2 = f => `F${String(D.frames[f]).padStart(3, "0")}`;
 $("#chart").addEventListener("pointermove", showChartTip);
 $("#chart").addEventListener("pointerleave", hideChartTip);
 $("#chart").addEventListener("click", ev => { const f = chartFrameAt(ev); if (f >= 0) set({ frame: f }); });
@@ -714,8 +759,11 @@ function niceStep(x) { const e = Math.pow(10, Math.floor(Math.log10(x))), f = x 
 function nearestStation(r, c) { let b = null, bd = 1e9; for (const s of D.stations) { const d = (s.r - r) ** 2 + (s.c - c) ** 2; if (d < bd) { bd = d; b = s; } } return bd < 36 ? b.id : null; }
 
 // ---------------------------------------------------------------- controls
+let ctlKey = "";
 function controls() {
-  const p = prod(), groups = D.groups;
+  const p = prod(), groups = D.groups, key = [state.product, state.mode, state.win, state.lpmm, state.thr, state.layout, ...D.members.map(m => state.on[m] ? 1 : 0)].join();
+  if (key === ctlKey) return updateTimeline();              // only the time changed (stepping, playing): keep the buttons, and the keyboard focus on them
+  ctlKey = key;
   seg($("#seg-group"), groups.map(g => ({ value: g, label: g })), p.group, g => { const q = D.products.find(x => x.group === g); set({ product: q.key }); });
   seg($("#seg-product"), D.products.filter(x => x.group === p.group).map(x => ({ value: x.key, label: x.label, title: x.desc })), p.key, k => set({ product: k }));
   $("#g-window").hidden = p.kind !== "cum";
@@ -759,13 +807,22 @@ function updateTimeline() {
   const sel = cells[f]; if (sel && sel.scrollIntoView) { const sc = $(".tl-scroll"), r = sel.getBoundingClientRect(), q = sc.getBoundingClientRect();
     if (r.left < q.left || r.right > q.right) sc.scrollLeft += (r.left + r.right) / 2 - (q.left + q.right) / 2; }
 }
+function header(mode) {                                     // the text block of the page header and of the exported PNG
+  const p = prod(), f = state.frame, w = p.kind === "cum" && state.win ? `${state.win}-hr ` : "", n = activeMembers().length;
+  const sub = mode === "prob" ? `Probability ${p.thr_dir === "le" ? "≤" : "≥"} ${thrOf(p)} ${p.unit}` : `${modeLabel(mode)}${mode === "lpmm" ? ` · ${state.lpmm} km domain` : ""} (${p.unit})`;
+  const fromMembers = mode !== "refs" && !mode.startsWith("m0");
+  const exportSub = ["RRFS ensemble", sub, p.kind === "cum" && !state.win && "run total",
+    fromMembers && (n === D.members.length ? `${n} members` : `${n} of ${D.members.length} members: ${activeMembers().join(", ")}`), D.demo && "SYNTHETIC DEMO DATA"].filter(Boolean).join(" · ");
+  const file = ["rrfs", p.key, mode === "prob" ? "prob" + thrOf(p) : mode, w && state.win + "h", D.cycle.replace(/[-:]/g, "").slice(0, 8) + "_" + D.cycle.slice(11, 13) + "z", "f" + String(D.frames[f]).padStart(3, "0")]
+    .filter(Boolean).join("_");
+  return { title: w + p.title, sub, exportSub, init: zfmt(D.cycle), valid: zfmt(D.valid[f]), fh: fcap(f), local: fmtDate(D.valid[f], TZ), file };
+}
 function mapHeader(mode) {
-  const p = prod(), win = p.kind === "cum" && state.win ? `${state.win}-hr ` : "";
-  $("#mh-title").textContent = win + p.title;
+  const h = header(mode);
+  $("#mh-title").textContent = h.title;
   $("#mh-sub").textContent = state.layout === "pctl" ? "Percentiles across the members switched on"
-    : state.layout === "stamps" ? "REFS mean, member mean, spread, probability and each member"
-    : mode === "prob" ? `Probability ${p.thr_dir === "le" ? "≤" : "≥"} ${thrOf(p)} ${p.unit}` : `${modeLabel(mode)}${mode === "lpmm" ? ` · ${state.lpmm} km domain` : ""} (${p.unit})`;
-  $("#mh-run").textContent = `Run:   ${zfmt(D.cycle)}\nValid: ${zfmt(D.valid[state.frame])} (${fcap()})`;
+    : state.layout === "stamps" ? "REFS mean, member mean, spread, probability and each member" : h.sub;
+  $("#mh-run").textContent = `Run:   ${h.init}\nValid: ${h.valid} (${h.fh})`;
 }
 function statusLine() {
   const age = Math.max(0, Math.round((Date.now() - Date.parse(D.generated)) / 60000)), a = age < 90 ? `${age} min ago` : `${Math.round(age / 60)} h ago`;
@@ -809,6 +866,7 @@ document.addEventListener("keydown", e => {
   else if (k === "ArrowLeft" || k === "<" || k === ",") step(-1);
   else if (k === "p" || k === "P") play(!playTimer);
   else if (k === "h" || k === "H") document.body.classList.toggle("hidetop");
+  else if (k === "s" || k === "S") exportPNG();
   else if (k === " " && e.target.tagName !== "BUTTON") { e.preventDefault(); play(!playTimer); }
 });
 function cellAt(ev) {

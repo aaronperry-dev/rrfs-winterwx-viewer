@@ -1,8 +1,11 @@
 """Compact on-disk format for the browser: one gzip file per (product, source) holding every frame.
 
 * values are quantised to uint8 / uint16 with a per-product offset and step (the catalogue says which); the top code = missing,
-* 8-bit data is stored as a 2-D delta (difference along x, then along y, modulo 256): ~40-50 % smaller after gzip,
-* 16-bit data is byte-shuffled (all high bytes, then all low bytes), which makes smooth fields compress far better,
+* the gzip payload is one mode byte followed by the data.  Mode bit 0 = 2-D delta (along x, then along y), bit 1 = delta along the
+  frame axis; all arithmetic is modulo 2**8 / 2**16.  The writer stores "spatial" or "spatial + temporal", whichever a cheap bit-cost
+  estimate says is smaller: for running totals (QPF, snowfall) the increment between frames is far smaller and sparser than the total,
+  for instantaneous fields it is usually not,
+* 16-bit data is then byte-shuffled (all high bytes, then all low bytes), which makes smooth fields compress far better,
 * the container is plain gzip, so ``fetch(url).body.pipeThrough(new DecompressionStream("gzip"))`` decodes it natively.
 """
 from __future__ import annotations
@@ -12,6 +15,8 @@ import gzip
 import numpy as np
 
 from .catalog import Product
+
+SPATIAL, TEMPORAL = 1, 2
 
 
 def top_code(p: Product) -> int:
@@ -32,24 +37,50 @@ def dequantize(q: np.ndarray, p: Product) -> np.ndarray:
     return out
 
 
+def _spatial(q: np.ndarray) -> np.ndarray:
+    """Difference along x, then along y (unsigned wrap-around is intended)."""
+    a = q.copy()
+    a[..., :, 1:] -= q[..., :, :-1]
+    b = a.copy()
+    b[..., 1:, :] -= a[..., :-1, :]
+    return b
+
+
+def _temporal(a: np.ndarray) -> np.ndarray:
+    b = a.copy()
+    b[1:] -= a[:-1]
+    return b
+
+
+def _bits(a: np.ndarray) -> float:
+    """Rough coded size: sum of log2(1 + |delta|) with the deltas read as signed numbers (zeros are free)."""
+    s = a.view(np.int16 if a.dtype == np.uint16 else np.int8)
+    return float(np.log2(1.0 + np.abs(s.astype(np.int32))).sum())
+
+
 def pack(q: np.ndarray) -> bytes:
-    if q.dtype == np.uint16:
-        raw = np.concatenate([(q >> 8).astype(np.uint8).ravel(), (q & 0xFF).astype(np.uint8).ravel()]).tobytes()
+    s = _spatial(q)
+    st = _temporal(s)
+    mode, a = (SPATIAL, s) if _bits(s) <= _bits(st) else (SPATIAL | TEMPORAL, st)
+    if a.dtype == np.uint16:
+        body = np.concatenate([(a >> 8).astype(np.uint8).ravel(), (a & 0xFF).astype(np.uint8).ravel()]).tobytes()
     else:
-        dx = np.diff(q.astype(np.int16), axis=-1, prepend=0)
-        dxy = np.diff(dx, axis=-2, prepend=0)
-        raw = dxy.astype(np.uint8).tobytes()
-    return gzip.compress(raw, compresslevel=9, mtime=0)
+        body = a.tobytes()
+    return gzip.compress(bytes([mode]) + body, compresslevel=9, mtime=0)
 
 
 def unpack(blob: bytes, p: Product, shape: tuple[int, int, int]) -> np.ndarray:
     raw = np.frombuffer(gzip.decompress(blob), np.uint8)
-    n = int(np.prod(shape))
+    mode, n = int(raw[0]), int(np.prod(shape))
     if p.dtype == "u16":
-        return ((raw[:n].astype(np.uint16) << 8) | raw[n:2 * n].astype(np.uint16)).reshape(shape)
-    dxy = raw[:n].reshape(shape)
-    dx = np.cumsum(dxy, axis=-2, dtype=np.uint8)
-    return np.cumsum(dx, axis=-1, dtype=np.uint8)
+        a = ((raw[1:1 + n].astype(np.uint16) << 8) | raw[1 + n:1 + 2 * n].astype(np.uint16)).reshape(shape)
+    else:
+        a = raw[1:1 + n].reshape(shape)
+    if mode & TEMPORAL:
+        a = np.cumsum(a, axis=0, dtype=a.dtype)
+    if mode & SPATIAL:
+        a = np.cumsum(np.cumsum(a, axis=-2, dtype=a.dtype), axis=-1, dtype=a.dtype)
+    return a
 
 
 def pack_mask(mask: np.ndarray) -> bytes:
