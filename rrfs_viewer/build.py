@@ -91,6 +91,26 @@ def up_to_date(manifest: dict | None, cycle_iso: str, code: str) -> bool:
     return bool(manifest) and not manifest.get("demo") and manifest.get("cycle") == cycle_iso and manifest.get("code") == code
 
 
+def ensure_regrid(src: S3Source, cycle: datetime, cache: Path, first_fhr: int) -> grib.Regrid:
+    from .basemap import EXTENT, PROJ
+    from .config import OUT_DX_M
+
+    path = cache / "regrid.npz"
+    rg = grib.Regrid.load(path)
+    # one message with geometry: the surface-pressure field of member m001
+    loc = src.locate(FILE_2D, MEMBERS[0], cycle, first_fhr)
+    if loc is None:
+        raise RuntimeError("cannot read the grid definition: no member file for the chosen cycle")
+    data = src.fetch_message(loc, "PRES", "surface")
+    vals, geo = grib.decode(data, want_geometry=True)
+    if rg is not None and rg.native_shape == vals.shape:
+        return rg
+    log.info("building native -> display grid mapping (%s)", vals.shape)
+    rg = grib.build_regrid(geo[0], geo[1], PROJ, EXTENT, OUT_DX_M)
+    rg.save(path)
+    return rg
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="public")
