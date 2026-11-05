@@ -76,6 +76,8 @@
   .stamp canvas { width: 100%; height: auto; display: block; cursor: pointer; }
   .stamp .cap { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: #59636e; padding: 2px 6px 4px; font-weight: 600; }
   .stamp.off { opacity: .35; }
+  #stamps.pctl { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+  #stamps.pctl .cap { font-size: 12px; }
   #stamplegend { margin-bottom: 12px; }
   #stamplegend canvas { width: 100%; max-width: 900px; height: auto; display: block; margin: 0 auto; background: #fff; border-radius: 8px; border: 1px solid var(--line); }
 
@@ -84,7 +86,7 @@
   [hidden] { display: none !important; }
   @media (max-width: 960px) {
     main { grid-template-columns: minmax(0, 1fr); }
-    #stamps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    #stamps, #stamps.pctl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .status { text-align: left; }
     .timebar { flex-wrap: wrap; }
   }
@@ -165,7 +167,11 @@ const zfmt = iso => { const t = new Date(iso); const p = new Intl.DateTimeFormat
   return String(t.getUTCHours()).padStart(2, "0") + ":00z " + p.replace(",", "").replace(",", ""); };
 const fnum = (v, d) => { const s = v.toFixed(d); return /^-0(\.0*)?$/.test(s) ? s.slice(1) : s; };
 const tick = v => (Math.abs(v) < 1e-9 ? "0" : String(+v.toPrecision(6)));
-const MODES = [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ["spread", "Spread (σ)"], ["min", "Minimum"], ["max", "Maximum"], ["prob", "Probability"]];
+const MODES = [["refs", "RRFS Mean (REFS)", "RRFS Mean (REFS)"], ["min", "Minimum", "Min"], ["p05", "5th percentile", "P5"],
+  ["p10", "10th percentile", "P10"], ["p25", "25th percentile", "P25"], ["p50", "Median (50th percentile)", "P50"],
+  ["mean", "Member mean", "Mean"], ["p75", "75th percentile", "P75"], ["p90", "90th percentile", "P90"],
+  ["p95", "95th percentile", "P95"], ["max", "Maximum", "Max"], ["spread", "Spread (σ)", "Spread (σ)"], ["prob", "Probability", "Probability"]];
+const PCT_MODES = { p05: 0.05, p10: 0.10, p25: 0.25, p50: 0.50, p75: 0.75, p90: 0.90, p95: 0.95 };
 const modeLabel = m => m.startsWith("m0") ? m : MODES.find(x => x[0] === m)[1];
 
 function seg(el, items, current, onPick, multi) {
@@ -239,7 +245,19 @@ function thrList(p) {
 // ---------------------------------------------------------------- ensemble reductions
 function activeMembers() { return D.members.filter(m => state.on[m]); }
 function thrOf(p) { const l = thrList(p); return state.thr != null && l.includes(state.thr) ? state.thr : l[Math.min(1, l.length - 1)]; }
+function percentile(arrs, q) {                              // linear interpolation between the sorted member values
+  const n = D.grid.nx * D.grid.ny, out = new Float32Array(n), m = arrs.length, buf = new Float32Array(m);
+  for (let i = 0; i < n; i++) {
+    let c = 0;
+    for (let k = 0; k < m; k++) { const v = arrs[k][i]; if (v === v) buf[c++] = v; }
+    if (!c) { out[i] = NaN; continue; }
+    const a = buf.subarray(0, c).sort(), r = q * (c - 1), lo = Math.floor(r), hi = Math.ceil(r);
+    out[i] = a[lo] + (a[hi] - a[lo]) * (r - lo);
+  }
+  return out;
+}
 function reduce(arrs, mode, thr, dir) {
+  if (mode in PCT_MODES) return percentile(arrs, PCT_MODES[mode]);
   const n = D.grid.nx * D.grid.ny, out = new Float32Array(n), m = arrs.length;
   for (let i = 0; i < n; i++) {
     let c = 0, s = 0, s2 = 0, mn = Infinity, mx = -Infinity, hit = 0;
@@ -368,7 +386,7 @@ let renderToken = 0;
 async function render() {
   const token = ++renderToken, p = prod();
   writeHash(); statusLine(); controls();
-  $("#single").hidden = state.layout !== "map"; $("#stampwrap").hidden = state.layout !== "stamps";
+  $("#single").hidden = state.layout !== "map"; $("#stampwrap").hidden = state.layout === "map";
   $("#blurb").textContent = p.desc;
   const msg = $("#msg"), notice = $("#notice");
   notice.hidden = true;
@@ -377,8 +395,9 @@ async function render() {
   if (mode === "refs" && !p.available.refs) { mode = "mean"; notes.push("The official REFS mean file does not carry this field, so the member mean is shown."); }
   if (p.kind === "cum" && state.win === 1) notes.push("1-hour accumulation in the hour ending at the valid time; the maps step every 3 hours.");
   else if (p.kind === "cum" && state.win > 1 && state.frame - state.win / D.frame_step < 0) notes.push(`The ${state.win}-hour window starts before the run began, so the run total so far is shown.`);
+  if (mode in PCT_MODES) { const n = activeMembers().length; notes.push(`Percentiles are interpolated across the ${n} member${n === 1 ? "" : "s"} switched on, so with so few members P5/P10 sit close to the minimum and P90/P95 close to the maximum.`); }
   if (notes.length) { notice.hidden = false; notice.textContent = notes.join(" "); }
-  if (state.layout === "stamps") return renderStamps(token, p);
+  if (state.layout !== "map") return renderStamps(token, p);
   msg.hidden = false; msg.textContent = "Loading…";
   let v;
   try { v = await viewField(mode); } catch (e) { msg.textContent = "Could not load data (" + e.message + ")"; return; }
@@ -392,8 +411,9 @@ async function render() {
 let current = null;
 
 async function renderStamps(token, p) {
-  const defs = [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ["spread", "Spread (σ)"], ["prob", "Probability"], ...D.members.map(m => [m, m])];
-  const grid = $("#stamps"); grid.replaceChildren();
+  const defs = state.layout === "pctl" ? MODES.filter(x => x[0] !== "refs" && x[0] !== "spread" && x[0] !== "prob").map(x => [x[0], x[1].replace("Median (50th percentile)", "Median (P50)").replace(" percentile", "")])
+    : [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ["spread", "Spread (σ)"], ["prob", "Probability"], ...D.members.map(m => [m, m])];
+  const grid = $("#stamps"); grid.replaceChildren(); grid.className = state.layout === "pctl" ? "pctl" : "";
   const first = await viewField("mean"); if (token !== renderToken) return;
   const lg = $("#slegend").getContext("2d"); lg.fillStyle = "#fff"; lg.fillRect(0, 0, 1200, 96);
   if (!first.error) { const [tb, tr] = titleParts(p, "mean", first); bold(lg, 25, 24, "RRFS winter weather", `: ${p.title} (${p.unit}) · valid ${zfmt(D.valid[state.frame])} · ${fcap()}`, 15); drawLegend(lg, 50, 40, 1000, 22, p, 12); }
@@ -486,13 +506,13 @@ function controls() {
   $("#g-window").hidden = p.kind !== "cum";
   seg($("#seg-window"), WINDOWS.map(w => ({ value: w, label: w ? `${w} h` : "Run total", disabled: w === 1 && !p.has1h,
       title: w === 1 ? "Accumulation in the hour ending at the valid time" : undefined })), state.win, w => set({ win: w }));
-  seg($("#seg-mode"), MODES.map(([k, l]) => ({ value: k, label: l, disabled: k === "refs" && !p.available.refs })),
+  seg($("#seg-mode"), MODES.map(([k, , l]) => ({ value: k, label: l, title: modeLabel(k), disabled: k === "refs" && !p.available.refs })),
       state.mode.startsWith("m0") ? null : state.mode, m => set({ mode: m }));
   $("#g-thr").hidden = state.mode !== "prob";
   seg($("#seg-thr"), thrList(p).map(t => ({ value: t, label: `${p.thr_dir === "le" ? "≤" : "≥"} ${t} ${p.unit}` })), thrOf(p), t => set({ thr: t }));
   seg($("#seg-members"), D.members.map(m => ({ value: m, label: m, on: state.on[m], disabled: !p.available[m] })), null, m => set({ on: { ...state.on, [m]: !state.on[m] } }), true);
   seg($("#seg-single"), D.members.map(m => ({ value: m, label: m, disabled: !p.available[m] })), state.mode, m => set({ mode: m }));
-  seg($("#seg-layout"), [{ value: "map", label: "Map" }, { value: "stamps", label: "All members" }], state.layout, l => set({ layout: l }));
+  seg($("#seg-layout"), [{ value: "map", label: "Map" }, { value: "stamps", label: "All members" }, { value: "pctl", label: "Percentiles" }], state.layout, l => set({ layout: l }));
   const sl = $("#slider"); sl.max = D.frames.length - 1; sl.value = state.frame;
   $("#when").innerHTML = `<strong>${fcap()}</strong> · ${fmtDate(D.valid[state.frame], "UTC")}<small>${fmtDate(D.valid[state.frame], TZ)}</small>`;
 }
@@ -508,7 +528,7 @@ function readHash() {
   if (mode && (MODES.some(m => m[0] === mode) || D.members.includes(mode))) state.mode = mode;
   if (f !== undefined && f !== "" && +f >= 0 && +f < D.frames.length) state.frame = +f;
   if (WINDOWS.includes(+w) && w !== undefined && w !== "") state.win = +w;
-  if (layout === "stamps") state.layout = "stamps";
+  if (layout === "stamps" || layout === "pctl") state.layout = layout;
 }
 const writeHash = () => history.replaceState(null, "", `#${state.product}/${state.mode}/${state.frame}/${state.win}/${state.layout}`);
 function set(patch) { Object.assign(state, patch); if (patch.frame === undefined || true) render(); }

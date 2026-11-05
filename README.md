@@ -13,12 +13,13 @@ directory and deploys it as a Pages artifact.
 | Control | What it does |
 |---|---|
 | **Topic / Product** | 7 topics, 30 products (table below). |
-| **Ensemble view** | `RRFS Mean (REFS)` · `Member mean` · `Spread (σ)` · `Minimum` · `Maximum` · `Probability`. |
+| **Ensemble view** | `RRFS Mean (REFS)` · `Min` · `P5` · `P10` · `P25` · `P50` · `Mean` · `P75` · `P90` · `P95` · `Max` · `Spread (σ)` · `Probability`, for every product. Percentiles are linearly interpolated across the members switched on, so with five members P5/P10 sit near the minimum and P90/P95 near the maximum. |
 | **Members** | Click `m001`–`m005` to switch members **on or off**; mean, spread, min, max and probabilities are recomputed instantly in your browser from the members left on. |
 | **Single member** | Look at one member on its own. |
 | **Probability of** | Threshold buttons per product (e.g. ≥ 6 in of Kuchera snow, ≥ 0.25 in QPF, ≥ 50 mph gust, ≤ 0 °F wind chill). |
 | **Accumulation window** | **1 h**, 3 h, 6 h, 12 h, 24 h or run total, for QPF and every snowfall method. 1-h maps are the hour ending at the valid time (a stored field, so the maps step every 3 h); 3/6/12/24-h windows are differences of stored totals. |
 | **All members** layout | Postage-stamp grid: REFS mean, member mean, spread, probability and every member side by side. |
+| **Percentiles** layout | All ten statistics (Min, P5, P10, P25, P50, Mean, P75, P90, P95, Max) side by side for the current product, window and time; click one to open it. |
 | **Time** | Slider, ◀ ▶ buttons, ← / → keys, space to play; valid times in UTC and Eastern. |
 | **Click the map** | Point forecast: every member, the member mean and the REFS mean as lines over the forecast. |
 | Hover | Value under the cursor. Land-area low / average / high tiles for the current map. |
