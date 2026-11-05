@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from rrfs_viewer import build, pipeline
+from rrfs_viewer import winter as W
 from rrfs_viewer.catalog import BY_KEY
 from rrfs_viewer.s3 import S3Source
 from rrfs_viewer.testing import FakeS3
@@ -63,9 +64,56 @@ def test_member_products_complete_and_physical(member, rg):
     assert (out["snow_mean"][ok] >= lo[ok] - 1e-3).all() and (out["snow_mean"][ok] <= hi[ok] + 1e-3).all()
 
 
+def test_literature_methods(member, rg):
+    out, _, _ = member
+    n = lambda k: np.nan_to_num(out[k])
+    liq = n("snow_12") / 12.0
+    # ratios stay inside their documented ranges
+    assert out["slr_nbmthick"].min() >= 3 and out["slr_nbmthick"].max() <= 40
+    assert np.nanmax(out["slr_byun"]) <= 18.8 + 1e-3 and np.nanmin(out["slr_byun"]) >= 0
+    assert 10.6 - 1e-3 <= out["slr_clim"].min() and out["slr_clim"].max() <= 13.4 + 1e-3
+    assert np.all(out["slr_clim"][0] == out["slr_clim"][1])                       # constant in time
+    np.testing.assert_allclose(out["slr_clim"][0], out["slr_clim"][1])
+    assert np.isfinite(out["slr_nbmthick"]).any() and np.isfinite(out["slr_byun"]).any()
+    # snowfall = snow liquid x ratio (all methods share the same snow liquid, so totals are bracketed by their ratio limits)
+    assert (n("snow_nbmthick") >= 3 * liq - 1e-3).all() and (n("snow_nbmthick") <= 40 * liq + 1e-3).all()
+    assert (n("snow_byun") <= 18.8 * liq + 1e-3).all()
+    assert (n("snow_clim") >= 10.6 * liq - 1e-3).all() and (n("snow_clim") <= 13.4 * liq + 1e-3).all()
+    # the NBM-style blend is the mean of the max-T-aloft and thickness ratios, so its total lies between theirs
+    lo, hi = np.minimum(n("snow_maxt"), n("snow_nbmthick")), np.maximum(n("snow_maxt"), n("snow_nbmthick"))
+    assert (n("snow_nbm") >= lo - 2e-3).all() and (n("snow_nbm") <= hi + 2e-3).all()
+    np.testing.assert_allclose(out["slr_nbm"], 0.5 * (out["slr_maxt"] + out["slr_nbmthick"]), atol=1e-4, equal_nan=True)
+    # the spread is max - min over the forecast methods and never negative
+    meth = np.stack([out[m] for m in pipeline.SPREAD_METHODS])
+    ok = np.isfinite(out["snow_spread"])
+    assert ok.any() and (out["snow_spread"][ok] >= 0).all()
+    np.testing.assert_allclose(out["snow_spread"][ok], (np.nanmax(meth, axis=0) - np.nanmin(meth, axis=0))[ok], atol=1e-4)
+    # the multi-method mean is unchanged: still the five original methods only
+    assert pipeline.SNOW_METHODS == ("snow_model", "snow_12", "snow_kuchera", "snow_maxt", "snow_thick")
+    assert "snow_byun" not in pipeline.SPREAD_METHODS and "snow_clim" not in pipeline.SPREAD_METHODS
+
+
+def test_byun_ratio_is_recomputable_from_stored_fields(member):
+    """Frame 0 is forecast hour 3, so its 3-hour precipitation is the run-total QPF: the stored ratio must follow from T2 and QPF."""
+    out, _, _ = member
+    t_c = (out["t2"][0].astype(np.float64) - 32.0) / 1.8
+    expect = W.slr_byun(t_c, out["qpf"][0].astype(np.float64) * 25.4)
+    pr = out["qpf"][0].astype(np.float64) * 25.4
+    near_edge = np.min(np.abs(pr[..., None] - np.array([2.0, 3.0, 4.0, 5.0])), axis=-1) < 1e-4    # float rounding picks the other set
+    ok = np.isfinite(out["slr_byun"][0]) & np.isfinite(expect) & ~near_edge
+    assert ok.sum() > 1000
+    np.testing.assert_allclose(out["slr_byun"][0][ok], expect[ok], atol=0.05)
+    # heavier 3-h precipitation selects a coefficient set with a lower cold limit
+    heavy = ok & (out["qpf"][0] * 25.4 >= 5) & (t_c < -5)
+    light = ok & (out["qpf"][0] * 25.4 < 2) & (t_c < -5)
+    if heavy.any() and light.any():
+        assert out["slr_byun"][0][heavy].max() <= 11.9 + 1e-3 < out["slr_byun"][0][light].min()
+
+
 def test_one_hour_fields_are_consistent_with_totals(member):
     out, _, _ = member
-    for base in ("qpf", "snow_12", "snow_kuchera", "snow_maxt", "snow_thick", "snow_mean", "snow_model"):
+    for base in ("qpf", "snow_12", "snow_kuchera", "snow_maxt", "snow_thick", "snow_mean", "snow_model",
+                 "snow_nbmthick", "snow_nbm", "snow_byun", "snow_clim"):
         one, tot = np.nan_to_num(out[base + "_1h"]), np.nan_to_num(out[base])
         assert one.min() >= -1e-4, base
         assert (one[1] <= tot[1] - tot[0] + 0.02).all(), base          # the last hour of a 3-h block <= the 3-h window

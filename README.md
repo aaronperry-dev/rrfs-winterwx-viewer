@@ -1,7 +1,7 @@
 # RRFS winter-weather dashboard · New England
 
 A static GitHub Pages dashboard for the NOAA **Rapid Refresh Forecast System (RRFS) ensemble** over New England, built around
-everything that matters in a winter storm: QPF, snowfall by four ratio methods, freezing rain and sleet, precipitation type,
+everything that matters in a winter storm: QPF, snowfall by nine ratio methods plus a method-spread map, freezing rain and sleet, precipitation type,
 dendritic-growth-zone (DGZ) diagnostics, lift, wind, visibility, blizzard criteria and wind chill.
 
 It looks and behaves like the sibling RTMA/URMA viewer (same layout, colours, station values and map furniture), and is
@@ -42,8 +42,13 @@ then the map with a right-hand sidebar of checkbox-style options (ensemble view,
 | | **Kuchera snowfall** | Snow-type liquid × Kuchera ratio, `12 + 2 (271.16 K − Tmax)` for Tmax > 271.16 K, `12 + (271.16 K − Tmax)` otherwise, Tmax = warmest temperature from 2 m up to 500 hPa; clipped to 3:1–40:1 |
 | | **Max-T-aloft snowfall** | Snow-type liquid × 5th-degree polynomial in the warmest temperature from ~610 m AGL to 500 hPa (Veals et al. 2025; experimental) |
 | | **Thickness snowfall** | Snow-type liquid × the CMC thickness ratio: 10:1, reduced by the Murphy relation `10 × (30.6 − 0.1057 × Z1000–700[dam])` wherever the 850–700 hPa thickness exceeds 1540 m. Thickness from model `HGT` (1000/850/700 hPa), falling back to the hypsometric equation on the temperature levels |
-| | **Multi-method mean** | Mean of the five estimates above (needs at least four) |
-| Snow ratio (SLR) | **12:1, Kuchera, max-T-aloft, thickness** | The ratio each method used at the valid time |
+| | **Multi-method mean** | Mean of the five estimates above (needs at least four). The literature methods below are not part of it |
+| | **NBM thickness snowfall** | Snow-type liquid × the National Blend of Models linear 850–700 hPa thickness ratio, `−0.16559 × Z850–700[m] + 263.35` (NBM v5.0 winter-suite documentation); clipped to 3:1–40:1 like the others |
+| | **NBM-style blend snowfall** | Snow-type liquid × the equal-weight mean of the max-T-aloft and NBM thickness ratios: the recipe NBM uses for ensembles without vertical velocity (CMC REPS/GEPS). NBM's Cobb member is omitted |
+| | **Byun snowfall** | Snow-type liquid × the Byun et al. (2008) logistic ratio `a / (1 + exp((T − b)/c))`, T = 2 m temperature in °C, `a`, `b`, `c` chosen by the 3-hour precipitation (< 2, 2–3, 3–4, 4–5, ≥ 5 mm; the 1–2 mm set below 1 mm, as in the paper) |
+| | **Climatological-ratio snowfall** | Snow-type liquid × the regional mean ratio of Baxter et al. (2005, Table 2: Caribou 12.3, Burlington 13.4, Gray 11.6, Albany 12.2, Binghamton 13.0, Boston/Taunton 10.7, Upton 10.6), inverse-distance weighted (power 2, 60 km floor). A reference, constant in time |
+| | **Method spread** | Run-total snowfall, highest minus lowest of: model, 12:1, Kuchera, max-T-aloft, CMC thickness, NBM thickness (Byun and the climatology are left out). Valid at the frame time; no accumulation windows |
+| Snow ratio (SLR) | **12:1, Kuchera, max-T-aloft, thickness, NBM thickness, NBM-style blend, Byun, climatology** | The ratio each method used at the valid time |
 | | **Model-implied ratio** | Run-total `ASNOW` ÷ run-total snow-type liquid, where ≥ 0.02 in of snow liquid has fallen (two different model diagnostics; a diagnostic, not a measurement) |
 | Ice & p-type | **Freezing rain, sleet** | Hourly `APCP` × `CFRZR` / `CICEP` flag (liquid equivalent) |
 | | **Snow / sleet / freezing rain / rain** | Precipitation-type probability (members: 0 or 100; mean: % of members) |
@@ -146,13 +151,23 @@ in demo mode is synthetic and marked as such on the page.
   developed offline; the first live run found the REFS-mean precipitation windows were not as assumed (now handled adaptively). Missing messages are not fatal: the product is simply empty for that frame/member (a hole in the hourly
   `APCP` withholds all later accumulations rather than under-reporting them), and the Actions log lists what was missing.
 * **Snowfall methods are guidance, not forecasts.** A ratio is applied to model QPF, so all of them inherit its errors. The ratio at the
-  end of each 3-hour block is used for the whole block. The 850–700 mb "thickness" method here is the published CMC/Murphy relation (the
-  National Blend of Models' own thickness mapping is not published in the sources I could find), and it only *lowers* the ratio in
-  marginal, warm-layer snow.
+  end of each 3-hour block is used for the whole block. There are two thickness methods: the CMC/Murphy relation, which only *lowers* the
+  ratio in marginal, warm-layer snow, and the NBM line, which also raises it in cold layers (about 15:1 at 1500 m, 23:1 at 1450 m). The
+  NBM document does not state the thickness unit; metres is the only reading that gives sensible ratios, and its clip limits are ours.
 * **No Cobb SLR.** It needs omega on pressure levels, which the RRFS files don't carry. `Peak upward motion` (`MAXUVV`, a column maximum)
   is a proxy for lift and cannot say *where* in the column the lift is relative to the DGZ.
+* **Not implemented, on purpose.** The NBM Cobb temperature–ratio curve, its wet-bulb melt factor, and the Ware/Roebber liquid-amount
+  correction have no published coefficients that I could reach (NBM documents the structure and an exponent of 1.3 for the melt term, not
+  the formula), and the Cobb weighting needs omega. Inventing numbers under those names would pass off a guess as a method. To add them,
+  start from the COMET/NBM Cobb description and the Roebber et al. (2003) neural-network or Ware et al. (2006) nomogram.
+* **Byun is a lower bound in cold snow.** It was fitted to Korean 3-hour data and cannot exceed `a` (11.9–18.8), so in cold, dry New England
+  snow it will sit well below Kuchera or the NBM thickness line. It uses the 2 m temperature at the valid time, not a 3-hour mean, and the
+  ratio at the end of a 3-hour block with that block's total precipitation for all three hours.
+* **The climatology is a reference.** 1971–2000 COOP data with a 2-inch snowfall minimum, so wind undercatch and settling bias it, with
+  no seasonal cycle. It is interpolated between seven office means and is not terrain-aware.
 * **Max-T-aloft ratio is experimental.** The polynomial was fitted to Alaska observations and is untested for New England;
-  treat it as one more scenario next to Kuchera, 10:1 and the model's own `ASNOW`. The pressure-level data stops at 500 hPa.
+  treat it as one more scenario next to Kuchera, 10:1 and the model's own `ASNOW`. The layer runs from 2000 ft AGL (≈ 610 m, as in NBM) up to
+  500 hPa, the highest level fetched; NBM and Veals et al. go to 400 hPa.
 * **Kuchera** uses the 2 m temperature and levels up to 500 hPa (the original used the surface-to-500 hPa layer as well).
 * **DGZ RH** exists only at 925–500 hPa, so DGZ layers below 925 hPa count as "unknown" and not as saturated.
 * **Freezing rain and sleet are liquid equivalents.** No radial-ice/flat-ice accretion model is applied.
@@ -184,4 +199,4 @@ site/index.html  the dashboard (single file, no dependencies)
 ## Credits
 
 Data: NOAA/NCEP RRFS via the NOAA Open Data Dissemination programme on AWS. Method references: Kuchera (2004), Cobb &
-Waldstreicher (2005), Veals et al. (2025), NWS wind-chill and blizzard definitions.
+Waldstreicher (2005), Baxter et al. (2005), Byun et al. (2008), Veals et al. (2025), NBM v5.0 winter-suite documentation, NWS wind-chill and blizzard definitions.

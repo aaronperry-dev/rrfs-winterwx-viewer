@@ -152,7 +152,11 @@ class RunTotal:
 
 # ============================================================================== ensemble members
 MEMBER_KEYS = tuple(p.key for p in STORE)
-SNOW_METHODS = ("snow_model", "snow_12", "snow_kuchera", "snow_maxt", "snow_thick")
+SNOW_METHODS = ("snow_model", "snow_12", "snow_kuchera", "snow_maxt", "snow_thick")      # the five that make the multi-method mean
+EXTRA_METHODS = ("snow_nbmthick", "snow_nbm", "snow_byun", "snow_clim")                   # literature methods shown on their own
+# Spread = max - min over the physically based forecast methods.  Byun (fitted to Korean data, capped near 19:1) and the
+# climatology (not a forecast) are shown but left out so they do not set the spread; snow_nbm is a mean of two members of the set.
+SPREAD_METHODS = SNOW_METHODS + ("snow_nbmthick",)
 Z_LEVELS = (1000, 850, 700)
 
 
@@ -162,6 +166,16 @@ def _method_mean(arrs: list[np.ndarray | None], min_n: int = 4) -> np.ndarray | 
     n = np.isfinite(st).sum(axis=0)
     mean = np.where(n > 0, np.nansum(st, axis=0) / np.maximum(n, 1), np.nan)
     return np.where(n >= min_n, mean, np.nan).astype(np.float32)
+
+
+def _method_range(arrs: list[np.ndarray | None], min_n: int = 4) -> np.ndarray | None:
+    """max - min over the methods that are available at each point (needs at least ``min_n`` of them)."""
+    ref = next(a for a in arrs if a is not None)
+    st = np.stack([a if a is not None else np.full_like(ref, np.nan) for a in arrs])
+    n = np.isfinite(st).sum(axis=0)
+    with np.errstate(all="ignore"):
+        rng = np.nanmax(st, axis=0) - np.nanmin(st, axis=0)
+    return np.where(n >= min_n, rng, np.nan).astype(np.float32)
 
 
 def _plan_member(F, k, acc_p: Acc, acc_s: Acc):
@@ -203,7 +217,8 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
 
     z = lambda: np.zeros((ny, nx), np.float32)
     qpf, swe_sn, swe_ip, swe_zr = z(), z(), z(), z()           # mm
-    snow = {m: z() for m in SNOW_METHODS if m != "snow_model"}  # inches
+    snow = {m: z() for m in SNOW_METHODS + EXTRA_METHODS if m != "snow_model"}  # inches
+    clim = winter.slr_baxter(rg.lat, rg.lon)                   # regional climatological ratio: no fetch, constant in time
     clock = winter.BlizzardClock((ny, nx), step=3)
     prev_flags = None
     broken = False                                             # a missing hourly QPF hole makes all later totals unreliable
@@ -242,8 +257,14 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
         if g("uvv") is not None:
             out["uvv"][k] = np.clip(g("uvv"), 0, None)
 
-        slr = {"snow_12": np.full((ny, nx), 12.0, np.float32), "snow_kuchera": None, "snow_maxt": None, "snow_thick": None}
-        out["slr_12"][k] = slr["snow_12"]
+        slr = {m: None for m in snow}
+        slr["snow_12"] = out["slr_12"][k] = np.full((ny, nx), 12.0, np.float32)
+        slr["snow_clim"] = out["slr_clim"][k] = clim
+        # 3-hour total precipitation (Byun's coefficient set); an hour with a hole makes the block unusable anyway
+        apcps = {h: evaluate(plans[("apcp", h)], A) for h in range(fr - 2, fr + 1)}
+        pr3 = None if any(a is None for a in apcps.values()) else sum(np.nan_to_num(a, nan=0.0) for a in apcps.values())
+        if t2k is not None and pr3 is not None:
+            slr["snow_byun"] = out["slr_byun"][k] = winter.slr_byun(t2k - 273.15, pr3)
         have_T = [g(("T", p)) for p in T_LEVELS]
         all_T = all(a is not None for a in have_T)
         if t2k is not None and ps_pa is not None and all_T:
@@ -269,11 +290,14 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
             dz_1000_700 = dz_850_700 = None
         if dz_1000_700 is not None:
             slr["snow_thick"] = out["slr_thick"][k] = winter.slr_thickness_cmc(dz_1000_700, dz_850_700)
+            slr["snow_nbmthick"] = out["slr_nbmthick"][k] = winter.slr_thickness_nbm(dz_850_700)
+            if slr["snow_maxt"] is not None:
+                slr["snow_nbm"] = out["slr_nbm"][k] = winter.slr_blend(slr["snow_maxt"], slr["snow_nbmthick"])
 
         # ---------------------------------------------------------------- hourly precipitation accounting
         inc1 = {"qpf": None, "liq": None}
         for h in range(fr - 2, fr + 1):
-            apcp = evaluate(plans[("apcp", h)], A)
+            apcp = apcps[h]
             flags = [g((n, h)) for n in ("sn", "ip", "zr")]
             if apcp is None or any(a is None for a in flags):
                 broken = True
@@ -313,6 +337,7 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
             out["snow_model_1h"][k] = asnow1 * IN_PER_M
         if not broken:
             out["snow_mean"][k] = _method_mean([out[m][k] if np.isfinite(out[m][k]).any() else None for m in SNOW_METHODS])
+            out["snow_spread"][k] = _method_range([out[m][k] if np.isfinite(out[m][k]).any() else None for m in SPREAD_METHODS])
             one = [out[m + "_1h"][k] if np.isfinite(out[m + "_1h"][k]).any() else None for m in SNOW_METHODS]
             if any(a is not None for a in one):
                 out["snow_mean_1h"][k] = _method_mean(one)

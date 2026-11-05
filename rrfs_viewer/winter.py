@@ -8,6 +8,14 @@ Sources
   temperature between 610 m AGL (~ps-70 hPa here) and 400 hPa (we have 500 hPa as the top level).
 * Thickness ratio (CMC operational snow-depth guidance, "Murphy factor"): ``10 x (-0.1057 x Z1000-700[dam] + 30.6)`` replaces the
   standard 10:1 when the 850-700 hPa thickness is above 154 dam (https://meteocentre.com/numerical-weather-prediction/cmc-map/sigwx-winter/tsh_e_doc.html).
+* NBM thickness ratio: ``-0.16559 x Z850-700[m] + 263.35`` (NBM v5.0 "Configuration and Technical Details of Winter Suite", VLab;
+  the document does not state the thickness unit, metres is the only reading that gives sensible ratios).  The NBM-style blend is
+  the 50/50 mean of the max-T-aloft and thickness ratios, which is what NBM uses for the CMC ensembles (no vertical velocity, so no Cobb).
+* Byun et al. (2008, Weather and Forecasting 23, 644-658): logistic ratio ``a / (1 + exp((T - b) / c))``, T in degC, coefficients by
+  3-h precipitation amount; ``a`` is the cold (dry-snow) limit, ``b`` the temperature where the ratio is ``a``/2.  Fitted to Korean
+  data, so it never exceeds ~19:1: a wet-snow-sensitive lower bound, not a cold-powder estimate.
+* Regional climatology (Baxter, Graves & Moore 2005, Weather and Forecasting 20, 729-744, Table 2): CWA mean ratios from 1971-2000
+  COOP data, spread over the map by inverse-distance weighting.  A reference, not a forecast; there is no seasonal cycle.
 * Dendritic growth zone (DGZ): the layer between the -12 and -18 degC isotherms (Cobb & Waldstreicher 2005; NWS TA-1604).
 * NWS wind chill: https://www.weather.gov/safety/cold-wind-chill-chart
 * NWS blizzard criteria: sustained wind or frequent gusts >= 35 mph, falling/blowing snow reducing visibility to
@@ -95,6 +103,74 @@ def slr_thickness_cmc(dz_1000_700_m, dz_850_700_m):
     murphy = 10.0 * (-0.1057 * (np.asarray(dz_1000_700_m, np.float64) / 10.0) + 30.6)
     slr = np.where(np.asarray(dz_850_700_m, np.float64) > CMC_CRITICAL_850_700_M, np.minimum(murphy, 10.0), 10.0)
     return np.clip(slr, SLR_MIN, SLR_MAX).astype(np.float32)
+
+
+NBM_THICK_SLOPE, NBM_THICK_INTERCEPT = -0.16559, 263.35
+
+
+def slr_thickness_nbm(dz_850_700_m):
+    """NBM linear 850-700 hPa thickness ratio (clipped 3:1..40:1; 1540 m -> 8.3, 1500 m -> 15.0, 1400 m -> 31.5)."""
+    slr = NBM_THICK_SLOPE * np.asarray(dz_850_700_m, np.float64) + NBM_THICK_INTERCEPT
+    return np.clip(slr, SLR_MIN, SLR_MAX).astype(np.float32)
+
+
+def slr_blend(*ratios):
+    """Equal-weight mean of ratio fields (NaN where any input is NaN)."""
+    return np.mean([np.asarray(r, np.float64) for r in ratios], axis=0).astype(np.float32)
+
+
+# Byun et al. 2008, Table of coefficients by 3-h precipitation amount [mm]: (upper bound, a, b, c)
+_BYUN = ((2.0, 18.8, 0.0811, 0.6508), (3.0, 16.1, 0.2182, 0.5373), (4.0, 14.9, 0.2295, 0.5174),
+         (5.0, 13.2, 0.2678, 0.5074), (np.inf, 11.9, 0.1524, 0.5174))
+
+
+def slr_byun(t_c, precip_mm_3h):
+    """Byun et al. logistic ratio from the surface air temperature (degC) and the 3-hour precipitation (mm).
+
+    Amounts below 1 mm per 3 h have no coefficients in the paper, which used the 1-2 mm set for them; so do we.
+    """
+    t = np.asarray(t_c, np.float64)
+    pr = np.asarray(precip_mm_3h, np.float64)
+    a = np.full(t.shape, _BYUN[-1][1])
+    b = np.full(t.shape, _BYUN[-1][2])
+    c = np.full(t.shape, _BYUN[-1][3])
+    for hi, ca, cb, cc in reversed(_BYUN[:-1]):
+        m = pr < hi
+        a, b, c = np.where(m, ca, a), np.where(m, cb, b), np.where(m, cc, c)
+    with np.errstate(over="ignore"):
+        sr = a / (1.0 + np.exp(np.clip((t - b) / c, -60.0, 60.0)))
+    return sr.astype(np.float32)
+
+
+# Baxter et al. 2005, Table 2: mean SLR of the NWS county warning areas in and around New England (lat, lon of the forecast office, mean).
+BAXTER_CWA = (
+    ("Caribou, ME", 46.87, -68.02, 12.3),
+    ("Burlington, VT", 44.47, -73.15, 13.4),
+    ("Gray/Portland, ME", 43.89, -70.25, 11.6),
+    ("Albany, NY", 42.69, -73.83, 12.2),
+    ("Binghamton, NY", 42.21, -75.98, 13.0),
+    ("Boston/Taunton, MA", 41.91, -71.07, 10.7),
+    ("Upton, NY", 40.87, -72.86, 10.6),
+)
+
+
+def slr_baxter(lat, lon, power: float = 2.0, floor_km: float = 60.0):
+    """Climatological mean ratio at each point: inverse-distance weighting (``power``) of the CWA means in ``BAXTER_CWA``.
+
+    Always inside the range of the inputs (10.6 - 13.4); the distance floor keeps a point at an office from collapsing onto it.
+    """
+    la = np.radians(np.asarray(lat, np.float64))
+    lo = np.radians(np.asarray(lon, np.float64))
+    num = np.zeros(la.shape)
+    den = np.zeros(la.shape)
+    for _, slat, slon, val in BAXTER_CWA:
+        dx = (lo - np.radians(slon)) * np.cos(0.5 * (la + np.radians(slat)))
+        dy = la - np.radians(slat)
+        d = np.maximum(6371.0 * np.hypot(dx, dy), floor_km)
+        w = d ** -power
+        num += w * val
+        den += w
+    return (num / den).astype(np.float32)
 
 
 # --------------------------------------------------------------------------- humidity over ice, DGZ

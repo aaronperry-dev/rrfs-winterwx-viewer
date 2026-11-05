@@ -120,3 +120,47 @@ def test_cmc_thickness_ratio():
     assert W.slr_thickness_cmc(a(2840.0), a(1545.0))[0] == pytest.approx(10 * (30.6 - 0.1057 * 284.0), abs=0.01)
     assert W.slr_thickness_cmc(a(2900.0), a(1560.0))[0] == 3.0
     assert W.slr_thickness_cmc(a(2700.0), a(1545.0))[0] == 10.0                  # never above 10:1
+
+
+# --------------------------------------------------------------------------- literature snow-ratio methods
+def test_nbm_thickness_ratio_is_the_published_line():
+    z = np.array([1400.0, 1500.0, 1540.0, 1560.0, 1700.0, 1300.0])
+    r = W.slr_thickness_nbm(z)
+    np.testing.assert_allclose(r[1:3], [-0.16559 * 1500 + 263.35, -0.16559 * 1540 + 263.35], atol=1e-3)
+    assert r[1] == pytest.approx(14.965, abs=0.01) and r[2] == pytest.approx(8.341, abs=0.01)
+    assert r[4] == 3.0 and r[5] == 40.0                                  # clipped like every other ratio here
+    assert np.all(np.diff(W.slr_thickness_nbm(np.linspace(1350, 1600, 60))) <= 0)    # thicker (warmer) layer -> lower ratio
+
+
+def test_blend_is_the_equal_weight_mean():
+    np.testing.assert_allclose(W.slr_blend(np.array([10.0, 20.0]), np.array([14.0, 24.0])), [12.0, 22.0])
+    assert np.isnan(W.slr_blend(np.array([10.0, np.nan]), np.array([14.0, 24.0]))[1])
+
+
+@pytest.mark.parametrize("pr,a,b,c", [(0.2, 18.8, 0.0811, 0.6508), (1.5, 18.8, 0.0811, 0.6508), (2.5, 16.1, 0.2182, 0.5373),
+                                      (3.5, 14.9, 0.2295, 0.5174), (4.5, 13.2, 0.2678, 0.5074), (8.0, 11.9, 0.1524, 0.5174)])
+def test_byun_uses_the_right_coefficient_set(pr, a, b, c):
+    t = np.array([-15.0, b, 3.0])
+    r = W.slr_byun(t, np.full(3, pr))
+    assert r[0] == pytest.approx(a, abs=0.01)                            # cold limit = a
+    assert r[1] == pytest.approx(a / 2, abs=1e-3)                        # half of a exactly at T = b
+    assert r[2] < 0.1 * a                                                # nearly nothing well above freezing
+
+
+def test_byun_shape():
+    t = np.linspace(-12, 4, 80)
+    r = W.slr_byun(t, np.full_like(t, 3.5))
+    assert np.all(np.diff(r) <= 1e-6) and r.max() <= 18.8 and r.min() >= 0
+    heavy, light = W.slr_byun(np.array([-5.0]), np.array([9.0])), W.slr_byun(np.array([-5.0]), np.array([1.5]))
+    assert heavy[0] < light[0]                                           # heavier precipitation -> denser snow
+    assert W.slr_byun(np.array([0.0]), np.array([8.0]))[0] == pytest.approx(6.82, abs=0.02)
+
+
+def test_baxter_climatology_stays_within_the_published_means():
+    lat = np.array([46.87, 41.91, 44.0, 40.87, 43.0])
+    lon = np.array([-68.02, -71.07, -72.0, -72.86, -75.0])
+    r = W.slr_baxter(lat, lon)
+    vals = [v for *_, v in W.BAXTER_CWA]
+    assert r.min() >= min(vals) - 1e-4 and r.max() <= max(vals) + 1e-4
+    assert r[0] == pytest.approx(12.3, abs=0.2) and r[1] < r[0]          # Caribou ~12.3; the Boston coast is lower (10.7 mean)
+    assert r.dtype == np.float32 and W.slr_baxter(np.zeros((3, 4)) + 43, np.zeros((3, 4)) - 71).shape == (3, 4)

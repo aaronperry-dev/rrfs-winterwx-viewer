@@ -62,16 +62,39 @@ PRODUCTS: tuple[Product, ...] = (
        "temperature is above 271.16 K, 12 + (271.16 K - T) otherwise).",
        (1, 3, 6, 12, 18, 24), "ge", "Snowfall - Kuchera ratio", has1h=True, step1h=0.02),
     _P("snow_maxt", "Max-T-aloft snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
-       "Snow-type liquid equivalent x max-temperature-aloft polynomial ratio (Veals et al. 2025; max T from ~610 m AGL to 500 hPa). "
-       "Experimental: fitted to Alaska data.",
+       "Snow-type liquid equivalent x max-temperature-aloft polynomial ratio (Veals et al. 2025; max T from ~610 m = 2000 ft AGL to "
+       "500 hPa; NBM uses 400 hPa as the top, 500 hPa is the highest level fetched here). Experimental: fitted to Alaska data.",
        (1, 3, 6, 12, 18, 24), "ge", "Snowfall - max-T-aloft ratio", has1h=True, step1h=0.02),
     _P("snow_thick", "Thickness snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
        "Snow-type liquid equivalent x the CMC thickness ratio: 10:1, reduced by the Murphy (Ontario) relation "
        "10 x (30.6 - 0.1057 x Z1000-700 [dam]) wherever the 850-700 hPa thickness exceeds 1540 m (marginal, wet snow).",
        (1, 3, 6, 12, 18, 24), "ge", "Snowfall - 850-700 mb thickness ratio", has1h=True, step1h=0.02),
     _P("snow_mean", "Multi-method mean", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
-       "Average of the five snowfall estimates above (model, 12:1, Kuchera, max-T-aloft, thickness): the middle of the method spread.",
+       "Average of the five snowfall estimates above (model, 12:1, Kuchera, max-T-aloft, CMC thickness): the middle of the method spread. "
+       "The literature methods below are not part of it.",
        (1, 3, 6, 12, 18, 24), "ge", "Snowfall - mean of methods", has1h=True, step1h=0.02),
+    # ------------------------------------------------------------------ snowfall: literature methods (not part of the mean)
+    _P("snow_nbmthick", "NBM thickness snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
+       "Snow-type liquid equivalent x the National Blend of Models thickness ratio, a straight line in the 850-700 hPa thickness: "
+       "-0.16559 x Z[m] + 263.35 (8:1 at 1540 m, 15:1 at 1500 m). One of the methods NBM blends operationally.",
+       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - NBM 850-700 mb thickness ratio", has1h=True, step1h=0.02),
+    _P("snow_nbm", "NBM-style blend snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
+       "Snow-type liquid equivalent x the equal-weight mean of the max-T-aloft and NBM thickness ratios, the recipe NBM uses for "
+       "ensembles without vertical velocity. NBM's Cobb member is left out: RRFS has no pressure-level omega.",
+       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - NBM-style blend (max T aloft + thickness)", has1h=True, step1h=0.02),
+    _P("snow_byun", "Byun snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
+       "Snow-type liquid equivalent x the Byun et al. (2008) logistic ratio of 2 m temperature, with coefficients chosen by 3-hour "
+       "precipitation. Fitted to Korean data and capped near 19:1: it is a wet-snow-sensitive lower estimate, and runs low in cold powder. "
+       "Uses the 2 m temperature at the valid time, not a 3-hour mean.",
+       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - Byun et al. temperature / precipitation-rate ratio", has1h=True, step1h=0.02),
+    _P("snow_clim", "Climatological-ratio snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
+       "Snow-type liquid equivalent x the regional mean ratio from Baxter et al. (2005): 10.6-13.4 across the NWS offices around New England, "
+       "interpolated between them. A reference for how much the weather-dependent methods differ from a typical winter, not a forecast.",
+       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - regional climatological ratio (Baxter et al.)", has1h=True, step1h=0.02),
+    _P("snow_spread", "Method spread", G_SNOW, "in", "inst", C.SPREAD, "u8", 0.0, 0.1, 1, False,
+       "Run-total snowfall: highest minus lowest of the model, 12:1, Kuchera, max-T-aloft, CMC thickness and NBM thickness estimates. "
+       "Large where the choice of ratio method matters most. Valid at the frame time (run total), so no accumulation windows.",
+       (1, 2, 4, 8), "ge", "Snowfall - spread between ratio methods (run total)"),
     # ------------------------------------------------------------------ snow-to-liquid ratios
     _P("slr_12", "12:1 ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
        "The fixed 12:1 ratio (a constant field, shown for comparison with the others).", (10, 12, 15, 20), "ge", "Snow-to-Liquid Ratio - fixed 12:1"),
@@ -84,6 +107,18 @@ PRODUCTS: tuple[Product, ...] = (
     _P("slr_thick", "Thickness ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
        "CMC thickness ratio: 10:1 unless the 850-700 hPa thickness is above 1540 m, then 10 x (30.6 - 0.1057 x Z1000-700 [dam]) (min 3:1).",
        (6, 8, 10), "le", "Snow-to-Liquid Ratio - 850-700 mb thickness"),
+    _P("slr_nbmthick", "NBM thickness ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
+       "NBM linear 850-700 hPa thickness ratio, -0.16559 x Z[m] + 263.35 (clipped 3:1 - 40:1).",
+       (10, 12, 15, 20), "ge", "Snow-to-Liquid Ratio - NBM 850-700 mb thickness"),
+    _P("slr_nbm", "NBM-style blend ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
+       "Equal-weight mean of the max-T-aloft and NBM thickness ratios.", (10, 12, 15, 20), "ge",
+       "Snow-to-Liquid Ratio - NBM-style blend"),
+    _P("slr_byun", "Byun ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
+       "Byun et al. (2008) logistic ratio of 2 m temperature and 3-hour precipitation. Near 0 above about +1 C, half of its limit "
+       "(11.9-18.8) at 0 C, and never above that limit.", (6, 10, 12, 15), "ge", "Snow-to-Liquid Ratio - Byun et al."),
+    _P("slr_clim", "Climatological ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
+       "Regional mean ratio from Baxter et al. (2005), 1971-2000 observations at the NWS offices around New England, interpolated. "
+       "Constant in time; shown as the reference for the others.", (11, 12, 13), "ge", "Snow-to-Liquid Ratio - regional climatology"),
     _P("slr_model", "Model-implied ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
        "Run-total ASNOW divided by the run-total snow-type liquid (shown where at least 0.02 in of snow liquid has fallen). "
        "The two come from different model diagnostics, so treat it as a diagnostic, not a measurement.",
