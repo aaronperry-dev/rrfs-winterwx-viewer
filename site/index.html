@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>New England winter weather · RRFS ensemble</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%231f6feb%27/%3E%3Cpath d=%27M16 6v20M7.3 11l17.4 10M7.3 21l17.4-10%27 fill=%27none%27 stroke=%27white%27 stroke-width=%272.4%27 stroke-linecap=%27round%27/%3E%3C/svg%3E">
+<meta name="description" content="RRFS ensemble winter-weather dashboard for New England: QPF, snowfall by four ratio methods, ice and precipitation type, dendritic growth zone, blizzard criteria, wind chill - REFS mean, member mean, spread and probabilities.">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f6f8; --surface: #ffffff; --ink: #1c2128; --muted: #59636e; --line: #d8dee4;
+    --accent: #1f6feb; --accent-ink: #ffffff; --soft: #eaeef2; --warn-bg: #fff4d6; --warn-ink: #6a4b00;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --surface: #161b22; --ink: #e6edf3; --muted: #9198a1; --line: #30363d;
+      --accent: #58a6ff; --accent-ink: #0d1117; --soft: #21262d; --warn-bg: #3a2f10; --warn-ink: #f2cc60;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 20px 20px 40px; }
+
+  header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 8px 24px; margin-bottom: 16px; }
+  h1 { font-size: 22px; line-height: 1.2; margin: 0; letter-spacing: -0.01em; }
+  .sub { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  .status { text-align: right; color: var(--muted); font-size: 13px; }
+  .status strong { color: var(--ink); font-weight: 600; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--warn-bg); color: var(--warn-ink); font-size: 12px; font-weight: 600; margin-left: 6px; }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 12px 22px; padding: 12px 14px; background: var(--surface);
+              border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 12px; }
+  .group { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .group > span { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .seg { display: inline-flex; flex-wrap: wrap; max-width: 100%; background: var(--soft); border-radius: 8px; padding: 2px; gap: 2px; }
+  .seg button { appearance: none; border: 0; background: transparent; color: var(--ink); font: inherit; font-size: 14px;
+                padding: 5px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+  .seg button:hover:not([aria-pressed="true"]):not(:disabled) { background: color-mix(in srgb, var(--ink) 8%, transparent); }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .seg button:disabled { opacity: .4; cursor: not-allowed; }
+  .seg.members button[aria-pressed="false"] { text-decoration: line-through; opacity: .55; }
+  button:focus-visible, .stamp:focus-visible, canvas:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .timebar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: var(--surface); border: 1px solid var(--line);
+             border-radius: var(--radius); margin-bottom: 16px; }
+  .timebar .seg button { padding: 5px 12px; }
+  .timebar input[type=range] { flex: 1; min-width: 120px; accent-color: var(--accent); }
+  .timebar .when { min-width: 250px; font-variant-numeric: tabular-nums; font-size: 14px; }
+  .timebar .when small { color: var(--muted); display: block; font-size: 12px; }
+
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+  .mapcard { position: relative; background: #fff; border-radius: var(--radius); border: 1px solid var(--line); overflow: hidden; }
+  .mapcard canvas { display: block; width: 100%; height: auto; cursor: crosshair; }
+  .mapcard .msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px;
+                  background: rgba(255,255,255,.82); color: #1c2128; font-size: 15px; }
+  .notice { margin: 8px 0 0; padding: 6px 10px; border-radius: 8px; background: var(--warn-bg); color: var(--warn-ink); font-size: 13px; }
+  .tip { position: fixed; z-index: 5; pointer-events: none; padding: 3px 8px; border-radius: 6px; background: #1c2128; color: #fff; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+
+  h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 18px; }
+  .tile { background: var(--soft); border-radius: 8px; padding: 8px 10px; }
+  .tile .k { font-size: 12px; color: var(--muted); }
+  .tile .v { font-size: 20px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .tile .u { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: 2px; }
+  .note { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+  #chart { width: 100%; height: auto; display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .legend i { display: inline-block; width: 18px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 4px; }
+
+  #stamps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .stamp { background: #fff; border: 2px solid var(--line); border-radius: var(--radius); padding: 4px; text-align: center; overflow: hidden; }
+  .stamp canvas { width: 100%; height: auto; display: block; cursor: pointer; }
+  .stamp .cap { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: #59636e; padding: 2px 6px 4px; font-weight: 600; }
+  .stamp.off { opacity: .35; }
+  #stamplegend { margin-bottom: 12px; }
+  #stamplegend canvas { width: 100%; max-width: 900px; height: auto; display: block; margin: 0 auto; background: #fff; border-radius: 8px; border: 1px solid var(--line); }
+
+  footer { margin-top: 28px; color: var(--muted); font-size: 12.5px; }
+  footer a { color: inherit; }
+  [hidden] { display: none !important; }
+  @media (max-width: 960px) {
+    main { grid-template-columns: minmax(0, 1fr); }
+    #stamps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .status { text-align: left; }
+    .timebar { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>New England winter weather</h1>
+      <p class="sub">NOAA RRFS ensemble · 3&nbsp;km · REFS mean + members m001–m005 · QPF, snowfall, ice, snow growth, blizzard</p>
+    </div>
+    <div class="status" id="status" aria-live="polite">Loading…</div>
+  </header>
+
+  <section class="controls" aria-label="Product">
+    <div class="group"><span>Topic</span><div class="seg" id="seg-group" role="group" aria-label="Topic"></div></div>
+    <div class="group"><span>Product</span><div class="seg" id="seg-product" role="group" aria-label="Product"></div></div>
+    <div class="group" id="g-window"><span>Accumulation window</span><div class="seg" id="seg-window" role="group" aria-label="Accumulation window"></div></div>
+  </section>
+  <section class="controls" aria-label="Ensemble">
+    <div class="group"><span>Ensemble view</span><div class="seg" id="seg-mode" role="group" aria-label="Ensemble view"></div></div>
+    <div class="group" id="g-thr"><span>Probability of</span><div class="seg" id="seg-thr" role="group" aria-label="Probability threshold"></div></div>
+    <div class="group"><span>Members in the member mean (click to toggle)</span><div class="seg members" id="seg-members" role="group" aria-label="Members"></div></div>
+    <div class="group"><span>Single member</span><div class="seg" id="seg-single" role="group" aria-label="Single member"></div></div>
+    <div class="group"><span>Layout</span><div class="seg" id="seg-layout" role="group" aria-label="Layout"></div></div>
+  </section>
+  <section class="timebar" aria-label="Forecast time">
+    <div class="seg"><button type="button" id="btn-prev" aria-label="Previous time">◀</button><button type="button" id="btn-play" aria-label="Play">▶ Play</button><button type="button" id="btn-next" aria-label="Next time">▶</button></div>
+    <input type="range" id="slider" min="0" max="0" value="0" aria-label="Forecast hour">
+    <div class="when" id="when"></div>
+  </section>
+
+  <main id="single">
+    <div>
+      <div class="mapcard"><canvas id="map" width="1200" height="876" tabindex="0" aria-label="Map"></canvas><div class="msg" id="msg" hidden></div></div>
+      <p class="notice" id="notice" hidden></p>
+    </div>
+    <aside class="card" aria-label="Summary">
+      <h2 id="sum-title">New England land area</h2>
+      <div class="tiles" id="tiles"></div>
+      <h2>Point forecast <span id="pt-name" style="text-transform:none;letter-spacing:0"></span></h2>
+      <canvas id="chart" width="680" height="440" aria-label="Point forecast by member"></canvas>
+      <div class="legend" id="chart-legend"></div>
+      <p class="note" id="blurb"></p>
+    </aside>
+  </main>
+
+  <section id="stampwrap" hidden>
+    <div id="stamplegend"><canvas id="slegend" width="1200" height="96"></canvas></div>
+    <div id="stamps"></div>
+  </section>
+
+  <footer>
+    Data: NOAA/NCEP RRFS v1 ensemble members and REFS mean from the <a href="https://registry.opendata.aws/noaa-rrfs/">NOAA Open Data (AWS S3)</a> bucket,
+    fetched field by field with byte-range requests. The member mean, spread, minimum, maximum and probabilities are computed in your browser from the members
+    you leave switched on; the REFS mean is NOAA's own (it also blends time-lagged members and the HRRR). Fields that need pressure-level profiles
+    (Kuchera and max-T-aloft snowfall, DGZ metrics, warm nose, gusts, blizzard) exist only for the members. Click the map for a point forecast;
+    ← / → step through time, space plays. <span id="demo-note"></span>
+  </footer>
+</div>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const TZ = "America/New_York";
+const MAP = { x: 25, y: 52, w: 1150, h: 742 };            // map frame inside the 1200 x 876 composition
+const state = { group: null, product: "snow_kuchera", mode: "mean", thr: null, win: 0, frame: 0, layout: "map", on: {}, point: null };
+let D, overlay, landMask, playTimer = null;
+const store = new Map();                                    // "product.source" -> Promise<{u: Uint8Array|Uint16Array, p}>
+
+// ---------------------------------------------------------------- helpers
+const prod = () => D.products.find(p => p.key === state.product);
+const fmtDate = (iso, tz, long) => new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric",
+    ...(long ? { year: "numeric" } : {}), hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(iso));
+const zfmt = iso => { const t = new Date(iso); const p = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(t);
+  return String(t.getUTCHours()).padStart(2, "0") + ":00z " + p.replace(",", "").replace(",", ""); };
+const fnum = (v, d) => { const s = v.toFixed(d); return /^-0(\.0*)?$/.test(s) ? s.slice(1) : s; };
+const tick = v => (Math.abs(v) < 1e-9 ? "0" : String(+v.toPrecision(6)));
+const MODES = [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ["spread", "Spread (σ)"], ["min", "Minimum"], ["max", "Maximum"], ["prob", "Probability"]];
+const modeLabel = m => m.startsWith("m0") ? m : MODES.find(x => x[0] === m)[1];
+
+function seg(el, items, current, onPick, multi) {
+  el.replaceChildren(...items.map(it => {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = it.label; b.disabled = !!it.disabled;
+    b.setAttribute("aria-pressed", String(multi ? !!it.on : it.value === current));
+    if (it.title) b.title = it.title;
+    b.addEventListener("click", () => onPick(it.value));
+    return b;
+  }));
+}
+
+// ---------------------------------------------------------------- data loading
+async function inflate(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(url + " " + r.status);
+  return new Uint8Array(await new Response(r.body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+}
+function load(p, src) {
+  if (!p.available[src]) return Promise.resolve(null);
+  const key = `${p.key}.${src}`;
+  if (!store.has(key)) store.set(key, inflate(`data/${key}.bin?v=${D.version}`).then(raw => {
+    const { nx, ny } = D.grid, nf = D.frames.length, n = nf * nx * ny;
+    if (p.dtype === "u16") {
+      const u = new Uint16Array(n);
+      for (let i = 0; i < n; i++) u[i] = (raw[i] << 8) | raw[n + i];
+      return { u, p };
+    }
+    // undo 2-D delta (mod 256): cumulative sum down the rows, then along the columns
+    const u = raw.subarray(0, n).slice();
+    for (let f = 0; f < nf; f++) {
+      const o = f * nx * ny;
+      for (let y = 1; y < ny; y++) for (let x = 0; x < nx; x++) u[o + y * nx + x] += u[o + (y - 1) * nx + x];
+      for (let y = 0; y < ny; y++) for (let x = 1; x < nx; x++) u[o + y * nx + x] += u[o + y * nx + x - 1];
+    }
+    return { u, p };
+  }));
+  return store.get(key);
+}
+function evictOthers() { for (const k of [...store.keys()]) if (!k.startsWith(state.product + ".")) store.delete(k); }
+
+function frameField(d, fi) {                                // dequantised Float32Array of one frame
+  const { nx, ny } = D.grid, n = nx * ny, p = d.p, top = p.dtype === "u8" ? 255 : 65535, o = fi * n, out = new Float32Array(n);
+  for (let i = 0; i < n; i++) { const q = d.u[o + i]; out[i] = q === top ? NaN : p.lo + p.step * q; }
+  return out;
+}
+function sourceField(d, fi, win) {                          // one source, windowed for accumulations
+  const a = frameField(d, fi), p = d.p;
+  if (p.kind !== "cum" || !win) return a;
+  const bi = fi - win / D.frame_step;
+  if (bi < 0) return a;                                     // window reaches back before initialisation: run total
+  const b = frameField(d, bi);
+  for (let i = 0; i < a.length; i++) { const v = a[i] - b[i]; a[i] = v < 0.0005 ? 0 : v; }
+  return a;
+}
+
+// ---------------------------------------------------------------- ensemble reductions
+function activeMembers() { return D.members.filter(m => state.on[m]); }
+function thrOf(p) { return state.thr != null && p.thr.includes(state.thr) ? state.thr : p.thr[0]; }
+function reduce(arrs, mode, thr, dir) {
+  const n = D.grid.nx * D.grid.ny, out = new Float32Array(n), m = arrs.length;
+  for (let i = 0; i < n; i++) {
+    let c = 0, s = 0, s2 = 0, mn = Infinity, mx = -Infinity, hit = 0;
+    for (let k = 0; k < m; k++) {
+      const v = arrs[k][i];
+      if (v !== v) continue;
+      c++; s += v; s2 += v * v; if (v < mn) mn = v; if (v > mx) mx = v;
+      if (dir === "le" ? v <= thr : v >= thr) hit++;
+    }
+    out[i] = c === 0 ? NaN : mode === "mean" ? s / c : mode === "spread" ? (c < 2 ? NaN : Math.sqrt(Math.max(0, (s2 - s * s / c) / (c - 1)))) :
+             mode === "min" ? mn : mode === "max" ? mx : 100 * hit / c;
+  }
+  return out;
+}
+async function viewField(mode, fi = state.frame) {           // -> { values, style, unit, label } or { error }
+  const p = prod(), win = p.kind === "cum" ? state.win : 0;
+  if (mode === "refs") {
+    const d = await load(p, "refs");
+    return d ? { values: sourceField(d, fi, win), style: p, unit: p.unit, dec: p.decimals } : { error: "The official REFS mean file does not carry this field - use the member mean." };
+  }
+  if (mode.startsWith("m0")) {
+    const d = await load(p, mode);
+    return d ? { values: sourceField(d, fi, win), style: p, unit: p.unit, dec: p.decimals } : { error: `${mode} has no data for this field.` };
+  }
+  const mem = activeMembers();
+  if (!mem.length) return { error: "All members are switched off - turn at least one on." };
+  const ds = (await Promise.all(mem.map(m => load(p, m)))).filter(Boolean);
+  if (!ds.length) return { error: "No member data for this field." };
+  const arrs = ds.map(d => sourceField(d, fi, win));
+  const thr = thrOf(p);
+  const values = reduce(arrs, mode, thr, p.thr_dir);
+  if (mode === "prob") return { values, style: PROB, unit: "%", dec: 0, thr };
+  if (mode === "spread") return { values, style: spreadStyle(p), unit: p.unit, dec: Math.max(p.decimals, 1) };
+  return { values, style: p, unit: p.unit, dec: p.decimals };
+}
+
+const PROB = { levels: [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95], ticks: [10, 30, 50, 70, 90],
+  colors: [null, "#eef1fb", "#cfd8f4", "#a9bcec", "#83a0e0", "#6b86d3", "#7a6fc4", "#8f55b3", "#a83c9c", "#c02b7f", "#d6204f", "#8f0f1e"] };
+function spreadStyle(p) {
+  const lv = p.levels[0] < 0 ? [0.5, 1, 2, 3, 5, 7, 10, 15, 20] : p.levels.map(v => +(v / 4).toPrecision(2)).filter((v, i, a) => a.indexOf(v) === i);
+  const base = ["#f4f1fa", "#ddd3ef", "#c3b2e3", "#a78fd4", "#8a6dc4", "#6c4fae", "#523a92", "#3b2873", "#281a52", "#170d33", "#0c0620"];
+  return { levels: lv, ticks: lv, colors: [null, ...lv.slice(1).map((_, i) => base[Math.min(i, base.length - 1)]), base[Math.min(lv.length - 1, base.length - 1)]] };
+}
+
+// ---------------------------------------------------------------- drawing
+const hex = h => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+let lutCache = new WeakMap(), geom = null;
+function geometry(W, H) {                                   // bilinear sampling positions for a W x H target
+  if (geom && geom.W === W && geom.H === H) return geom;
+  const { nx, ny } = D.grid, xi = new Int32Array(W), xf = new Float32Array(W), yi = new Int32Array(H), yf = new Float32Array(H);
+  for (let i = 0; i < W; i++) { const g = Math.min(nx - 1.001, Math.max(0, (i + 0.5) * nx / W - 0.5)); xi[i] = g | 0; xf[i] = g - xi[i]; }
+  for (let j = 0; j < H; j++) { const g = Math.min(ny - 1.001, Math.max(0, (ny - (j + 0.5) * ny / H) - 0.5)); yi[j] = g | 0; yf[j] = g - yi[j]; }   // row 0 of the data is the south edge
+  return (geom = { W, H, xi, xf, yi, yf });
+}
+function paintField(ctx, x0, y0, W, H, values, style) {
+  const { nx } = D.grid, g = geometry(W, H), lv = style.levels, nl = lv.length;
+  let lut = lutCache.get(style);
+  if (!lut) { lut = style.colors.map(c => c ? [...hex(c), 255] : null); lutCache.set(style, lut); }
+  const img = ctx.createImageData(W, H), px = img.data;
+  for (let j = 0; j < H; j++) {
+    const r0 = g.yi[j] * nx, r1 = r0 + nx, fy = g.yf[j];
+    for (let i = 0; i < W; i++) {
+      const c0 = g.xi[i], fx = g.xf[i];
+      const a = values[r0 + c0], b = values[r0 + c0 + 1], c = values[r1 + c0], d = values[r1 + c0 + 1];
+      let v;
+      if (a === a && b === b && c === c && d === d) v = (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+      else { const t = [a, b, c, d].filter(z => z === z); if (!t.length) continue; v = (fx < .5 ? (fy < .5 ? a : c) : (fy < .5 ? b : d)); if (v !== v) v = t[0]; }
+      let lo = 0, hi = nl;                                  // number of edges <= v  ==  colour index
+      while (lo < hi) { const m = (lo + hi) >> 1; if (lv[m] <= v) lo = m + 1; else hi = m; }
+      const col = lut[lo]; if (!col) continue;
+      const o = (j * W + i) * 4; px[o] = col[0]; px[o + 1] = col[1]; px[o + 2] = col[2]; px[o + 3] = 255;
+    }
+  }
+  const off = document.createElement("canvas"); off.width = W; off.height = H; off.getContext("2d").putImageData(img, 0, 0);
+  ctx.drawImage(off, x0, y0);
+}
+function bold(ctx, x, y, b, r, size, right) {
+  ctx.textBaseline = "alphabetic";
+  ctx.font = `700 ${size}px system-ui, sans-serif`; const bw = ctx.measureText(b).width;
+  ctx.font = `400 ${size}px system-ui, sans-serif`; const rw = ctx.measureText(r).width;
+  const x0 = right ? x - bw - rw : x;
+  ctx.fillStyle = "#000"; ctx.textAlign = "left";
+  ctx.font = `700 ${size}px system-ui, sans-serif`; ctx.fillText(b, x0, y);
+  ctx.font = `400 ${size}px system-ui, sans-serif`; ctx.fillText(r, x0 + bw, y);
+}
+function drawLegend(ctx, x, y, w, h, style, fs) {
+  const lv = style.levels, n = lv.length - 1, bw = w / n;
+  for (let i = 0; i < n; i++) { const c = style.colors[i + 1]; if (c) { ctx.fillStyle = c; ctx.fillRect(x + i * bw, y, Math.ceil(bw) + 0.5, h); } }
+  ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.strokeRect(x, y, w, h);
+  ctx.fillStyle = "#000"; ctx.font = `${fs}px system-ui, sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "top";
+  for (const t of style.ticks) { const i = lv.indexOf(t); if (i < 0) continue; const tx = x + i * bw;
+    ctx.beginPath(); ctx.moveTo(tx, y + h); ctx.lineTo(tx, y + h + 4); ctx.stroke(); ctx.fillText(tick(t), tx, y + h + 5); }
+}
+function titleParts(p, mode, v) {
+  const win = p.kind === "cum" && state.win ? `${state.win}-hr ` : "";
+  const ml = mode === "prob" ? `Probability${v.thr != null ? " " + (p.thr_dir === "le" ? "≤" : "≥") + " " + v.thr + " " + p.unit : ""}` : modeLabel(mode);
+  const unit = mode === "prob" ? "%" : v.unit;
+  return [ml, `: ${win}${p.title} (${unit})`];
+}
+const fcap = () => `F${String(D.frames[state.frame]).padStart(3, "0")}`;
+function drawMain(ctx, v, mode, markers) {
+  const p = prod(), W = 1200, H = 876;
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
+  const [tb, tr] = titleParts(p, mode, v);
+  bold(ctx, 25, 33, tb, tr, 16);
+  bold(ctx, W - 25, 33, "Valid", `: ${zfmt(D.valid[state.frame])} · ${fcap()} · run ${String(new Date(D.cycle).getUTCHours()).padStart(2, "0")}z`, 16, true);
+  paintField(ctx, MAP.x, MAP.y, MAP.w, MAP.h, v.values, v.style);
+  if (overlay.complete) ctx.drawImage(overlay, MAP.x, MAP.y, MAP.w, MAP.h);
+  // station values (nearest cell), bold with a white halo
+  const { nx } = D.grid, lv = v.style.levels; ctx.font = "700 11px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.lineJoin = "round"; ctx.lineWidth = 3.2; ctx.strokeStyle = "#fff"; ctx.fillStyle = "#000";
+  for (const s of D.stations) {
+    const val = v.values[s.r * nx + s.c]; if (val !== val) continue;
+    if (v.style.colors[0] === null && val < lv[0]) continue;
+    const t = fnum(val, v.dec), x = MAP.x + s.fx * MAP.w, y = MAP.y + s.fy * MAP.h;
+    ctx.strokeText(t, x, y); ctx.fillText(t, x, y);
+  }
+  if (markers && state.point) {
+    const x = MAP.x + (state.point.c + .5) / nx * MAP.w, y = MAP.y + (1 - (state.point.r + .5) / D.grid.ny) * MAP.h;
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.stroke();
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.stroke();
+  }
+  drawLegend(ctx, 48, MAP.y + MAP.h + 22, 735, 28, v.style, 12.5);
+  bold(ctx, W - 25, MAP.y + MAP.h + 42, "aaronperry-dev.github.io", " (Aaron Perry)", 13, true);
+}
+
+// ---------------------------------------------------------------- main render
+let renderToken = 0;
+async function render() {
+  const token = ++renderToken, p = prod();
+  writeHash(); statusLine(); controls();
+  $("#single").hidden = state.layout !== "map"; $("#stampwrap").hidden = state.layout !== "stamps";
+  $("#blurb").textContent = p.desc;
+  const msg = $("#msg"), notice = $("#notice");
+  notice.hidden = true;
+  let mode = state.mode;
+  if (mode === "refs" && !p.available.refs) { mode = "mean"; notice.hidden = false; notice.textContent = "The official REFS mean file does not carry this field, so the member mean is shown."; }
+  if (state.layout === "stamps") return renderStamps(token, p);
+  msg.hidden = false; msg.textContent = "Loading…";
+  let v;
+  try { v = await viewField(mode); } catch (e) { msg.textContent = "Could not load data (" + e.message + ")"; return; }
+  if (token !== renderToken) return;
+  if (v.error) { msg.textContent = v.error; msg.hidden = false; tiles(null); chart(); return; }
+  msg.hidden = true;
+  drawMain($("#map").getContext("2d"), v, mode, true);
+  current = { v, mode };
+  tiles(v); chart(); evictOthers();
+}
+let current = null;
+
+async function renderStamps(token, p) {
+  const defs = [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ["spread", "Spread (σ)"], ["prob", "Probability"], ...D.members.map(m => [m, m])];
+  const grid = $("#stamps"); grid.replaceChildren();
+  const first = await viewField("mean"); if (token !== renderToken) return;
+  const lg = $("#slegend").getContext("2d"); lg.fillStyle = "#fff"; lg.fillRect(0, 0, 1200, 96);
+  if (!first.error) { const [tb, tr] = titleParts(p, "mean", first); bold(lg, 25, 24, "RRFS winter weather", `: ${p.title} (${p.unit}) · valid ${zfmt(D.valid[state.frame])} · ${fcap()}`, 15); drawLegend(lg, 50, 40, 1000, 22, p, 12); }
+  for (const [m, label] of defs) {
+    const st = document.createElement("div"); st.className = "stamp"; st.tabIndex = 0;
+    const isMember = m.startsWith("m0"); if (isMember && !state.on[m]) st.classList.add("off");
+    const cv = document.createElement("canvas"); cv.width = 575; cv.height = 371;
+    st.innerHTML = `<div class="cap"><span>${label}</span><span>${isMember ? (state.on[m] ? "in mean" : "off") : ""}</span></div>`; st.append(cv); grid.append(st);
+    const open = () => { state.mode = m === "refs" || m === "mean" || m === "spread" || m === "prob" ? m : m; state.layout = "map"; render(); };
+    cv.addEventListener("click", open);
+    st.addEventListener("keydown", e => { if (e.key === "Enter") open(); });
+    viewField(m).then(v => {
+      if (token !== renderToken) return; const c = cv.getContext("2d"); c.fillStyle = "#fff"; c.fillRect(0, 0, 575, 371);
+      if (v.error) { c.fillStyle = "#59636e"; c.font = "15px system-ui"; c.textAlign = "center"; c.fillText(m === "refs" ? "not in the REFS mean file" : "no data", 287, 190); return; }
+      paintField(c, 0, 0, 575, 371, v.values, v.style); if (overlay.complete) c.drawImage(overlay, 0, 0, 575, 371);
+      if (v.style !== p) {                                  // spread / probability use their own scale: label + mini colour bar
+        const c2 = cv.getContext("2d"), t = m === "prob" ? `P(${p.thr_dir === "le" ? "≤" : "≥"}${v.thr} ${p.unit})` : `σ (${p.unit})`;
+        c2.font = "700 15px system-ui"; const tw = c2.measureText(t).width + 16;
+        c2.fillStyle = "rgba(255,255,255,.88)"; c2.fillRect(4, 4, tw, 24); c2.fillStyle = "#000"; c2.textAlign = "left"; c2.textBaseline = "middle"; c2.fillText(t, 12, 17);
+        c2.fillStyle = "rgba(255,255,255,.88)"; c2.fillRect(4, 335, 567, 32);
+        drawLegend(c2, 16, 340, 543, 10, v.style, 11);
+      }
+    });
+  }
+  evictOthers();
+}
+
+// ---------------------------------------------------------------- summary tiles + point chart
+function tiles(v) {
+  const el = $("#tiles");
+  if (!v) { el.innerHTML = ""; return; }
+  const n = D.grid.nx * D.grid.ny; let lo = Infinity, hi = -Infinity, s = 0, c = 0;
+  for (let i = 0; i < n; i++) { if (!landMask[i]) continue; const x = v.values[i]; if (x !== x) continue; if (x < lo) lo = x; if (x > hi) hi = x; s += x; c++; }
+  const t = (k, x) => `<div class="tile"><div class="k">${k}</div><div class="v">${c ? fnum(x, v.dec) : "—"}<span class="u">${v.unit}</span></div></div>`;
+  $("#sum-title").textContent = "New England land area";
+  el.innerHTML = t("Low", lo) + t("Average", s / Math.max(c, 1)) + t("High", hi);
+}
+const MCOL = ["#e8590c", "#2f9e44", "#7048e8", "#c2255c", "#0c8599"];
+async function chart() {
+  const cv = $("#chart"), ctx = cv.getContext("2d"), W = cv.width, H = cv.height, p = prod();
+  ctx.clearRect(0, 0, W, H); $("#chart-legend").innerHTML = ""; $("#pt-name").textContent = "";
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches, ink = dark ? "#e6edf3" : "#1c2128", grid = dark ? "#30363d" : "#d8dee4", muted = dark ? "#9198a1" : "#59636e";
+  if (!state.point) { ctx.fillStyle = muted; ctx.font = "26px system-ui"; ctx.textAlign = "center"; ctx.fillText("Click the map for a point forecast", W / 2, H / 2); return; }
+  const { r, c } = state.point, { nx } = D.grid, idx = r * nx + c, nf = D.frames.length;
+  const series = [];
+  for (const [i, m] of D.members.entries()) { const d = await load(p, m); if (!d) continue; series.push({ m, col: MCOL[i], on: !!state.on[m], y: D.frames.map((_, f) => frameField1(d, f, idx)) }); }
+  const refs = await load(p, "refs"), ry = refs ? D.frames.map((_, f) => frameField1(refs, f, idx)) : null;
+  const act = series.filter(s => s.on), mean = act.length ? D.frames.map((_, f) => { let s = 0, k = 0; for (const a of act) { const v = a.y[f]; if (v === v) { s += v; k++; } } return k ? s / k : NaN; }) : null;
+  const all = [...series.flatMap(s => s.y), ...(ry || []), ...(mean || [])].filter(v => v === v);
+  if (!all.length) { ctx.fillStyle = muted; ctx.font = "26px system-ui"; ctx.textAlign = "center"; ctx.fillText("No data at this point", W / 2, H / 2); return; }
+  let ymin = Math.min(0, ...all), ymax = Math.max(...all); if (p.lo < 0 && ymin === 0) ymin = Math.min(...all);
+  if (ymax - ymin < 1e-6) ymax = ymin + 1; const pad = (ymax - ymin) * 0.08; ymax += pad; if (ymin !== 0) ymin -= pad;
+  const L = 92, R = 20, T = 20, B = 72, X = f => L + (W - L - R) * f / Math.max(nf - 1, 1), Y = v => T + (H - T - B) * (1 - (v - ymin) / (ymax - ymin));
+  ctx.strokeStyle = grid; ctx.fillStyle = muted; ctx.font = "23px system-ui"; ctx.lineWidth = 1.5;
+  const step = niceStep((ymax - ymin) / 5); ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (let y = Math.ceil(ymin / step) * step; y <= ymax; y += step) { ctx.beginPath(); ctx.moveTo(L, Y(y)); ctx.lineTo(W - R, Y(y)); ctx.stroke(); ctx.fillText(tick(+y.toFixed(6)), L - 10, Y(y)); }
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  D.frames.forEach((h, f) => { if (h % 12 === 0 || f === 0) ctx.fillText(h, X(f), H - B + 10); });
+  ctx.fillText("forecast hour", (L + W - R) / 2, H - 30);
+  const line = (ys, col, w, dash) => { ctx.strokeStyle = col; ctx.lineWidth = w; ctx.setLineDash(dash || []); ctx.beginPath(); let pen = false;
+    ys.forEach((v, f) => { if (v !== v) { pen = false; return; } pen ? ctx.lineTo(X(f), Y(v)) : ctx.moveTo(X(f), Y(v)); pen = true; }); ctx.stroke(); ctx.setLineDash([]); };
+  for (const s of series) line(s.y, s.on ? s.col : grid, s.on ? 3 : 2, s.on ? [] : [6, 6]);
+  if (ry) line(ry, ink, 4, [12, 8]);
+  if (mean) line(mean, ink, 6);
+  ctx.strokeStyle = muted; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(X(state.frame), T); ctx.lineTo(X(state.frame), H - B); ctx.stroke();
+  const st = D.stations.length ? nearestStation(r, c) : null;
+  $("#pt-name").textContent = `· ${p.title} (${p.unit}) ${st ? "near " + st : ""}`;
+  $("#chart-legend").innerHTML = series.map(s => `<span><i style="border-color:${s.on ? s.col : grid}"></i>${s.m}</span>`).join("") +
+    (mean ? `<span><i style="border-color:${ink};border-top-width:3px"></i>member mean</span>` : "") + (ry ? `<span><i style="border-color:${ink};border-top-style:dashed"></i>REFS mean</span>` : "");
+}
+function frameField1(d, f, idx) { const n = D.grid.nx * D.grid.ny, q = d.u[f * n + idx], top = d.p.dtype === "u8" ? 255 : 65535; return q === top ? NaN : d.p.lo + d.p.step * q; }
+function niceStep(x) { const e = Math.pow(10, Math.floor(Math.log10(x))), f = x / e; return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * e; }
+function nearestStation(r, c) { let b = null, bd = 1e9; for (const s of D.stations) { const d = (s.r - r) ** 2 + (s.c - c) ** 2; if (d < bd) { bd = d; b = s; } } return bd < 36 ? b.id : null; }
+
+// ---------------------------------------------------------------- controls
+function controls() {
+  const p = prod(), groups = D.groups;
+  seg($("#seg-group"), groups.map(g => ({ value: g, label: g })), p.group, g => { const q = D.products.find(x => x.group === g); set({ product: q.key }); });
+  seg($("#seg-product"), D.products.filter(x => x.group === p.group).map(x => ({ value: x.key, label: x.label, title: x.desc })), p.key, k => set({ product: k }));
+  $("#g-window").hidden = p.kind !== "cum";
+  seg($("#seg-window"), [0, 3, 6, 12, 24].map(w => ({ value: w, label: w ? `${w} h` : "Run total" })), state.win, w => set({ win: w }));
+  seg($("#seg-mode"), MODES.map(([k, l]) => ({ value: k, label: l, disabled: k === "refs" && !p.available.refs })),
+      state.mode.startsWith("m0") ? null : state.mode, m => set({ mode: m }));
+  $("#g-thr").hidden = state.mode !== "prob";
+  seg($("#seg-thr"), p.thr.map(t => ({ value: t, label: `${p.thr_dir === "le" ? "≤" : "≥"} ${t} ${p.unit}` })), thrOf(p), t => set({ thr: t }));
+  seg($("#seg-members"), D.members.map(m => ({ value: m, label: m, on: state.on[m], disabled: !p.available[m] })), null, m => set({ on: { ...state.on, [m]: !state.on[m] } }), true);
+  seg($("#seg-single"), D.members.map(m => ({ value: m, label: m, disabled: !p.available[m] })), state.mode, m => set({ mode: m }));
+  seg($("#seg-layout"), [{ value: "map", label: "Map" }, { value: "stamps", label: "All members" }], state.layout, l => set({ layout: l }));
+  const sl = $("#slider"); sl.max = D.frames.length - 1; sl.value = state.frame;
+  $("#when").innerHTML = `<strong>${fcap()}</strong> · ${fmtDate(D.valid[state.frame], "UTC")}<small>${fmtDate(D.valid[state.frame], TZ)}</small>`;
+}
+function statusLine() {
+  const age = Math.max(0, Math.round((Date.now() - Date.parse(D.generated)) / 60000)), a = age < 90 ? `${age} min ago` : `${Math.round(age / 60)} h ago`;
+  $("#status").innerHTML = `<strong>RRFS ensemble</strong> run ${fmtDate(D.cycle, "UTC")} · ${fmtDate(D.cycle, TZ)}<br>to F${String(D.max_fhr).padStart(3, "0")} · site built ${a}` +
+    (D.demo ? '<span class="chip">synthetic demo data</span>' : "");
+  $("#demo-note").textContent = D.demo ? "Showing synthetic demo data, not a real forecast." : "";
+}
+function readHash() {
+  const [pk, mode, f, w, layout] = location.hash.slice(1).split("/");
+  if (D.products.some(p => p.key === pk)) state.product = pk;
+  if (mode && (MODES.some(m => m[0] === mode) || D.members.includes(mode))) state.mode = mode;
+  if (f !== undefined && f !== "" && +f >= 0 && +f < D.frames.length) state.frame = +f;
+  if ([0, 3, 6, 12, 24].includes(+w) && w !== undefined && w !== "") state.win = +w;
+  if (layout === "stamps") state.layout = "stamps";
+}
+const writeHash = () => history.replaceState(null, "", `#${state.product}/${state.mode}/${state.frame}/${state.win}/${state.layout}`);
+function set(patch) { Object.assign(state, patch); if (patch.frame === undefined || true) render(); }
+
+// ---------------------------------------------------------------- events
+$("#slider").addEventListener("input", e => set({ frame: +e.target.value }));
+$("#btn-prev").addEventListener("click", () => step(-1));
+$("#btn-next").addEventListener("click", () => step(1));
+function step(d) { set({ frame: Math.min(D.frames.length - 1, Math.max(0, state.frame + d)) }); }
+function play(on) {
+  clearInterval(playTimer); playTimer = null; $("#btn-play").textContent = on ? "❚❚ Pause" : "▶ Play";
+  if (on) playTimer = setInterval(() => { if (state.frame >= D.frames.length - 1) set({ frame: 0 }); else step(1); }, 700);
+}
+$("#btn-play").addEventListener("click", () => play(!playTimer));
+document.addEventListener("keydown", e => {
+  if (e.altKey || e.ctrlKey || e.metaKey || !D || e.target.tagName === "INPUT") return;
+  if (e.key === "ArrowRight") step(1); else if (e.key === "ArrowLeft") step(-1); else if (e.key === " " && e.target.tagName !== "BUTTON") { e.preventDefault(); play(!playTimer); }
+});
+function cellAt(ev) {
+  const cv = $("#map"), rc = cv.getBoundingClientRect(), k = 1200 / rc.width;
+  const x = ((ev.clientX - rc.left) * k - MAP.x) / MAP.w, y = ((ev.clientY - rc.top) * k - MAP.y) / MAP.h;
+  if (x < 0 || x >= 1 || y < 0 || y >= 1) return null;
+  return { c: Math.min(D.grid.nx - 1, (x * D.grid.nx) | 0), r: Math.min(D.grid.ny - 1, ((1 - y) * D.grid.ny) | 0) };
+}
+$("#map").addEventListener("mousemove", ev => {
+  const tip = $("#tip"), cell = current && cellAt(ev);
+  if (!cell) { tip.hidden = true; return; }
+  const v = current.v.values[cell.r * D.grid.nx + cell.c];
+  tip.hidden = v !== v; if (v === v) { tip.textContent = `${fnum(v, current.v.dec)} ${current.v.unit}`; tip.style.left = ev.clientX + 14 + "px"; tip.style.top = ev.clientY + 12 + "px"; }
+});
+$("#map").addEventListener("mouseleave", () => { $("#tip").hidden = true; });
+$("#map").addEventListener("click", ev => { const cell = cellAt(ev); if (cell) { state.point = cell; if (current) { drawMain($("#map").getContext("2d"), current.v, current.mode, true); } chart(); } });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => chart());
+window.addEventListener("hashchange", () => { readHash(); render(); });
+
+// ---------------------------------------------------------------- start
+(async () => {
+  try {
+    D = await (await fetch("data.json", { cache: "no-store" })).json();
+    D.frame_step = D.frames.length > 1 ? D.frames[1] - D.frames[0] : 3;
+    D.members.forEach(m => state.on[m] = !!D.sources[m]?.ok);
+    state.group = prod().group;
+    readHash();
+    overlay = new Image(); overlay.src = `${D.overlay}?v=${D.version}`; await overlay.decode().catch(() => {});
+    const bits = await inflate(`data/land.bin?v=${D.version}`), n = D.grid.nx * D.grid.ny; landMask = new Uint8Array(n);
+    for (let i = 0; i < n; i++) landMask[i] = (bits[i >> 3] >> (7 - (i & 7))) & 1;
+    state.frame = Math.min(state.frame, D.frames.length - 1);
+    render();
+  } catch (err) { $("#status").textContent = "Could not load data.json (" + err.message + ")"; }
+})();
+</script>
+</body>
+</html>

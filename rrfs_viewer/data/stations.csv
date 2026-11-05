@@ -1,0 +1,80 @@
+icao,name,state,lat,lon,elev_m,priority
+KACK,Nantucket Memorial Airport,MA,41.2531,-70.0602,14.0,1
+KAFN,Jaffrey Airfield Silver Ranch Airport,NH,42.8051,-72.003,317.0,1
+KAQW,Harriman and West Airport,MA,42.6959,-73.1704,199.0,1
+KASH,Nashua Airport / Boire Field,NH,42.7817,-71.5148,61.0,2
+KAUG,Augusta State Airport,ME,44.3206,-69.7973,107.0,1
+KBAF,Westfield-Barnes Regional Airport,MA,42.1578,-72.7156,83.0,1
+KBDL,Bradley International Airport,CT,41.9386,-72.688,53.0,1
+KBDR,Igor I Sikorsky Memorial Airport,CT,41.1635,-73.1262,3.0,1
+KBED,Laurence G Hanscom Field,MA,42.47,-71.289,41.0,2
+KBGR,Bangor International Airport,ME,44.8064,-68.8267,59.0,1
+KBHB,Hancock County-Bar Harbor Airport,ME,44.45,-68.3615,25.0,1
+KBID,Block Island State Airport,RI,41.1684,-71.5786,33.0,1
+KBML,Berlin Regional Airport,NH,44.5754,-71.1759,354.0,1
+KBOS,Boston Logan International Airport,MA,42.362,-71.0079,6.0,1
+KBST,Belfast Municipal Airport,ME,44.4094,-69.0119,60.0,2
+KBTV,Patrick Leahy Burlington International Airport,VT,44.4719,-73.1533,102.0,1
+KBVY,Beverly Regional Airport,MA,42.5842,-70.9165,33.0,2
+KBXM,Brunswick Executive Airport,ME,43.8922,-69.9386,22.0,2
+KCAR,Caribou Municipal Airport,ME,46.8715,-68.0179,191.0,1
+KCEF,Westover Metropolitan Airport / Westover Air Reserve Base,MA,42.194,-72.5348,73.0,1
+KCNH,Claremont Municipal Airport,NH,43.3704,-72.3687,166.0,2
+KCON,Concord Municipal Airport,NH,43.2027,-71.5023,104.0,1
+KCQX,Chatham Municipal Airport,MA,41.6884,-69.9895,21.0,1
+KDAW,Skyhaven Airport,NH,43.2841,-70.9293,98.0,2
+KDDH,William H Morse State Airport,VT,42.8913,-73.2464,252.0,1
+KDXR,Danbury Municipal Airport,CT,41.3717,-73.4822,140.0,2
+KEEN,Dillant Hopkins Airport,NH,42.8984,-72.2708,149.0,1
+KEFK,Northeast Kingdom International Airport,VT,44.8888,-72.2292,283.0,1
+KEWB,New Bedford Regional Airport,MA,41.6761,-70.9569,24.0,2
+KFIT,Fitchburg Municipal Airport,MA,42.5541,-71.759,106.0,1
+KFMH,Cape Cod Coast Guard Air Station,MA,41.6579,-70.5216,40.0,1
+KFSO,Franklin County State Airport,VT,44.9403,-73.0975,69.0,1
+KFVE,Northern Aroostook Regional Airport,ME,47.2855,-68.3128,301.0,1
+KGBR,Walter J. Koladza Airport,MA,42.1842,-73.4032,225.0,2
+KGHG,Marshfield Municipal George Harlow Field,MA,42.0977,-70.6728,3.0,2
+KGON,Groton New London Airport,CT,41.3301,-72.0451,3.0,1
+KHFD,Hartford Brainard Airport,CT,41.7367,-72.6494,5.0,1
+KHIE,Mount Washington Regional Airport,NH,44.3675,-71.5458,327.0,1
+KHUL,Houlton International Airport,ME,46.1231,-67.7921,149.0,1
+KHVN,Tweed New Haven Airport,CT,41.2629,-72.8877,4.0,1
+KHYA,Cape Cod Gateway Airport,MA,41.6693,-70.2804,16.0,1
+KIJD,Windham Airport,CT,41.744,-72.1803,75.0,2
+KIWI,Wiscasset Airport,ME,43.9614,-69.7126,21.0,2
+KIZG,Eastern Slopes Regional Airport,ME,43.9911,-70.9479,138.0,1
+KLCI,Laconia Municipal Airport,NH,43.5727,-71.4189,166.0,1
+KLEB,Lebanon Municipal Airport,NH,43.6261,-72.3042,184.0,1
+KLEW,Auburn Lewiston Municipal Airport,ME,44.0485,-70.2835,88.0,1
+KLWM,Lawrence Municipal Airport,MA,42.7172,-71.1234,45.0,2
+KMHT,Manchester-Boston Regional Airport,NH,42.9326,-71.4357,81.0,1
+KMLT,Millinocket Municipal Airport,ME,45.6478,-68.6856,124.0,1
+KMMK,Meriden Markham Municipal Airport,CT,41.5087,-72.8295,31.0,2
+KMPV,Edward F Knapp State Airport,VT,44.2035,-72.5623,355.0,1
+KMVL,Morrisville-Stowe State Airport,VT,44.5346,-72.614,223.0,1
+KMVM,Machias Valley Airport,ME,44.7031,-67.4786,29.0,1
+KMVY,Martha's Vineyard Airport,MA,41.3931,-70.6143,20.0,1
+KMWN,Mount Washington Observatory,NH,44.2706,-71.3033,1917.0,0
+KOLD,Dewitt Field - Old Town Municipal Airport,ME,44.9528,-68.6743,38.0,2
+KOQU,Quonset State Airport,RI,41.5971,-71.4121,5.0,2
+KORE,Orange Municipal Airport,MA,42.5701,-72.2886,169.0,2
+KORH,Worcester Regional Airport,MA,42.2673,-71.8757,308.0,1
+KOWD,Norwood Memorial Airport,MA,42.1905,-71.1729,15.0,1
+KOXC,Waterbury Oxford Airport,CT,41.4786,-73.1352,221.0,2
+KPNN,Princeton Municipal Airport,ME,45.2007,-67.5644,81.0,2
+KPQI,Presque Isle International Airport,ME,46.689,-68.0448,163.0,1
+KPSF,Pittsfield Municipal Airport,MA,42.4268,-73.2929,362.0,1
+KPSM,Portsmouth International Airport at Pease,NH,43.0779,-70.8233,30.0,1
+KPVC,Provincetown Municipal Airport,MA,42.0719,-70.2214,3.0,1
+KPVD,Rhode Island T. F. Green International Airport,RI,41.725,-71.4257,17.0,1
+KPWM,Portland International Jetport,ME,43.6462,-70.3093,23.0,1
+KPYM,Plymouth Municipal Airport,MA,41.909,-70.7288,45.0,2
+KRKD,Knox County Regional Airport,ME,44.0601,-69.0992,17.0,1
+KRUT,Rutland - Southern Vermont Regional Airport,VT,43.5294,-72.9496,240.0,1
+KSFM,Sanford Seacoast Regional Airport,ME,43.3939,-70.708,74.0,2
+KSNC,Chester Airport,CT,41.3842,-72.506,127.0,2
+KTAN,Taunton Municipal King Field,MA,41.8744,-71.0166,13.0,2
+KUUU,Newport State Airport,RI,41.5322,-71.281,52.0,1
+KVSF,Hartness State Airport,VT,43.3436,-72.5173,176.0,1
+KWST,Westerly State Airport,RI,41.3496,-71.8034,25.0,1
+KWVL,Waterville Robert Lafleur Airport,ME,44.5332,-69.6755,101.0,2
