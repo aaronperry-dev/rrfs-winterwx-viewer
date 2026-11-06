@@ -34,6 +34,7 @@ class Product:
     title: str = ""             # map title (defaults to label)
     has1h: bool = False         # also stored as a separate "1-hour accumulation ending at the valid time" field (key + "_1h")
     step1h: float = 0.0         # quantisation step of that 1-hour field (0 = same as ``step``)
+    pmm: bool = False           # offers PMM / LPMM: set below for the precipitation-amount products (liquid, snow and ice accumulations)
 
     @property
     def map_title(self) -> str:
@@ -185,6 +186,9 @@ PRODUCTS: tuple[Product, ...] = (
     _P("windchill", "Wind chill", G_TEMP, "°F", "inst", C.wind_chill_style(), "u8", -70.0, 0.75, 0, True,
        "NWS wind chill (T <= 50 F and wind > 3 mph), otherwise the air temperature.", (0, -10, -20, -30), "le", "Wind Chill"),
 )
+# Probability-matched means only make sense for intermittent, skewed precipitation amounts, where averaging members smears out the maxima they
+# restore.  Ratios, temperatures, winds, p-type probabilities and the like keep the plain mean.  (The 1-hour variants below inherit the flag.)
+PRODUCTS = tuple(replace(p, pmm=(p.kind == "cum" and p.unit == "in")) for p in PRODUCTS)
 # Stored series: every product, plus the 1-hour variant of those that have one (the browser derives 3/6/12/24-h windows from totals).
 ONE_HOUR = tuple(replace(p, key=p.key + "_1h", label=p.label + " (1 h)", has1h=False, step1h=0.0, kind="inst",
                          step=p.step1h or p.step) for p in PRODUCTS if p.has1h)

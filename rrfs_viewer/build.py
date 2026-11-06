@@ -243,7 +243,7 @@ def main(argv=None) -> int:
             "desc": p.desc, "decimals": p.decimals, "dtype": p.dtype, "lo": p.lo, "step": p.step, "refs": p.refs,
             "levels": p.style.levels, "colors": p.style.colors, "ticks": p.style.ticks, "equal": p.style.equal_width,
             "thr": list(p.thr), "thr_dir": p.thr_dir, "available": avail[p.key],
-            "has1h": p.has1h, "step1h": (p.step1h or p.step) if p.has1h else None,
+            "pmm": p.pmm, "has1h": p.has1h, "step1h": (p.step1h or p.step) if p.has1h else None,
             "available_1h": avail.get(p.key + "_1h", {}) if p.has1h else {},
         } for p in PRODUCTS],
         "stats": {"data_bytes": total, "overlay_bytes": overlay_bytes,

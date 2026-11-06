@@ -272,6 +272,7 @@ const store = new Map();                                    // "product.source" 
 
 // ---------------------------------------------------------------- helpers
 const prod = () => D.products.find(p => p.key === state.product);
+const modesFor = p => MODES.filter(x => p.pmm || (x[0] !== "pmm" && x[0] !== "lpmm"));        // PMM / LPMM only for precipitation amounts
 const fmtDate = (iso, tz, long) => new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric",
     ...(long ? { year: "numeric" } : {}), hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(iso));
 const zfmt = iso => { const t = new Date(iso); const p = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(t);
@@ -537,10 +538,13 @@ function geometry(W, H, vw) {                               // bilinear sampling
   return (geom = { W, H, z, u0, v0, xi, xf, yi, yf });
 }
 const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1, imgBuf = new Map();   // imgBuf: "WxH" -> ImageData reused between paints
-function paintField(ctx, x0, y0, W, H, values, style, vw = view) {    // always paints onto white (no data / below the first level = white), so the pixels can be written directly
+let lowCv = null, fieldMs = 0; const fieldHist = [];
+function paintField(ctx, x0, y0, W, H, values, style, vw = view, ds = 1) {    // always paints onto white (no data / below the first level = white), so the pixels can be written directly
+  // ds = 2 samples every other pixel in each direction and shows each sample as a 2 x 2 block: used only while dragging or zooming on a slow device (see redraw)
+  const W0 = W, H0 = H; if (ds > 1) { W = Math.ceil(W / ds); H = Math.ceil(H / ds); }
   // Values are interpolated (bilinear) first and only then put into colour classes, so no colour is ever invented and the class edges follow the
   // interpolated field; vw.cells shows the nearest 3 km cell instead.  Bilinear never leaves the range of the four surrounding cells.
-  const { nx } = D.grid, g = geometry(W, H, vw), lv = style.levels, nl = lv.length, cells = vw.cells;
+  const t0 = performance.now(), { nx } = D.grid, g = geometry(W, H, vw), lv = style.levels, nl = lv.length, cells = vw.cells;
   let lut = lutCache.get(style);                            // one packed 32-bit colour per level interval
   if (!lut) { lut = style.colors.map(c => { if (!c) return 0; const [r, gr, b] = hex(c); return (LITTLE ? (255 << 24 | b << 16 | gr << 8 | r) : (r << 24 | gr << 16 | b << 8 | 255)) >>> 0; }); lutCache.set(style, lut); }
   let img = imgBuf.get(W + "x" + H); if (!img) imgBuf.set(W + "x" + H, img = new ImageData(W, H));
@@ -562,7 +566,15 @@ function paintField(ctx, x0, y0, W, H, values, style, vw = view) {    // always 
       const col = lut[lo]; if (col) px[row + i] = col;
     }
   }
-  ctx.putImageData(img, x0, y0);
+  if (ds === 1) {
+    ctx.putImageData(img, x0, y0);
+    if (W * H > 400000) { fieldHist.push(performance.now() - t0); if (fieldHist.length > 3) fieldHist.shift(); fieldMs = Math.min(...fieldHist); }   // how slow this device is at the full-size map (best of the last 3: a cold first paint says little)
+    return;
+  }
+  if (!lowCv) lowCv = document.createElement("canvas");
+  if (lowCv.width !== W || lowCv.height !== H) { lowCv.width = W; lowCv.height = H; }
+  lowCv.getContext("2d").putImageData(img, 0, 0);
+  ctx.save(); ctx.imageSmoothingEnabled = false; ctx.drawImage(lowCv, x0, y0, W0, H0); ctx.restore();
 }
 function bold(ctx, x, y, b, r, size, right) {
   ctx.textBaseline = "alphabetic";
@@ -601,14 +613,36 @@ async function loadLines() {
     if (view.z > 1) redraw();
   } catch (e) { LINES = null; }                             // without them the PNG is simply stretched
 }
-function drawOverlay(ctx, x, y, w, h, vw) {                 // w / 1150 is the size of this map relative to the full-size one (line widths scale with it)
+const layers = {};                                          // name -> { key, canvas, z, u0, v0 }: a transparent raster of the stroked vector lines for one view, reused until the view changes
+function drawLayer(ctx, name, x, y, w, h, vw, extra, fast, paint) {   // (so stepping through the hours while zoomed, and the many small maps of the stamp layouts, do not re-stroke the lines)
+  const key = `${w}x${h}|${vw.z.toFixed(5)}|${vw.cx.toFixed(5)}|${vw.cy.toFixed(5)}|${extra}`, { u0, v0 } = viewOrigin(vw);
+  let e = layers[name];
+  if (!e) e = layers[name] = { key: "", canvas: document.createElement("canvas"), w: 0, h: 0, z: 1, u0: 0, v0: 0 };
+  if (e.key !== key && fast && e.key && e.w === w && e.h === h) {      // dragging or zooming on a slow device: show the last raster moved and scaled to the new view (the lines are drawn exactly again once things settle)
+    const k = vw.z / e.z;
+    ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+    ctx.drawImage(e.canvas, x + (e.u0 - u0) * vw.z * w, y + (e.v0 - v0) * vw.z * h, w * k, h * k);
+    ctx.restore(); return;
+  }
+  if (e.key !== key) {
+    const cv = e.canvas, c = cv.getContext("2d");
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; } else c.clearRect(0, 0, w, h);
+    paint(c); Object.assign(e, { key, w, h, z: vw.z, u0, v0 });
+  }
+  ctx.drawImage(e.canvas, x, y);
+}
+function drawOverlay(ctx, x, y, w, h, vw, fast = false) {                 // w / 1150 is the size of this map relative to the full-size one (line widths scale with it)
   if (vw.z === 1) { if (overlay.complete) ctx.drawImage(overlay, x, y, w, h); return; }
-  const { u0, v0 } = viewOrigin(vw), z = vw.z;
+  const { u0, v0 } = viewOrigin(vw), z = vw.z, sc = w / MAP.w;
   if (!LINES) {                                             // fallback: a crop of the PNG
     if (overlay.complete) ctx.drawImage(overlay, u0 * overlay.naturalWidth, v0 * overlay.naturalHeight, overlay.naturalWidth / z, overlay.naturalHeight / z, x, y, w, h);
     return;
   }
-  const sc = w / MAP.w, sx = w * z, sy = h * z, ox = x - u0 * sx, oy = y - v0 * sy, u1 = u0 + 1 / z, v1 = v0 + 1 / z;
+  drawLayer(ctx, "lines", x, y, w, h, vw, "", fast, c => strokeLines(c, 0, 0, w, h, vw));
+  ctx.fillStyle = "#000"; ctx.fillRect(x, y, 2 * sc, h); ctx.fillRect(x + w - sc, y, sc, h); ctx.fillRect(x, y, w, sc); ctx.fillRect(x, y + h - sc, w, sc);   // the map frame, as in the PNG
+}
+function strokeLines(ctx, x, y, w, h, vw) {
+  const { u0, v0 } = viewOrigin(vw), z = vw.z, sc = w / MAP.w, sx = w * z, sy = h * z, ox = x - u0 * sx, oy = y - v0 * sy, u1 = u0 + 1 / z, v1 = v0 + 1 / z;
   ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
   ctx.lineJoin = "round"; ctx.lineCap = "butt"; ctx.strokeStyle = "#000";
   for (const name of LINES.order) {
@@ -621,7 +655,6 @@ function drawOverlay(ctx, x, y, w, h, vw) {                 // w / 1150 is the s
     }
   }
   ctx.restore();
-  ctx.fillStyle = "#000"; ctx.fillRect(x, y, 2 * sc, h); ctx.fillRect(x + w - sc, y, sc, h); ctx.fillRect(x, y, w, sc); ctx.fillRect(x, y + h - sc, w, sc);   // the map frame, as in the PNG
 }
 // ---- optional GIS layers (Map Layers panel): highways with route labels and cities, from data/gis.bin, loaded the first time one is switched on
 const GIS_KEYS = [["i", "Interstates"], ["u", "US highways"], ["s", "State highways"], ["l", "Route labels"], ["c", "Cities"]];
@@ -641,16 +674,9 @@ async function loadGis() {
   gisLoading = false;
 }
 const gisScale = vw => 1 + 0.22 * Math.log2(vw.z);          // roads and symbols grow a little as you zoom in
-let roadCache = null;                                       // the stroked roads, kept until the view or the switches change (stepping through hours only repaints the field)
-function drawRoads(ctx, x, y, w, h, vw) {
+function drawRoads(ctx, x, y, w, h, vw, fast) {
   if (!GIS || !(gisOn.i || gisOn.u || gisOn.s)) return;
-  const key = [w, h, vw.z.toFixed(5), vw.cx.toFixed(5), vw.cy.toFixed(5), +gisOn.i, +gisOn.u, +gisOn.s].join();
-  if (!roadCache || roadCache.key !== key) {
-    const cv = roadCache ? roadCache.canvas : document.createElement("canvas"); cv.width = w; cv.height = h;     // (setting the size also clears it)
-    strokeRoads(cv.getContext("2d"), 0, 0, w, h, vw);
-    roadCache = { key, canvas: cv };
-  }
-  ctx.drawImage(roadCache.canvas, x, y);
+  drawLayer(ctx, "roads", x, y, w, h, vw, `${+gisOn.i}${+gisOn.u}${+gisOn.s}`, fast, c => strokeRoads(c, 0, 0, w, h, vw));
 }
 function strokeRoads(ctx, x, y, w, h, vw) {
   const { u0, v0 } = viewOrigin(vw), z = vw.z, sc = w / MAP.w * gisScale(vw), sx = w * z, sy = h * z, ox = x - u0 * sx, oy = y - v0 * sy, u1 = u0 + 1 / z, v1 = v0 + 1 / z;
@@ -735,12 +761,12 @@ function zoomStations(vw) {                                 // labels that fit a
   return kept.map(k => k.s);
 }
 const fcap = (f = state.frame) => `F${String(D.frames[f]).padStart(3, "0")}`;
-function drawMain(ctx, v, mode, markers, vw = view) {
+function drawMain(ctx, v, mode, markers, vw = view, ds = 1) {
   const W = 1200, H = 836, { u0, v0 } = viewOrigin(vw), z = vw.z;
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
-  paintField(ctx, MAP.x, MAP.y, MAP.w, MAP.h, v.values, v.style, vw);
-  drawRoads(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw);           // optional layers: highways under the boundary lines, cities and route labels over them
-  drawOverlay(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw);
+  paintField(ctx, MAP.x, MAP.y, MAP.w, MAP.h, v.values, v.style, vw, ds);
+  drawRoads(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);           // optional layers: highways under the boundary lines, cities and route labels over them
+  drawOverlay(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);
   const stationList = zoomStations(vw);
   drawGisLabels(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, stationList);
   // station values (nearest cell), bold with a white halo
@@ -798,6 +824,7 @@ $("#btn-png").addEventListener("click", exportPNG);
 let renderToken = 0, loadTimer = null;
 async function render() {
   const token = ++renderToken, p = prod(); prefetchGen++;
+  if (!p.pmm && (state.mode === "pmm" || state.mode === "lpmm")) state.mode = "mean";      // e.g. switching from snowfall to temperature while a PMM view is up
   writeHash(); statusLine(); controls();
   $("#mapwrap").hidden = state.layout !== "map"; $("#stampwrap").hidden = state.layout === "map"; $("#p-summary").hidden = state.layout !== "map"; $("#p-gis").hidden = state.layout !== "map" || !D.gis;
   syncExport();
@@ -833,7 +860,7 @@ let current = null;
 
 async function renderStamps(token, p) {
   const defs = state.layout === "pctl" ? MODES.filter(x => !["refs", "spread", "prob", "pmm", "lpmm"].includes(x[0])).map(x => [x[0], x[1].replace("Median (50th percentile)", "Median (P50)").replace(" percentile", "")])
-    : [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ["pmm", "PMM"], ["lpmm", "LPMM"], ["spread", "Spread (σ)"], ["prob", "Probability"], ...D.members.map(m => [m, m])];
+    : [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ...(p.pmm ? [["pmm", "PMM"], ["lpmm", "LPMM"]] : []), ["spread", "Spread (σ)"], ["prob", "Probability"], ...D.members.map(m => [m, m])];
   const grid = $("#stamps"); grid.replaceChildren(); grid.className = state.layout === "pctl" ? "pctl" : "";
   const first = await viewField("mean", state.frame, { tok: token }); if (token !== renderToken) return;
   const lg = $("#slegend").getContext("2d"); lg.fillStyle = "#fff"; lg.fillRect(0, 0, 1200, 96);
@@ -956,7 +983,7 @@ function controls() {
   $("#g-window").hidden = p.kind !== "cum";
   seg($("#seg-window"), WINDOWS.map(w => ({ value: w, label: w ? `${w} h` : "Run total", disabled: w === 1 && !p.has1h,
       title: w === 1 ? "Accumulation in the hour ending at the valid time" : undefined })), state.win, w => set({ win: w }));
-  seg($("#seg-mode"), MODES.map(([k, , l]) => ({ value: k, label: l, title: modeLabel(k), disabled: k === "refs" && !p.available.refs })),
+  seg($("#seg-mode"), modesFor(p).map(([k, , l]) => ({ value: k, label: l, title: modeLabel(k), disabled: k === "refs" && !p.available.refs })),
       state.mode.startsWith("m0") ? null : state.mode, m => set({ mode: m }));
   $("#g-thr").hidden = state.mode !== "prob";
   $("#g-lpmm").hidden = state.mode !== "lpmm";
@@ -1034,7 +1061,8 @@ function readHash() {
 const writeHash = () => {
   const vw = view.z > 1 || view.cells ? `${view.z.toFixed(2)},${view.cx.toFixed(4)},${view.cy.toFixed(4)}${view.cells ? ",1" : ""}` : "";
   const gl = gisAny() ? GIS_KEYS.filter(([k]) => gisOn[k]).map(([k]) => k).join("") : "";
-  history.replaceState(null, "", `#${state.product}/${state.mode}/${state.frame}/${state.win}/${state.layout}` + (vw || gl ? `/${vw}` : "") + (gl ? `/${gl}` : ""));
+  try { history.replaceState(null, "", `#${state.product}/${state.mode}/${state.frame}/${state.win}/${state.layout}` + (vw || gl ? `/${vw}` : "") + (gl ? `/${gl}` : "")); }
+  catch (e) { /* Safari throws past 100 URL changes in 30 s: not worth losing a repaint over */ }
 };
 function set(patch) { if (patch.frame !== undefined && patch.frame !== state.frame) lastDir = Math.sign(patch.frame - state.frame); Object.assign(state, patch); render(); }
 function prefetch() {                                       // heavy views: compute the neighbouring hours in the background so stepping and playing are instant
@@ -1077,7 +1105,8 @@ function cellAt(ev) {
   return { c: Math.min(D.grid.nx - 1, (x * D.grid.nx) | 0), r: Math.min(D.grid.ny - 1, ((1 - y) * D.grid.ny) | 0) };
 }
 $("#map").addEventListener("mousemove", ev => {
-  const tip = $("#tip"), cell = current && cellAt(ev);
+  const tip = $("#tip"); if (dragged && ptrs.size) { tip.hidden = true; return; }               // panning: no value tip
+  const cell = current && cellAt(ev);
   if (!cell) { tip.hidden = true; return; }
   const v = current.v.values[cell.r * D.grid.nx + cell.c];
   tip.hidden = v !== v; if (v === v) { tip.textContent = `${fnum(v, current.v.dec)} ${current.v.unit}`; tip.style.left = ev.clientX + 14 + "px"; tip.style.top = ev.clientY + 12 + "px"; }
@@ -1085,28 +1114,41 @@ $("#map").addEventListener("mousemove", ev => {
 $("#map").addEventListener("mouseleave", () => { $("#tip").hidden = true; });
 $("#map").addEventListener("click", ev => { if (dragged) { dragged = false; return; } const cell = cellAt(ev); if (cell) { state.point = cell; if (current) { drawMain($("#map").getContext("2d"), current.v, current.mode, true); } chart(); } });
 // ---- zoom and pan: wheel, +/- buttons and keys, drag, pinch, double-click.  Only the view changes; the data and the colours stay as they are.
-let rafId = 0, dragged = false;
+let dragged = false;
 function clampView() {
   view.z = Math.min(ZMAX, Math.max(1, view.z)); if (view.z < 1.0001) view.z = 1;
   const h = 0.5 / view.z; view.cx = view.z === 1 ? 0.5 : Math.min(1 - h, Math.max(h, view.cx)); view.cy = view.z === 1 ? 0.5 : Math.min(1 - h, Math.max(h, view.cy));
 }
+let zui = "";
 function updateZoomUI() {
+  const k = `${view.z.toFixed(1)}|${view.z === 1}|${view.z >= ZMAX}|${view.cells}`; if (k === zui) return; zui = k;       // (DOM writes only when something changed: they would force a layout on the next pointer event)
   $("#z-read").textContent = view.z === 1 ? "1\u00d7" : view.z.toFixed(1) + "\u00d7";
   $("#z-in").disabled = view.z >= ZMAX; $("#z-out").disabled = $("#z-reset").disabled = view.z === 1;
   $("#z-cells").setAttribute("aria-pressed", String(view.cells));
   $("#map").style.touchAction = view.z > 1 ? "none" : "pan-y";
 }
-function redraw() {                                         // one repaint per animation frame, however many events arrive
+// One repaint per animation frame, however many events arrive.  While dragging or zooming on a device where the full-size field takes longer than
+// SLOW_MS to paint, the field is painted at half resolution (2 x 2 blocks) so the map keeps up with the pointer, and 140 ms after the last
+// movement it is painted again in full.  Fast devices always paint in full.  The URL is updated once things settle (browsers limit how often it may change).
+const SLOW_MS = 17;
+let rafId = 0, moving = false, settleTimer = 0, hashTimer = 0;
+function redraw(isMove = false) {
+  moving = moving || isMove;
   if (rafId) return;
-  rafId = requestAnimationFrame(() => { rafId = 0; updateZoomUI(); writeHash(); if (current && state.layout === "map") drawMain($("#map").getContext("2d"), current.v, current.mode, true); });
+  rafId = requestAnimationFrame(() => {
+    rafId = 0; const lo = moving && fieldMs > SLOW_MS; moving = false;
+    updateZoomUI(); clearTimeout(hashTimer); hashTimer = setTimeout(writeHash, 250);
+    if (current && state.layout === "map") drawMain($("#map").getContext("2d"), current.v, current.mode, true, view, lo ? 2 : 1);
+    clearTimeout(settleTimer); if (lo) settleTimer = setTimeout(() => redraw(), 140);
+  });
 }
 function zoomTo(z, px = 0.5, py = 0.5) {                    // keep the frame point under (px, py), fractions of the map rectangle, where it is
   const { u0, v0 } = viewOrigin(view), fu = u0 + px / view.z, fv = v0 + py / view.z;
-  view.z = z; view.cx = fu - px / view.z + 0.5 / view.z; view.cy = fv - py / view.z + 0.5 / view.z; clampView(); redraw();
+  view.z = z; view.cx = fu - px / view.z + 0.5 / view.z; view.cy = fv - py / view.z + 0.5 / view.z; clampView(); redraw(true);
 }
 function mapFrac(ev) { const rc = $("#map").getBoundingClientRect(), k = 1200 / rc.width; return [((ev.clientX - rc.left) * k - MAP.x) / MAP.w, ((ev.clientY - rc.top) * k - MAP.y) / MAP.h]; }
 const inMap = ([x, y]) => x >= 0 && x <= 1 && y >= 0 && y <= 1;
-function panBy(dx, dy) { view.cx += dx / view.z; view.cy += dy / view.z; clampView(); redraw(); }          // dx, dy: fractions of the visible width / height
+function panBy(dx, dy) { view.cx += dx / view.z; view.cy += dy / view.z; clampView(); redraw(true); }          // dx, dy: fractions of the visible width / height
 $("#map").addEventListener("wheel", ev => {
   ev.preventDefault();
   const f = mapFrac(ev), s = Math.exp(-ev.deltaY * (ev.deltaMode === 1 ? 0.05 : ev.ctrlKey ? 0.01 : 0.0015));
