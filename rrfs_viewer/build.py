@@ -36,7 +36,9 @@ SOURCE_LABELS = {"refs": "RRFS Mean (REFS)", **{m: m for m in MEMBERS}}
 def _client(demo_now: str | None):
     if demo_now:
         from .testing import FakeS3
-        return FakeS3(datetime.fromisoformat(demo_now))
+        # RRFS_DEMO_HOLES="m003:ASNOW:48,m004:APCP:23": messages missing from single members, to try the fallbacks on the demo site
+        holes = {(v, int(h), m) for m, v, h in (x.split(":") for x in os.environ.get("RRFS_DEMO_HOLES", "").split(",") if x)}
+        return FakeS3(datetime.fromisoformat(demo_now), missing=holes)
     from .s3 import make_client
     return make_client()
 
@@ -45,6 +47,15 @@ LIFT_FILE = "lift.npy"          # deterministic DZDT on the display raster (floa
 
 
 def run_source(args) -> tuple[str, dict[str, bytes], dict]:
+    """One source, never fatal: if it fails outright the build goes on with the others and the failure is reported."""
+    try:
+        return _run_source(args)
+    except Exception as exc:
+        log.exception("%s failed - continuing without it", args[0])
+        return args[0], {}, {"bytes": 0, "requests": 0, "seconds": 0, "missing": {}, "hints": {}, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _run_source(args) -> tuple[str, dict[str, bytes], dict]:
     source, cycle_iso, max_fhr, regrid_path, demo_now, lift_dir = args
     t0 = time.time()
     cycle = datetime.fromisoformat(cycle_iso)
@@ -77,6 +88,13 @@ def _report(s: str, blobs: dict, info: dict) -> None:
              len(blobs), info["bytes"] / 1e6, info["requests"], info.get("missing") or "-")
     for k, h in sorted((info.get("hints") or {}).items()):          # what the files really contain for fields that were not found
         log.warning("%s: field not found %s -> %s", s, k, h)
+    q = info.get("quality") or []
+    for bit, text in ((1, "estimated hours"), (2, "lower bounds"), (4, "interpolated frames"), (8, "empty frames")):
+        frames_ = [f"F{(i + 1) * 3:03d}" for i, v in enumerate(q) if v & bit]
+        if frames_:
+            log.warning("%s: %s in %d frame(s): %s", s, text, len(frames_), " ".join(frames_[:12]) + (" ..." if len(frames_) > 12 else ""))
+    if info.get("error"):
+        log.error("%s: not published (%s)", s, info["error"])
 
 
 def code_version() -> str:
@@ -101,9 +119,16 @@ def deployed_manifest(url: str) -> dict | None:
         return None
 
 
-def up_to_date(manifest: dict | None, cycle_iso: str, code: str) -> bool:
-    """Skip the build only when the live site shows this cycle, was built by this version of the code, and is not demo data."""
-    return bool(manifest) and not manifest.get("demo") and manifest.get("cycle") == cycle_iso and manifest.get("code") == code
+def up_to_date(manifest: dict | None, cycle_iso: str, code: str, complete: list[str] | None = None) -> bool:
+    """Skip the build only when the live site shows this cycle, was built by this version of the code, and is not demo data.
+
+    ``complete``: the sources that have finished publishing; a cycle built while a member was still missing is rebuilt once it is there.
+    """
+    return (bool(manifest) and not manifest.get("demo") and manifest.get("cycle") == cycle_iso and manifest.get("code") == code
+            and (complete is None or manifest.get("complete") is None or sorted(manifest["complete"]) == sorted(complete)))
+
+
+MIN_MEMBERS = 3                                              # fewest complete members for which an incomplete cycle is still published
 
 
 def ensure_regrid(src: S3Source, cycle: datetime, cache: Path, first_fhr: int) -> grib.Regrid:
@@ -112,8 +137,8 @@ def ensure_regrid(src: S3Source, cycle: datetime, cache: Path, first_fhr: int) -
 
     path = cache / "regrid.npz"
     rg = grib.Regrid.load(path)
-    # one message with geometry: the surface-pressure field of member m001
-    loc = src.locate(FILE_2D, MEMBERS[0], cycle, first_fhr)
+    # one message with geometry: the surface-pressure field of the first member that has a file
+    loc = next((l for l in (src.locate(FILE_2D, m, cycle, first_fhr) for m in MEMBERS) if l is not None), None)       # any member will do
     if loc is None:
         raise RuntimeError("cannot read the grid definition: no member file for the chosen cycle")
     data = src.fetch_message(loc, "PRES", "surface")
@@ -152,14 +177,21 @@ def main(argv=None) -> int:
     src = S3Source(_client(demo_now))
     F = frames(args.max_fhr)
 
-    cycle = (datetime.strptime(args.cycle, "%Y%m%d%H").replace(tzinfo=timezone.utc) if args.cycle
-             else pipeline.find_cycle(src, now, args.max_fhr))
+    partial = False
+    if args.cycle:
+        cycle = datetime.strptime(args.cycle, "%Y%m%d%H").replace(tzinfo=timezone.utc)
+    else:
+        cycle = pipeline.find_cycle(src, now, args.max_fhr)
+        if cycle is None:                                  # no cycle is complete everywhere: take the newest one most members have finished
+            cycle = pipeline.find_cycle(src, now, args.max_fhr, min_members=MIN_MEMBERS)
+            partial = cycle is not None
     if cycle is None:
-        log.error("no complete RRFS/REFS cycle (through F%03d) found in the last 48 h", args.max_fhr)
+        log.error("no usable RRFS/REFS cycle (through F%03d, at least %d members) found in the last 48 h", args.max_fhr, MIN_MEMBERS)
         return 1
-    log.info("cycle %s (F%03d), %d frames", cycle, args.max_fhr, len(F))
+    complete = pipeline.complete_sources(src, cycle, args.max_fhr)
+    log.info("cycle %s (F%03d), %d frames; complete sources: %s", cycle, args.max_fhr, len(F), ",".join(complete) or "-")
     code = code_version()
-    if args.skip_if_deployed and up_to_date(deployed_manifest(args.skip_if_deployed), iso(cycle), code):
+    if args.skip_if_deployed and up_to_date(deployed_manifest(args.skip_if_deployed), iso(cycle), code, complete):
         log.info("the deployed site already shows this cycle and this code version (%s) - nothing to do", code)
         return 0
 
@@ -173,6 +205,11 @@ def main(argv=None) -> int:
 
     # ---------------------------------------------------------------- the ensemble sources, in parallel processes
     sources = [s for s in args.sources.split(",") if s]
+    if partial:                                            # whatever has begun to publish is used: missing frames simply stay empty
+        began = pipeline.complete_sources(src, cycle, F[0])
+        log.warning("cycle %s is not complete for every source: using %s (complete through F%03d: %s)", cycle, ",".join(s for s in sources if s in began),
+                    args.max_fhr, ",".join(complete))
+        sources = [s for s in sources if s in began] or sources
     lift_dir = tempfile.mkdtemp(prefix="rrfs_lift_")                  # ~300 MB at F060: scratch space, removed below, never the cache
     mk = lambda s: (s, iso(cycle), args.max_fhr, str(cache / "regrid.npz"), demo_now, lift_dir)
     results: dict[str, tuple[dict, dict]] = {}
@@ -244,7 +281,10 @@ def main(argv=None) -> int:
 
     manifest = {
         "generated": iso(now), "version": int(now.timestamp()), "demo": args.demo, "code": code,
-        "cycle": iso(cycle), "max_fhr": args.max_fhr, "frames": list(F),
+        "cycle": iso(cycle), "max_fhr": args.max_fhr, "frames": list(F), "complete": complete,
+        # per member and frame: bit 1 some hours estimated, 2 lower bound (hours missing), 4 frame interpolated, 8 nothing (see pipeline.fill_gaps)
+        "quality": {s: results[s][1]["quality"] for s in MEMBERS if s in results and results[s][1].get("quality")},
+        "errors": {s: results[s][1]["error"] for s in results if results[s][1].get("error")},
         "valid": [iso(cycle + timedelta(hours=h)) for h in F],
         "grid": {"nx": nx, "ny": ny}, "overlay": "overlay.png", "counties": "counties.png", "overlay_px": list(basemap.OVERLAY_PX),
         "sources": {s: {"label": SOURCE_LABELS[s], "ok": bool(results.get(s, ({}, {}))[0])} for s in ["refs", *MEMBERS]},

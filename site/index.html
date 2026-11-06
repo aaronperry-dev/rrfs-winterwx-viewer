@@ -151,6 +151,21 @@
   #stamplegend { margin-bottom: 12px; }
   #stamplegend canvas { width: 100%; max-width: 900px; height: auto; display: block; margin: 0 auto; background: #fff; border: 1px solid var(--line); }
 
+
+  /* ---- plumes */
+  .plumes { margin-top: 14px; border: 1px solid var(--line); background: var(--surface); }
+  .plumes > h2 { margin: 0; padding: 6px 10px; font-size: 15.5px; font-weight: 800; color: var(--title); background: var(--soft); border-bottom: 1px solid var(--line); }
+  .plumehead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; padding: 8px 10px 0; }
+  .plumehead label { font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+  .plumehead select { font-size: 14px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--ink); max-width: min(330px, 100%); }
+  .plumegrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(460px, 100%), 1fr)); gap: 12px; padding: 10px; }
+  .plume { margin: 0; min-width: 0; }
+  .plume canvas { display: block; width: 100%; height: auto; border: 1px solid var(--line); cursor: crosshair; background: var(--surface); }
+  .plume figcaption { font-size: 12.5px; color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .plumes .note { margin: 0; padding: 0 10px 10px; }
+  .plumes .legend { padding: 0 10px 6px; margin-top: 0; }
+  .plumes .legend i.dot { width: 9px; height: 9px; border: 2px solid; border-radius: 50%; margin-right: 5px; }
+
   /* ---- basemap key */
   .ramp { height: 11px; border: 1px solid var(--line); border-radius: 2px; }
   .rampl { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); margin: 2px 0 0; font-variant-numeric: tabular-nums; }
@@ -221,6 +236,19 @@
       <section id="stampwrap" hidden>
         <div id="stamplegend"><canvas id="slegend" width="1200" height="96"></canvas></div>
         <div id="stamps"></div>
+      </section>
+      <section class="plumes" id="plumes" aria-label="Ensemble plumes">
+        <h2>Ensemble plumes · accumulated QPF and snowfall</h2>
+        <div class="plumehead">
+          <label>Location <select id="pl-loc" aria-label="Plume location"></select></label>
+          <label>Snowfall <select id="pl-snow-sel" aria-label="Snowfall method for the plume"></select></label>
+        </div>
+        <div class="plumegrid">
+          <figure class="plume"><canvas id="pl-qpf" width="1000" height="640" tabindex="0" aria-label="Accumulated QPF by member at the chosen location"></canvas><figcaption id="pl-qpf-stat"></figcaption></figure>
+          <figure class="plume"><canvas id="pl-snow" width="1000" height="640" tabindex="0" aria-label="Accumulated snowfall by member at the chosen location"></canvas><figcaption id="pl-snow-stat"></figcaption></figure>
+        </div>
+        <div class="legend" id="pl-legend"></div>
+        <p class="note" id="pl-note"></p>
       </section>
     </section>
 
@@ -341,7 +369,8 @@ function load(p, src, one) {                                // one: the stored 1
   return store.get(key);
 }
 function evictOthers() {
-  for (const k of [...store.keys()]) if (!k.startsWith(state.product + ".") && !k.startsWith(state.product + "_1h.")) store.delete(k);
+  const plume = plumeSeen ? ["qpf", plumeSnow] : [];                         // the plumes keep their two products loaded while the map moves on to others
+  for (const k of [...store.keys()]) if (!k.startsWith(state.product + ".") && !k.startsWith(state.product + "_1h.") && !plume.some(x => k.startsWith(x + "."))) store.delete(k);
   for (const k of [...fieldCache.keys()]) if (!k.startsWith(state.product + "|")) fieldCache.delete(k);
 }
 
@@ -513,8 +542,9 @@ async function viewField(mode, fi = state.frame, opt = {}) {           // -> { v
   }
   const mem = activeMembers();
   if (!mem.length) return { error: "All members are switched off - turn at least one on." };
-  const arrs = (await Promise.all(mem.map(m => srcField(p, m, fi, win)))).filter(Boolean);
-  if (!arrs.length) return { error: "No member data for this field." };
+  const got = await Promise.all(mem.map(m => srcField(p, m, fi, win))), used = mem.filter((m, i) => got[i] && finite(got[i])), lacking = mem.filter(m => !used.includes(m));
+  const arrs = got.filter((a, i) => used.includes(mem[i]));                    // whatever members have data here are used; the others are named in the notice
+  if (!arrs.length) return { error: lacking.length > 1 ? "No member has data for this field at this time." : "No member data for this field." };
   const thr = thrOf(p);
   let values;
   if (mode === "pmm" || mode === "lpmm") {
@@ -523,9 +553,19 @@ async function viewField(mode, fi = state.frame, opt = {}) {           // -> { v
     if (!values) return { error: "Interrupted - try again." };
   } else values = reduce(arrs, mode, thr, p.thr_dir);
   if (!finite(values)) return { error: none };
-  if (mode === "prob") return { values, style: PROB, unit: "%", dec: 0, thr };
-  if (mode === "spread") return { values, style: spreadStyle(p), unit: p.unit, dec: Math.max(p.decimals, 1) };
-  return { values, ...plain };
+  if (mode === "prob") return { values, style: PROB, unit: "%", dec: 0, thr, used, lacking };
+  if (mode === "spread") return { values, style: spreadStyle(p), unit: p.unit, dec: Math.max(p.decimals, 1), used, lacking };
+  return { values, ...plain, used, lacking };
+}
+const Q_NOTES = [[8, "has nothing at this time", "have nothing at this time"], [4, "is interpolated from the neighbouring hours (the model file has a gap here)", "are interpolated from the neighbouring hours (the model files have a gap here)"],
+  [2, "is a lower bound (some model hours were missing)", "are lower bounds (some model hours were missing)"], [1, "has an estimated hour in the last 3 h", "have an estimated hour in the last 3 h"]];
+function coverageNotes(v, p, mode) {                        // what was left out or estimated for this view, in words
+  const notes = [];
+  if (v.lacking && v.lacking.length && v.used && v.used.length) notes.push(`${v.lacking.join(", ")} ${v.lacking.length === 1 ? "has" : "have"} no data for this field at this time, so ${v.used.length === 1 ? "only " + v.used[0] + " is" : "the other " + v.used.length + " members are"} used.`);
+  if (D.quality && p.kind === "cum" && p.unit === "in" && mode !== "refs") {
+    for (const [bit, one, many] of Q_NOTES) { const ms = (v.used || activeMembers()).filter(m => ((D.quality[m] || [])[state.frame] || 0) & bit); if (ms.length) notes.push(`${ms.join(", ")} ${ms.length === 1 ? one : many}.`); }
+  }
+  return notes;
 }
 
 const PROB = { levels: [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95], ticks: [10, 30, 50, 70, 90],
@@ -937,7 +977,7 @@ async function render() {
   if (mode in PCT_MODES) { const n = activeMembers().length; notes.push(`Percentiles are interpolated across the ${n} member${n === 1 ? "" : "s"} switched on, so with so few members P5/P10 sit close to the minimum and P90/P95 close to the maximum.`); }
   if (notes.length) { notice.hidden = false; notice.textContent = notes.join(" "); }
   mapHeader(mode);
-  if (state.layout !== "map") return renderStamps(token, p);
+  if (state.layout !== "map") { plumes(); return renderStamps(token, p); }
   clearTimeout(loadTimer);                                   // keep the old map on screen unless the new one is slow
   const showMsg = text => { if (token === renderToken) { msg.hidden = false; msg.textContent = text; } };
   if (!current) showMsg("Loading…"); else loadTimer = setTimeout(() => showMsg("Computing…"), 250);
@@ -945,11 +985,12 @@ async function render() {
   try { v = await viewField(mode, state.frame, { tok: token }); } catch (e) { clearTimeout(loadTimer); showMsg("Could not load data (" + e.message + ")"); return; }
   if (token !== renderToken) return;
   clearTimeout(loadTimer);
-  if (v.error) { msg.textContent = v.error; msg.hidden = false; current = null; syncExport(); tiles(null); chart(); return; }
+  if (v.error) { msg.textContent = v.error; msg.hidden = false; current = null; syncExport(); tiles(null); chart(); plumes(); return; }
   msg.hidden = true;
+  const more = coverageNotes(v, p, mode); if (more.length) { notice.hidden = false; notice.textContent = [...notes, ...more].join(" "); }
   drawMain($("#map").getContext("2d"), v, mode, true);
   current = { v, mode, hdr: header(mode) };                 // the title block is captured with the map it describes (the state may move on while the next map computes)
-  syncExport(); tiles(v); chart(); evictOthers(); prefetch();
+  syncExport(); tiles(v); chart(); plumes(); evictOthers(); prefetch();
 }
 let current = null;
 
@@ -1066,6 +1107,177 @@ async function pointSeries(p, src, idx) {                  // value at one grid 
 function frameField1(d, f, idx) { const n = D.grid.nx * D.grid.ny, q = d.u[f * n + idx], top = d.p.dtype === "u8" ? 255 : 65535; return q === top ? NaN : d.p.lo + d.p.step * q; }
 function niceStep(x) { const e = Math.pow(10, Math.floor(Math.log10(x))), f = x / e; return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * e; }
 function nearestStation(r, c) { let b = null, bd = 1e9; for (const s of D.stations) { const d = (s.r - r) ** 2 + (s.c - c) ** 2; if (d < bd) { bd = d; b = s; } } return bd < 36 ? b.id : null; }
+
+// ---------------------------------------------------------------- plumes: accumulated QPF and snowfall at one location, one line per member
+// Like the GEFS plumes of NCEP/EMC: every member in gray, the ensemble mean in black, the member with the highest final total in red and the one with the lowest in
+// blue.  RRFS has five members, so the "plume" is thin; the REFS mean (dashed green) is drawn as well where the file carries the field.  The data is the same quantised
+// run-total grids as the map (nothing extra is downloaded for the plume except the two products it plots), read at one grid cell.
+let plumeSeen = !("IntersectionObserver" in window), plumeLoc = "KBOS", plumeSnow = "snow_mean", plumeTok = 0;
+try { const v = localStorage.getItem("rrfs-plume-snow"); if (v) plumeSnow = v; } catch (e) { /* storage blocked: keep the default */ }
+const PLUME = { qpf: { id: "pl-qpf", ylab: "Total Accumulated QPF (inches)" }, snow: { id: "pl-snow", ylab: "Total Accumulated Snowfall (inches)" } };
+const plumeModel = {};
+const plumeStations = () => (D.stations_all || []).slice().sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+const stationLabel = s => `${s.id} · ${s.name || ""}${s.st ? " (" + s.st + ")" : ""}`;
+function defaultStation() { const all = D.stations_all || []; return all.find(s => s.id === "KBOS") || all.slice().sort((a, b) => a.p - b.p)[0] || null; }
+function nearestAny(r, c, within) { let b = null, bd = within * within; for (const s of D.stations_all || []) { const d = (s.r - r) ** 2 + (s.c - c) ** 2; if (d < bd) { bd = d; b = s; } } return b; }
+function plumePoint() {                                     // { r, c, label, id }
+  if (plumeLoc === "map" && state.point) { const n = nearestAny(state.point.r, state.point.c, 14); return { ...state.point, id: "map", label: n ? `Map point near ${n.id}` : "Map point" }; }
+  const s = (D.stations_all || []).find(x => x.id === plumeLoc) || defaultStation();
+  return s ? { r: s.r, c: s.c, id: s.id, label: stationLabel(s) } : state.point ? { ...state.point, id: "map", label: "Map point" } : null;
+}
+const plumeProducts = () => D.products.filter(p => p.kind === "cum" && p.unit === "in" && p.key.startsWith("snow") && !p.key.includes("spread") && Object.values(p.available).some(Boolean))
+  .sort((a, b) => (b.key === "snow_mean") - (a.key === "snow_mean"));
+function initPlumes() {
+  const loc = $("#pl-loc"), snow = $("#pl-snow-sel"), opt = (v, t) => { const o = document.createElement("option"); o.value = v; o.textContent = t; return o; };
+  loc.append(opt("map", "Clicked map point"), ...plumeStations().map(s => opt(s.id, stationLabel(s))));
+  const prods = plumeProducts();
+  if (!prods.some(p => p.key === plumeSnow)) plumeSnow = prods.length ? prods[0].key : "";
+  snow.append(...prods.map(p => opt(p.key, p.label)));
+  loc.addEventListener("change", () => {
+    plumeLoc = loc.value;
+    const s = (D.stations_all || []).find(x => x.id === plumeLoc);
+    if (s) { state.point = { r: s.r, c: s.c }; if (current) drawMain($("#map").getContext("2d"), current.v, current.mode, true); chart(); }      // the map marker and the side chart follow
+    plumes();
+  });
+  snow.addEventListener("change", () => { plumeSnow = snow.value; try { localStorage.setItem("rrfs-plume-snow", plumeSnow); } catch (e) { /* ignore */ } evictOthers(); plumes(); });
+  for (const k of ["qpf", "snow"]) {
+    const cv = $("#" + PLUME[k].id);
+    cv.addEventListener("pointermove", ev => plumeHover(k, ev));
+    cv.addEventListener("pointerleave", () => { const m = plumeModel[k]; if (m && m.hover) { m.hover = null; paintPlume(k); } });
+    cv.addEventListener("click", ev => { const m = plumeModel[k]; if (!m) return; const h = plumeAt(k, ev); if (h) set({ frame: Math.max(0, h.i - 1) }); });
+  }
+  if ("IntersectionObserver" in window) new IntersectionObserver((es, ob) => { if (es.some(e => e.isIntersecting)) { plumeSeen = true; ob.disconnect(); plumes(); } }, { rootMargin: "500px" }).observe($("#plumes"));
+}
+async function plumeData(p, idx) {                          // { source: [value at F000 (= 0), then every frame] | null }
+  const srcs = [...D.members, "refs"];
+  const res = await Promise.all(srcs.map(async s => { try { const d = await load(p, s); return d ? [0, ...D.frames.map((_, f) => frameField1(d, f, idx))] : null; } catch (e) { return null; } }));
+  return Object.fromEntries(srcs.map((s, i) => [s, res[i]]));
+}
+async function plumes() {
+  if (!plumeSeen || !D) return;
+  const tok = ++plumeTok, pt = plumePoint();
+  if (!pt) return;
+  $("#pl-loc").value = plumeLoc === "map" && state.point ? "map" : pt.id === "map" ? "map" : pt.id;
+  $("#pl-snow-sel").value = plumeSnow;
+  const idx = pt.r * D.grid.nx + pt.c, prods = { qpf: D.products.find(p => p.key === "qpf"), snow: D.products.find(p => p.key === plumeSnow) };
+  await Promise.all(["qpf", "snow"].map(async k => {
+    const data = prods[k] ? await plumeData(prods[k], idx) : {};
+    if (tok !== plumeTok) return;
+    plumeModel[k] = buildPlume(k, prods[k], data, pt);
+    paintPlume(k);
+  }));
+  if (tok !== plumeTok) return;
+  plumeText();
+}
+function buildPlume(k, p, data, pt) {
+  const hrs = [0, ...D.frames], mem = D.members.filter(m => data[m]), act = mem.filter(m => state.on[m]), finite1 = v => v === v && v !== undefined;
+  const last = y => { for (let i = y.length - 1; i >= 0; i--) if (finite1(y[i])) return i; return -1; };
+  const mean = act.length ? hrs.map((_, i) => { let s = 0, n = 0; for (const m of act) { const v = data[m][i]; if (finite1(v)) { s += v; n++; } } return n ? s / n : NaN; }) : null;
+  const fin = act.map(m => ({ m, i: last(data[m]) })).filter(o => o.i >= 0).map(o => ({ ...o, v: data[o.m][o.i] }));
+  const hi = fin.length > 1 ? fin.reduce((a, b) => (b.v > a.v ? b : a)) : null, lo = fin.length > 1 ? fin.reduce((a, b) => (b.v < a.v ? b : a)) : null;
+  const refs = data.refs && p && p.available.refs ? data.refs : null;
+  return { k, p, pt, hrs, data, mem, act, mean, hi, lo, refs, missing: D.members.filter(m => !data[m]), hover: null };
+}
+const PCOL = dark => dark ? { bg: "#171d26", ink: "#e6edf3", muted: "#9aa3ad", plot: "#2a313c", grid: "#6a7480", day: "#8a95a1", member: "rgba(176,186,198,.8)", mean: "#ffffff", max: "#ff6b6b", min: "#6cb0ff", refs: "#69db7c", box: "#10151c" }
+  : { bg: "#ffffff", ink: "#1c2128", muted: "#59636e", plot: "#e4e7eb", grid: "#9aa2ab", day: "#6a737d", member: "rgba(105,114,125,.78)", mean: "#000000", max: "#d62728", min: "#1f6fd4", refs: "#2b8a3e", box: "#ffffff" };
+const darkMode = () => matchMedia("(prefers-color-scheme: dark)").matches;
+const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+function validOf(h) { const t = new Date(Date.parse(D.cycle) + h * 3600e3); return { hour: t.getUTCHours(), day: `${WD[t.getUTCDay()]} ${String(t.getUTCMonth() + 1).padStart(2, "0")}/${String(t.getUTCDate()).padStart(2, "0")}`, t }; }
+function paintPlume(k) {
+  const M = plumeModel[k]; if (!M) return;
+  const cv = $("#" + PLUME[k].id), ctx = cv.getContext("2d"), W = cv.width, H = cv.height, C = PCOL(darkMode()), { p, hrs, data } = M;
+  ctx.setLineDash([]); ctx.clearRect(0, 0, W, H); ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+  const title = p ? p.label : "Snowfall", init = validOf(0);
+  ctx.textBaseline = "alphabetic"; ctx.textAlign = "left"; ctx.fillStyle = C.ink; ctx.font = "700 27px system-ui"; ctx.fillText(`RRFS ensemble · ${M.pt.label}`, 20, 36);
+  ctx.fillStyle = C.muted; ctx.font = "22px system-ui";
+  ctx.fillText(`${k === "qpf" ? "Total accumulated QPF" : "Total accumulated snowfall, " + title} · init ${String(init.hour).padStart(2, "0")}Z ${init.day.slice(4)}`, 20, 66);
+  const L = 100, R = 30, T = 84, B = 104, hmax = hrs[hrs.length - 1] || 1;
+  const X = h => L + (W - L - R) * h / hmax;
+  const drawn = [...M.act.flatMap(m => data[m]), ...(M.refs || []), ...(M.mean || [])].filter(v => v === v);
+  if (!M.act.length || !drawn.length) {
+    ctx.fillStyle = C.plot; ctx.fillRect(L, T, W - L - R, H - T - B);
+    ctx.fillStyle = C.muted; ctx.font = "26px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(M.mem.length ? "All members with data are switched off" : p ? "No member data for this location" : "No snowfall product available", (L + W - R) / 2, (T + H - B) / 2);
+    M.geo = null; return;
+  }
+  let ymax = Math.max(...drawn, 0.1) * 1.06; const step = niceStep(ymax / 5); ymax = Math.ceil(ymax / step - 1e-9) * step;
+  const Y = v => T + (H - T - B) * (1 - v / ymax);
+  M.geo = { L, R, T, B, W, H, X, Y, hmax };
+  ctx.fillStyle = C.plot; ctx.fillRect(L, T, W - L - R, H - T - B);
+  ctx.font = "21px system-ui"; ctx.fillStyle = C.muted; ctx.textAlign = "right"; ctx.textBaseline = "middle"; ctx.lineWidth = 1.2; ctx.strokeStyle = C.grid; ctx.setLineDash([]);
+  for (let y = 0; y <= ymax + 1e-9; y += step) { ctx.globalAlpha = .55; ctx.beginPath(); ctx.moveTo(L, Y(y)); ctx.lineTo(W - R, Y(y)); ctx.stroke(); ctx.globalAlpha = 1; ctx.fillText(tick(+y.toFixed(6)), L - 10, Y(y)); }
+  ctx.save(); ctx.translate(30, (T + H - B) / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = C.ink; ctx.font = "600 22px system-ui"; ctx.fillText(PLUME[k].ylab, 0, 0); ctx.restore();
+  const every = hmax > 96 ? 12 : 6;                           // vertical dotted lines at the valid-time labels
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  for (const h of hrs) {
+    const v = validOf(h); if (v.hour % every !== 0) continue;
+    ctx.strokeStyle = v.hour === 0 ? C.day : C.grid; ctx.lineWidth = v.hour === 0 ? 1.6 : 1.2; ctx.setLineDash([2, 5]);
+    ctx.beginPath(); ctx.moveTo(X(h), T); ctx.lineTo(X(h), H - B); ctx.stroke(); ctx.setLineDash([]);
+    ctx.textAlign = X(h) > W - R - 50 ? "right" : "center";                 // the last label would run off the canvas
+    ctx.fillStyle = C.muted; ctx.font = "21px system-ui"; ctx.fillText(String(v.hour).padStart(2, "0") + "Z", X(h), H - B + 10);
+    if (v.hour === 0 || h === 0) { ctx.fillStyle = C.ink; ctx.font = "600 20px system-ui"; ctx.fillText(v.day, X(h), H - B + 36); }
+  }
+  ctx.fillStyle = C.muted; ctx.font = "21px system-ui"; ctx.fillText("Valid time (UTC)", (L + W - R) / 2, H - 34);
+  ctx.strokeStyle = C.muted; ctx.lineWidth = 1.2; ctx.setLineDash([]); ctx.strokeRect(L, T, W - L - R, H - T - B);
+  // the forecast hour on the map
+  const fh = D.frames[state.frame]; if (fh !== undefined) { ctx.strokeStyle = C.ink; ctx.globalAlpha = .55; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(X(fh), T); ctx.lineTo(X(fh), H - B); ctx.stroke(); ctx.globalAlpha = 1; }
+  const line = (ys, col, w, dash) => { ctx.strokeStyle = col; ctx.lineWidth = w; ctx.setLineDash(dash || []); ctx.lineJoin = "round"; ctx.beginPath(); let pen = false;
+    ys.forEach((v, i) => { if (!(v === v)) { pen = false; return; } pen ? ctx.lineTo(X(hrs[i]), Y(v)) : ctx.moveTo(X(hrs[i]), Y(v)); pen = true; }); ctx.stroke(); ctx.setLineDash([]); };
+  ctx.save(); ctx.beginPath(); ctx.rect(L, T - 4, W - L - R, H - T - B + 8); ctx.clip();
+  for (const m of M.act) line(data[m], C.member, 2.2);
+  if (M.hi) line(data[M.hi.m], C.max, 4); if (M.lo) line(data[M.lo.m], C.min, 4);
+  if (M.refs) line(M.refs, C.refs, 3.4, [14, 8]);
+  line(M.mean, C.mean, 6);
+  ctx.restore();
+  // hours that were estimated, interpolated or are lower bounds (see the quality notes of the build)
+  ctx.lineWidth = 2.4; ctx.strokeStyle = C.ink; ctx.fillStyle = C.bg;
+  for (const m of M.act) (D.quality && D.quality[m] || []).forEach((q, f) => { const v = data[m][f + 1]; if (q & 7 && v === v) { ctx.beginPath(); ctx.arc(X(hrs[f + 1]), Y(v), 6, 0, 7); ctx.fill(); ctx.stroke(); } });
+  if (M.hover) {                                              // the labelled point, like "p21 F72 3.38 in" on the GEFS plumes
+    const h = M.hover, x = X(hrs[h.i]), y = Y(h.v), v = validOf(hrs[h.i]);
+    ctx.beginPath(); ctx.arc(x, y, 9, 0, 7); ctx.fillStyle = h.col; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = C.bg; ctx.stroke();
+    const q = h.m && D.quality && D.quality[h.m] ? D.quality[h.m][h.i - 1] || 0 : 0, tag = q & 4 ? " (interpolated)" : q & 2 ? " (lower bound)" : q & 1 ? " (estimated)" : "";
+    const t1 = `${h.name} F${hrs[h.i]} ${fnum(h.v, 2)} in${tag}`, t2 = `${v.day} ${String(v.hour).padStart(2, "0")}Z`;
+    ctx.font = "700 24px system-ui"; const w = Math.max(ctx.measureText(t1).width, 150) + 20, bh = 62;
+    let bx = x + 16, by = y - bh - 12; if (bx + w > W - R) bx = x - w - 16; if (by < T) by = y + 16;
+    ctx.fillStyle = C.box; ctx.globalAlpha = .96; ctx.fillRect(bx, by, w, bh); ctx.globalAlpha = 1; ctx.strokeStyle = h.col; ctx.lineWidth = 2.5; ctx.strokeRect(bx, by, w, bh);
+    ctx.fillStyle = C.ink; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic"; ctx.fillText(t1, bx + 10, by + 27); ctx.font = "20px system-ui"; ctx.fillStyle = C.muted; ctx.fillText(t2, bx + 10, by + 52);
+  }
+}
+function plumeAt(k, ev) {                                   // the line point under the pointer: { i, v, name, col, m } or null
+  const M = plumeModel[k]; if (!M || !M.geo) return null;
+  const cv = $("#" + PLUME[k].id), r = cv.getBoundingClientRect(), px = (ev.clientX - r.left) * cv.width / r.width, py = (ev.clientY - r.top) * cv.height / r.height, g = M.geo, C = PCOL(darkMode());
+  if (px < g.L - 10 || px > cv.width - g.R + 10 || py < g.T - 10 || py > cv.height - g.B + 10) return null;
+  let i = 0, bd = 1e9; M.hrs.forEach((h, j) => { const d = Math.abs(g.X(h) - px); if (d < bd) { bd = d; i = j; } });
+  const cand = [...M.act.map(m => ({ m, name: m, y: M.data[m], col: M.hi && M.hi.m === m ? C.max : M.lo && M.lo.m === m ? C.min : C.member })),
+    ...(M.refs ? [{ name: "REFS mean", y: M.refs, col: C.refs }] : []), { name: "ensemble mean", y: M.mean, col: C.mean }];
+  let best = null, dd = 40;
+  for (const c of cand) { const v = c.y[i]; if (!(v === v)) continue; const d = Math.abs(g.Y(v) - py); if (d < dd) { dd = d; best = { ...c, v }; } }
+  return best ? { i, v: best.v, name: best.name, col: best.col.startsWith("rgba") ? (darkMode() ? "#b0bac6" : "#69727d") : best.col, m: best.m } : null;
+}
+function plumeHover(k, ev) {
+  const M = plumeModel[k]; if (!M) return;
+  const h = plumeAt(k, ev), o = M.hover;
+  if ((!h && !o) || (h && o && h.i === o.i && h.name === o.name)) return;
+  M.hover = h; paintPlume(k);
+}
+function plumeText() {
+  const C = PCOL(darkMode()), mk = (col, dash) => `<i style="border-color:${col};${dash ? "border-top-style:dashed;" : ""}border-top-width:3px"></i>`;
+  const any = ["qpf", "snow"].map(k => plumeModel[k]).filter(Boolean);
+  $("#pl-legend").innerHTML = `<span>${mk(C.member)}member</span><span>${mk(C.mean)}ensemble mean</span><span>${mk(C.max)}highest member (final total)</span><span>${mk(C.min)}lowest member (final total)</span>` +
+    (any.some(M => M.refs) ? `<span>${mk(C.refs, true)}REFS mean</span>` : "") + (D.quality ? `<span><i class="dot" style="border-color:${C.ink}"></i>hour estimated, interpolated or lower bound</span>` : "");
+  for (const k of ["qpf", "snow"]) {
+    const M = plumeModel[k], el = $(`#${PLUME[k].id}-stat`); if (!M) { el.textContent = ""; continue; }
+    const f = M.mean ? M.mean.length - 1 - [...M.mean].reverse().findIndex(v => v === v) : -1;
+    if (!M.mean || f < 0 || f >= M.mean.length) { el.textContent = ""; continue; }
+    const hr = M.hrs[f], mean = M.mean[f], vals = M.act.map(m => M.data[m][f]).filter(v => v === v);
+    el.textContent = `F${hr}: mean ${fnum(mean, 2)} in` + (vals.length > 1 ? ` · members ${fnum(Math.min(...vals), 2)} to ${fnum(Math.max(...vals), 2)} in` : "") + ` · ${vals.length} member${vals.length === 1 ? "" : "s"}`;
+  }
+  const notes = [], miss = [...new Set(any.flatMap(M => M.missing))], off = D.members.filter(m => !state.on[m]);
+  if (miss.length) notes.push(`${miss.join(", ")} ${miss.length === 1 ? "has" : "have"} no data for ${any.some(M => M.missing.length && M.p) ? "one of these products" : "these products"}, so the plume uses the members that do.`);
+  if (off.length) notes.push(`${off.join(", ")} ${off.length === 1 ? "is" : "are"} switched off in the Members panel and left out.`);
+  notes.push(`Run totals since initialisation at the nearest 3 km cell. With only ${D.members.length} members this is a thin plume; hover a line for its value, click to move the map to that forecast hour.`);
+  $("#pl-note").textContent = notes.join(" ");
+}
 
 // ---------------------------------------------------------------- controls
 let ctlKey = "";
@@ -1208,7 +1420,7 @@ $("#map").addEventListener("mousemove", ev => {
   tip.hidden = v !== v; if (v === v) { tip.textContent = `${fnum(v, current.v.dec)} ${current.v.unit}`; tip.style.left = ev.clientX + 14 + "px"; tip.style.top = ev.clientY + 12 + "px"; }
 });
 $("#map").addEventListener("mouseleave", () => { $("#tip").hidden = true; });
-$("#map").addEventListener("click", ev => { if (dragged) { dragged = false; return; } const cell = cellAt(ev); if (cell) { state.point = cell; if (current) { drawMain($("#map").getContext("2d"), current.v, current.mode, true); } chart(); } });
+$("#map").addEventListener("click", ev => { if (dragged) { dragged = false; return; } const cell = cellAt(ev); if (cell) { state.point = cell; plumeLoc = "map"; if (current) { drawMain($("#map").getContext("2d"), current.v, current.mode, true); } chart(); plumes(); } });
 // ---- zoom and pan: wheel, +/- buttons and keys, drag, pinch, double-click.  Only the view changes; the data and the colours stay as they are.
 let dragged = false;
 function clampView() {
@@ -1275,7 +1487,7 @@ $("#map").addEventListener("pointerup", endPtr); $("#map").addEventListener("poi
 $("#z-in").addEventListener("click", () => zoomTo(view.z * 1.6)); $("#z-out").addEventListener("click", () => zoomTo(view.z / 1.6));
 $("#z-reset").addEventListener("click", () => { Object.assign(view, { z: 1, cx: 0.5, cy: 0.5 }); redraw(); });
 $("#z-cells").addEventListener("click", () => { view.cells = !view.cells; redraw(); });
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => chart());
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { chart(); plumes(); });
 window.addEventListener("hashchange", () => { readHash(); render(); });
 
 // ---------------------------------------------------------------- start
@@ -1296,6 +1508,7 @@ window.addEventListener("hashchange", () => { readHash(); render(); });
       if (first === "late") both.then(() => { if (state.layout === "map") redraw(); else render(); });      // slow connection: the map appears first and the basemap joins when it arrives
     }
     buildBasemapPanel();
+    initPlumes();
     if (D.gis) buildGisPanel(); else $("#p-gis").hidden = true;
     updateZoomUI();
     const bits = await inflate(`data/land.bin?v=${D.version}`), n = D.grid.nx * D.grid.ny; landMask = new Uint8Array(n);

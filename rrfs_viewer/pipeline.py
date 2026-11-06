@@ -165,7 +165,8 @@ SPREAD_METHODS = SNOW_METHODS + ("snow_cobb", "snow_nbmthick")
 Z_LEVELS = (1000, 850, 700)
 
 
-def _method_mean(arrs: list[np.ndarray | None], min_n: int = 4) -> np.ndarray | None:
+def _method_mean(arrs: list[np.ndarray | None], min_n: int = 1) -> np.ndarray | None:
+    """Mean over the methods that are available at each point: any one is enough, so a missing input shrinks the mean instead of blanking it."""
     ref = next(a for a in arrs if a is not None)
     st = np.stack([a if a is not None else np.full_like(ref, np.nan) for a in arrs])
     n = np.isfinite(st).sum(axis=0)
@@ -173,8 +174,8 @@ def _method_mean(arrs: list[np.ndarray | None], min_n: int = 4) -> np.ndarray | 
     return np.where(n >= min_n, mean, np.nan).astype(np.float32)
 
 
-def _method_range(arrs: list[np.ndarray | None], min_n: int = 4) -> np.ndarray | None:
-    """max - min over the methods that are available at each point (needs at least ``min_n`` of them)."""
+def _method_range(arrs: list[np.ndarray | None], min_n: int = 2) -> np.ndarray | None:
+    """max - min over the methods that are available at each point (a range needs at least two of them)."""
     ref = next(a for a in arrs if a is not None)
     st = np.stack([a if a is not None else np.full_like(ref, np.nan) for a in arrs])
     n = np.isfinite(st).sum(axis=0)
@@ -192,6 +193,14 @@ def _plan_member(F, k, acc_p: Acc, acc_s: Acc):
         for name, var in (("sn", "CSNOW"), ("ip", "CICEP"), ("zr", "CFRZR")):
             R[(name, h)] = Req(FILE_2D, h, var, "surface", None)
     plans["asnow"], plans["asnow1"] = acc_s.total(fr), acc_s.inc1(fr)
+    plans["asnow_blk"] = None
+    if plans["asnow"] is None:                                 # no run total in the file: this frame's block from a window, or hour by hour
+        prev = F[k - 1] if k else 0
+        if (prev, fr) in acc_s.windows(fr):
+            plans["asnow_blk"] = ([acc_s.req(fr, prev, fr)], lambda a: a[0])
+        else:
+            for h in range(prev + 1, fr + 1):
+                plans[("asnow_h", h)] = acc_s.inc1(h)
     R["t2"] = Req(FILE_2D, fr, "TMP", "2 m above ground", None)
     R["u"] = Req(FILE_2D, fr, "UGRD", "10 m above ground", None)
     R["v"] = Req(FILE_2D, fr, "VGRD", "10 m above ground", None)
@@ -260,6 +269,54 @@ def process_lift(src: S3Source, cycle: datetime, rg: grib.Regrid, max_fhr: int, 
     return (out if info["frames_ok"] else None), info
 
 
+# ============================================================================== quality of a member's frame
+# One small integer per member and frame: how far the accumulated products of that frame can be trusted.  Nothing is withheld because of it.
+Q_ESTIMATED, Q_PARTIAL, Q_INTERP, Q_EMPTY = 1, 2, 4, 8
+# 1  some hours of this frame's own 3-h block were estimated (precipitation type carried over from the previous hour, or an hour filled from the run total)
+# 2  lower bound: some hours are missing, so the accumulations are at least what is shown
+# 4  the frame itself was missing and was interpolated between the neighbouring frames
+# 8  nothing at all for this frame
+MAX_GAP_FRAMES = 2                                             # longest run of empty frames that is bridged by interpolation
+CUM_KEYS = tuple(p.key for p in STORE if p.kind == "cum" and not p.key.endswith("_1h"))
+
+
+def fill_gaps(out: dict[str, np.ndarray], quality: list[int], max_gap: int = MAX_GAP_FRAMES, fallback: dict | None = None) -> None:
+    """Bridge frames that are empty between two good ones, in every accumulated product, linearly in time.
+
+    An accumulation only grows, and at 3-hour spacing it is smooth, so a short hole is estimated far better by its neighbours than by
+    showing nothing.  Leading holes are bridged from zero (the run starts with nothing accumulated); trailing holes stay empty.
+    ``fallback`` = ``{product: {frame: array}}``: lower bounds that fill the frames of a product that are still empty afterwards.
+    """
+    n = len(quality)
+    for key in CUM_KEYS:
+        a = out.get(key)
+        if a is None:
+            continue
+        fb = (fallback or {}).get(key) or {}
+        have = [bool(np.isfinite(a[k]).any()) for k in range(n)]
+        k = 0
+        while k < n:
+            if have[k]:
+                k += 1
+                continue
+            j = k
+            while j < n and not have[j]:
+                j += 1
+            if j < n and j - k <= max_gap and (k > 0 or (have[j] and 0 not in fb)):      # a leading hole with a lower bound keeps that, not half the next frame
+                lo = a[k - 1] if k > 0 else np.zeros_like(a[j])
+                for i in range(k, j):
+                    a[i] = lo + (a[j] - lo) * ((i - k + 1) / (j - k + 1))
+                    quality[i] |= Q_INTERP
+            k = j
+        for k, arr in fb.items():
+            if not np.isfinite(a[k]).any():
+                a[k] = arr
+                quality[k] |= Q_PARTIAL
+    for k in range(n):
+        if not any(np.isfinite(a[k]).any() for key in ("qpf", "snow_model", "snow_mean") if (a := out.get(key)) is not None):
+            quality[k] |= Q_EMPTY
+
+
 def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid, max_fhr: int,
                    progress=None, lift: np.ndarray | None = None) -> tuple[dict[str, np.ndarray], dict]:
     """All member products on the display raster: ``{product: (n_frames, ny, nx) float32}`` (NaN = missing).
@@ -281,7 +338,18 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
     clim = winter.slr_baxter(rg.lat, rg.lon)                   # regional climatological ratio: no fetch, constant in time
     clock = winter.BlizzardClock((ny, nx), step=3)
     prev_flags = None
-    broken = False                                             # a missing hourly QPF hole makes all later totals unreliable
+    # Nothing here is all-or-nothing: an hour that is missing or incomplete shrinks or estimates the totals, and says so in ``quality``.
+    lost_q = 0                                                 # hours whose precipitation is unknown (not in QPF)
+    lost_t = 0                                                 # hours whose precipitation type is unknown (not in the type / snow totals)
+    est_n = 0                                                  # hours estimated: type persisted from the previous hour, gap filled from the run total
+    n_liq = n_typed = 0                                        # hours that went into QPF / into the typed totals
+    last_slr: dict = {}                                        # last ratio each snow method produced, carried over a frame where it is missing
+    short: set = set()                                         # snow methods that skipped some liquid because they never had a ratio yet
+    seen: set = set()                                          # snow methods that have had a ratio at least once
+    snow_run, snow_lost = z(), 0                               # the model's own ASNOW run total, and the hours missing from it
+    quality = [0] * len(F)
+    lower_bound: dict[int, np.ndarray] = {}                    # frames whose own block of ASNOW had a hole: used only if they cannot be interpolated
+    hours_of = lambda k: range((F[k - 1] if k else 0) + 1, F[k] + 1)
 
     def block(k):
         R, plans, reqs = _plan_member(F, k, acc_p, acc_s)
@@ -360,52 +428,113 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
             slr["snow_nbmthick"] = out["slr_nbmthick"][k] = winter.slr_thickness_nbm(dz_850_700)
 
         # ---------------------------------------------------------------- hourly precipitation accounting
+        for name, r in slr.items():                                         # a method without a ratio now reuses its last one
+            if r is not None:
+                last_slr[name] = r
+                seen.add(name)
+        ratio = lambda name: slr[name] if slr[name] is not None else last_slr.get(name)
         inc1 = {"qpf": None, "liq": None}
-        for h in range(fr - 2, fr + 1):
-            apcp = apcps[h]
-            flags = [g((n, h)) for n in ("sn", "ip", "zr")]
-            if apcp is None or any(a is None for a in flags):
-                broken = True
-                continue
-            fr_now = winter.precip_fractions(*flags)
-            fr_use = fr_now if prev_flags is None else tuple(0.5 * (a + b) for a, b in zip(fr_now, prev_flags))
-            prev_flags = fr_now
-            mm = np.nan_to_num(apcp, nan=0.0)
-            qpf += mm
-            swe_sn += mm * fr_use[0]
-            swe_ip += mm * fr_use[1]
-            swe_zr += mm * fr_use[2]
+        est_before = est_n
+
+        def add_typed(mm, fr_use):                                          # one hour (or a gap) of liquid with a precipitation-type split
+            nonlocal n_typed
+            n_typed += 1
+            swe_sn[...] += mm * fr_use[0]
+            swe_ip[...] += mm * fr_use[1]
+            swe_zr[...] += mm * fr_use[2]
             sn_in = mm * fr_use[0] * KG_TO_IN                               # liquid equivalent of snow, inches
             for name in snow:
-                snow[name] += sn_in * (slr[name] if slr[name] is not None else np.nan)
+                r = ratio(name)
+                if r is None:
+                    short.add(name)
+                else:
+                    snow[name] += sn_in * r
+            return sn_in
+
+        for h in range(fr - 2, fr + 1):
+            apcp = apcps[h]
+            if apcp is None:
+                lost_q += 1
+                lost_t += 1
+                continue
+            mm = np.nan_to_num(apcp, nan=0.0)
+            qpf += mm
+            n_liq += 1
+            flags = [g((n, h)) for n in ("sn", "ip", "zr")]
+            if all(a is not None for a in flags):
+                fr_now = winter.precip_fractions(*flags)
+                fr_use = fr_now if prev_flags is None else tuple(0.5 * (a + b) for a, b in zip(fr_now, prev_flags))
+                prev_flags = fr_now
+            elif prev_flags is not None:
+                fr_use = prev_flags                                         # type flags missing: the previous hour's type
+                est_n += 1
+            else:
+                lost_t += 1                                                 # counted in QPF, but there is no type to split it by
+                continue
+            sn_in = add_typed(mm, fr_use)
             if h == fr:                                                     # the last hour of the block -> the 1-hour maps
                 inc1 = {"qpf": mm * KG_TO_IN, "liq": sn_in}
+        if lost_q:                                                          # hours with no precipitation at all: the run total, if the file has one, gives the amount
+            t = acc_p.total(fr)
+            tot = evaluate(t, f.decode(f.bulk(t[0]))) if t is not None else None
+            if tot is not None:
+                gap = np.maximum(np.nan_to_num(tot, nan=0.0) - qpf, 0.0)
+                qpf += gap
+                n_liq += lost_q
+                if prev_flags is not None:                                  # type: that of the last hour with flags
+                    add_typed(gap, prev_flags)
+                    lost_t = max(lost_t - lost_q, 0)
+                    est_n += lost_q
+                lost_q = 0
 
         asnow = evaluate(plans["asnow"], A)
+        if asnow is not None:                                               # a run total from the file is exact and repairs any earlier hole
+            snow_run, snow_lost = asnow, 0
+        else:
+            parts = [evaluate(plans["asnow_blk"], A)]                       # this frame's block: one window ...
+            if parts[0] is None:
+                parts = [evaluate(plans.get(("asnow_h", h)), A) for h in hours_of(k)]       # ... or hour by hour
+            got = [x for x in parts if x is not None]
+            snow_lost += len(parts) - len(got)
+            if got:
+                snow_run = snow_run + np.sum(got, axis=0, dtype=np.float32)
+                if len(got) == len(parts):
+                    asnow = snow_run
+                else:                                                       # a hole in this very block: keep the lower bound only if nothing better turns up
+                    lower_bound[k] = snow_run
         asnow1 = evaluate(plans["asnow1"], A)
-        if not broken:
+        if n_liq:
             out["qpf"][k] = qpf * KG_TO_IN
-            out["frzr"][k] = swe_zr * KG_TO_IN
-            out["sleet"][k] = swe_ip * KG_TO_IN
-            for name in snow:
-                out[name][k] = snow[name]
+            if n_typed:
+                out["frzr"][k] = swe_zr * KG_TO_IN
+                out["sleet"][k] = swe_ip * KG_TO_IN
+                for name in snow:
+                    if name in seen:
+                        out[name][k] = snow[name]
+                if inc1["qpf"] is not None:
+                    for name in snow:
+                        if ratio(name) is not None:
+                            out[name + "_1h"][k] = inc1["liq"] * ratio(name)
             if inc1["qpf"] is not None:
                 out["qpf_1h"][k] = inc1["qpf"]
-                for name in snow:
-                    out[name + "_1h"][k] = inc1["liq"] * (slr[name] if slr[name] is not None else np.nan)
             liq = swe_sn * KG_TO_IN
-            if asnow is not None:
+            if asnow is not None and n_typed and not lost_t and not snow_lost:
                 out["slr_model"][k] = np.where(liq >= 0.02, np.clip(asnow * IN_PER_M / np.maximum(liq, 1e-6), 0, 40), np.nan)
         if asnow is not None:
             out["snow_model"][k] = asnow * IN_PER_M
         if asnow1 is not None:
             out["snow_model_1h"][k] = asnow1 * IN_PER_M
-        if not broken:
-            out["snow_mean"][k] = _method_mean([out[m][k] if np.isfinite(out[m][k]).any() else None for m in SNOW_METHODS])
-            out["snow_spread"][k] = _method_range([out[m][k] if np.isfinite(out[m][k]).any() else None for m in SPREAD_METHODS])
-            one = [out[m + "_1h"][k] if np.isfinite(out[m + "_1h"][k]).any() else None for m in SNOW_METHODS]
-            if any(a is not None for a in one):
-                out["snow_mean_1h"][k] = _method_mean(one)
+        shown = [m for m in SNOW_METHODS if np.isfinite(out[m][k]).any()]
+        if shown:
+            out["snow_mean"][k] = _method_mean([out[m][k] if m in shown else None for m in SNOW_METHODS])
+        spread = [m for m in SPREAD_METHODS if np.isfinite(out[m][k]).any()]
+        if len(spread) > 1:
+            out["snow_spread"][k] = _method_range([out[m][k] if m in spread else None for m in SPREAD_METHODS])
+        one = [out[m + "_1h"][k] if np.isfinite(out[m + "_1h"][k]).any() else None for m in SNOW_METHODS]
+        if any(a is not None for a in one):
+            out["snow_mean_1h"][k] = _method_mean(one)
+        # "estimated" marks the frames whose own block had an estimated hour (the effect on later totals is small); "lower bound" stays on while hours are missing
+        quality[k] = (Q_ESTIMATED if est_n > est_before else 0) | (Q_PARTIAL if (lost_q or lost_t or (snow_lost and asnow is not None) or short & set(shown)) else 0)
 
         # ---------------------------------------------------------------- precipitation type at the frame time + blizzard
         fl = [g((n, fr)) for n in ("sn", "ip", "zr")]
@@ -424,7 +553,8 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
         if progress:
             progress(member, fr)
     pool.shutdown()
-    info = {"missing": f.missing, "hints": f.hints, "bytes": src.bytes_downloaded, "requests": src.requests}
+    fill_gaps(out, quality, fallback={"snow_model": lower_bound})
+    info = {"missing": f.missing, "hints": f.hints, "bytes": src.bytes_downloaded, "requests": src.requests, "quality": quality}
     return out, info
 
 
@@ -485,15 +615,33 @@ def process_refs(src: S3Source, cycle: datetime, rg: grib.Regrid, max_fhr: int, 
 
 
 # ============================================================================== cycle selection
-def find_cycle(src: S3Source, now: datetime, max_fhr: int, lookback: int = 8) -> datetime | None:
-    """Newest 00/06/12/18 UTC cycle whose *last* forecast hour is published for the REFS mean and every member."""
+def complete_sources(src: S3Source, cyc: datetime, max_fhr: int) -> list[str]:
+    """The sources (``refs`` and the members) whose *last* forecast hour is published for this cycle."""
+    ok = []
+    if src.exists(FILE_2D.key_for("refs", cyc, max_fhr) + ".idx"):
+        ok.append("refs")
+    for m in MEMBERS:
+        if all(src.exists(k.key_for(m, cyc, max_fhr) + ".idx") for k in (FILE_PRS, FILE_2D)):
+            ok.append(m)
+    return ok
+
+
+def find_cycle(src: S3Source, now: datetime, max_fhr: int, lookback: int = 8, min_members: int | None = None) -> datetime | None:
+    """Newest 00/06/12/18 UTC cycle whose *last* forecast hour is published for the REFS mean and every member.
+
+    With ``min_members`` the rule relaxes: a cycle qualifies when that many members are complete (the REFS mean or not), so one member
+    that stopped publishing cannot freeze the site on an old cycle.  The caller then builds from the sources that are complete.
+    """
     now = now.replace(minute=0, second=0, microsecond=0)
     base = now - timedelta(hours=now.hour % 6)
     for i in range(lookback):
         cyc = base - timedelta(hours=6 * i)
-        keys = [FILE_2D.key_for("refs", cyc, max_fhr) + ".idx"]
-        keys += [FILE_PRS.key_for(m, cyc, max_fhr) + ".idx" for m in MEMBERS]
-        keys += [FILE_2D.key_for(m, cyc, max_fhr) + ".idx" for m in MEMBERS]
-        if all(src.exists(k) for k in keys):
+        if min_members is None:
+            keys = [FILE_2D.key_for("refs", cyc, max_fhr) + ".idx"]
+            keys += [FILE_PRS.key_for(m, cyc, max_fhr) + ".idx" for m in MEMBERS]
+            keys += [FILE_2D.key_for(m, cyc, max_fhr) + ".idx" for m in MEMBERS]
+            if all(src.exists(k) for k in keys):
+                return cyc
+        elif sum(s != "refs" for s in complete_sources(src, cyc, max_fhr)) >= min_members:
             return cyc
     return None

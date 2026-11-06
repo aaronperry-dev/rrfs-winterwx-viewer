@@ -28,6 +28,7 @@ directory and deploys it as a Pages artifact.
 | **Export PNG** | **Download PNG** in the sidebar (or key `s`) saves the current map, in Map view, as a 1200 px image with a header above it (of the zoomed part of the map when zoomed in, in the same layout and styling): the title (product and window), the subtitle (ensemble view, unit or probability threshold, run total, the members used, and a *synthetic demo data* flag on demo builds), the init (run) time, and the valid time with forecast hour in UTC and Eastern. The image is rendered from the same data as the page, without the point-forecast marker, and named like `rrfs_snow_kuchera_mean_6h_20261105_12z_f018.png`. |
 | **Click the map** | Point forecast: every member, the member mean and the REFS mean as lines over the forecast. |
 | Hover the point-forecast graph | Tooltip with the valid time (UTC and Eastern) and the value of every member, the member mean and the REFS mean at that forecast hour, with a cursor line; click the graph to jump the map to that time. |
+| **Plumes** | Below the map: two GEFS-style plume graphs for one location, **total accumulated QPF** and **total accumulated snowfall** (the snowfall method is a menu, default the multi-method mean). Every member is a gray line, the ensemble mean is black, the member with the highest final total red, the lowest blue, and the REFS mean dashed green where the REFS file carries the field. The location is a menu of the METAR stations (default KBOS) or the point you click on the map; picking a station also puts the marker on the map. Hover a line for its label (`m003 F48 3.38 in`, as on the GEFS plumes), click the graph to move the map to that forecast hour. The x axis is UTC valid time with dotted lines every 6 h. Open circles mark hours that were estimated, interpolated or are lower bounds (see "Missing data" below). The plume reads the same stored run-total grids as the map, so it adds only the two products it plots (loaded when the section scrolls into view), and it follows the Members switches. With five members it is thin: it shows the spread of five runs, not a 30-member distribution. |
 | Hover | Value under the cursor. Land-area low / average / high tiles for the current map. |
 
 The URL hash stores the state (`#snow_kuchera/mean/12/0/map`), so a view can be bookmarked or shared.
@@ -45,7 +46,7 @@ then the map with a right-hand sidebar of checkbox-style options (ensemble view,
 | | **Kuchera snowfall** | Snow-type liquid × Kuchera ratio, `12 + 2 (271.16 K − Tmax)` for Tmax > 271.16 K, `12 + (271.16 K − Tmax)` otherwise, Tmax = warmest temperature from 2 m up to 500 hPa; clipped to 3:1–40:1 |
 | | **Max-T-aloft snowfall** | Snow-type liquid × 5th-degree polynomial in the warmest temperature from ~610 m AGL to 500 hPa (Veals et al. 2025; experimental) |
 | | **Thickness snowfall** | Snow-type liquid × the CMC thickness ratio: 10:1, reduced by the Murphy relation `10 × (30.6 − 0.1057 × Z1000–700[dam])` wherever the 850–700 hPa thickness exceeds 1540 m. Thickness from model `HGT` (1000/850/700 hPa), falling back to the hypsometric equation on the temperature levels |
-| | **Multi-method mean** | Mean of the five estimates above (needs at least four). The literature methods below are not part of it |
+| | **Multi-method mean** | Mean of the five estimates above that are available at each point (one is enough; the spread needs two). The literature methods below are not part of it |
 | | **Cobb snowfall** | Snow-type liquid × the Cobb & Waldstreicher cloud-layer ratio as NBM applies it: the 2011 temperature curve (7:1 at −30 °C, 26:1 at −16 °C, 3:1 at 0 °C) averaged over 925–300 hPa on a 25 hPa grid (log-p interpolation), weighted by `(RH/80)²`, capped at 30:1. **No lift term**: see limitations |
 | | **Cobb snowfall (with lift)** | The same, with each layer also weighted by `sqrt(VV)`. `VV` comes from the **deterministic RRFS** run's `DZDT` (every 25 hPa, 925–300 hPa, fetched once per cycle and shared by all members); temperature and humidity are the member's own. See limitations |
 | | **NBM thickness snowfall** | Snow-type liquid × the National Blend of Models linear 850–700 hPa thickness ratio, `−0.16559 × Z850–700[m] + 263.35` (NBM v5.0 winter-suite documentation); clipped to 3:1–40:1 like the others |
@@ -169,8 +170,14 @@ in demo mode is synthetic and marked as such on the page.
 * **Accumulation windows are auto-detected.** For `APCP`, `WEASD` and `ASNOW` the code reads each file's `.idx` and uses run totals, 1-hour or longer tiling windows, whichever the file has. If a field is still not found, the Actions log prints a `field not found … ->` line listing what the file does contain.
 * **Partly validated against the live bucket.** The field names and `.idx` descriptors (`APCP` 1-hour windows, `ASNOW` totals, `MAXUVV`,
   `VIS`, pressure-level `TMP`/`RH`) follow the published RRFS/REFS product tables and the layout of comparable NCEP files; they were
-  developed offline; the first live run found the REFS-mean precipitation windows were not as assumed (now handled adaptively). Missing messages are not fatal: the product is simply empty for that frame/member (a hole in the hourly
-  `APCP` withholds all later accumulations rather than under-reporting them), and the Actions log lists what was missing.
+  developed offline; the first live run found the REFS-mean precipitation windows were not as assumed (now handled adaptively). The Actions log lists what was missing (`field not found … ->` lines and the `missing=` counts per source).
+* **Missing data shrinks a product, it does not blank it.** The build and the page use whatever members, frames and hours exist:
+  * A source (member) that fails outright is logged and left out; the other members are published. If no cycle is complete for every source, the newest cycle with at least three finished members is used (sources that have begun publishing are used, missing frames stay empty); the site is rebuilt once the rest has finished.
+  * **Model snowfall (`ASNOW`)** uses the run total when the file has one, otherwise a window that covers the new 3 h, otherwise the 1-hour windows summed. A frame whose run total is missing is bridged (next bullet); a later run total repairs anything before it.
+  * **Hourly QPF hole:** the missing liquid is recovered from the run-total `APCP` when the file has one; if not, the totals are *lower bounds*. If the precipitation-type flags of an hour are missing, the previous hour's type is used; a snow method that lacks a ratio for a frame uses its last one.
+  * **Empty accumulation frames** (up to two in a row, 6 h) between two good ones are filled by linear interpolation in time; accumulations only grow and are smooth at 3 h spacing. Leading holes are bridged from zero; trailing holes stay empty.
+  * `data.json` carries `quality[member][frame]`, a bit mask: 1 some hours estimated, 2 lower bound (hours missing), 4 frame interpolated, 8 nothing. The page names the affected members in the yellow notice under the map and marks those hours with open circles on the plumes and in their tooltip. A member with no data for a product at a frame is left out of that frame's mean, percentiles and probabilities and named in the notice.
+  * These are estimates and say so; they cannot be checked against the live bucket from the development sandbox. They were tested on the offline fake S3 with messages removed (`tests/test_pipeline.py`); `RRFS_DEMO_HOLES="m003:ASNOW:48,m004:APCP:23"` with `--demo` builds a demo site with holes in single members.
 * **Zoomed maps show the same 3 km data, not more detail.** Interpolation only makes the shading smooth; it adds no information, and
   features smaller than a few grid cells are not resolved however far you zoom. The display raster is a nearest-neighbour resample of the native
   grid, so a "cell" can sit up to about 1.5 km from where the model's own cell is. Boundary lines are Natural Earth 1:10m (about 1:10 million scale),
@@ -189,7 +196,7 @@ in demo mode is synthetic and marked as such on the page.
   the usual omega unit of the Cobb/BUFKIT work, and 1 microbar/s is about 1.3 cm/s of ascent at 700 hPa), so check the lift version against
   NBM or BUFKIT Cobb ratios before trusting it. The grid of the deterministic file is compared with the members' grid; if it differs, or the file
   is missing for a frame, the lift products are left empty for that run or frame instead of falling back to the no-lift ratio. A missing hour
-  also leaves the later totals empty, as for other fields. Checked against real inventories (`tests/data`): the member `prslevnomads` files
+  is handled as for the other fields (see above). Checked against real inventories (`tests/data`): the member `prslevnomads` files
   have only `HGT`, `TMP`, `RH`, `DPT`, `SPFH`, `UGRD`, `VGRD`, `ABSV`, the `2dfldnomads` files only the column maxima `MAXUVV`/`MAXDVV`, the REFS
   mean has `DZDT` at 700 mb and over 700-500 mb only, and the deterministic `prslev` file (F003, 00Z 2026-11-06) has `DZDT` on all 26 levels.
   In published tests Cobb has been mixed: it was poor in a WRF study of 14 New England nor'easters (UConn preprint), but ahead of the thickness
@@ -236,7 +243,7 @@ rrfs_viewer/
   basemap.py     cartopy overlay (boundaries, frame, and the same lines as vectors for zoomed views), land mask, METAR layout
   terrain.py     terrain and water basemap: elevation tiles -> hypsometric tint x hillshade, depth ramps, relief overlay (WebP), cache
   gis.py         optional highway, route-label, city, town and peak layers (data/gis.bin; towns and peaks from data/places.csv and data/peaks.csv)
-  build.py       cycle choice, parallel workers, data.json, site assembly
+  build.py       cycle choice (strict, or the newest cycle with enough members), parallel workers that cannot take the build down, data.json, site assembly
   testing.py     offline fake S3 with real GRIB2, and invented terrain tiles (demo + tests)
 site/index.html  the dashboard (single file, no dependencies)
 .github/workflows/update.yml

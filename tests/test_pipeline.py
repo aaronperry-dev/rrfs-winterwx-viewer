@@ -193,11 +193,101 @@ def test_missing_message_is_not_fatal(rg):
     assert np.isfinite(out["qpf"]).any() and np.isfinite(out["t2"]).any()
 
 
-def test_missing_hour_poisons_only_totals(rg):
+# ---------------------------------------------------------------- graceful degradation: use whatever is there
+@pytest.fixture(scope="module")
+def clean12(rg):
+    return pipeline.process_member(S3Source(FakeS3(NOW)), CYC, "m003", rg, 12)
+
+
+def test_hourly_precip_hole_is_repaired_from_the_run_total(rg):
     fake = FakeS3(NOW, missing={("APCP", 2)})
     out, info = pipeline.process_member(S3Source(fake), CYC, "m003", rg, 6)
-    assert not np.isfinite(out["qpf"]).any()            # an accumulation with a hole is withheld, never under-reported
+    ref, _ = pipeline.process_member(S3Source(FakeS3(NOW)), CYC, "m003", rg, 6)
+    assert np.isfinite(out["qpf"]).all(axis=(1, 2)).all()                      # nothing is withheld
+    assert np.allclose(out["qpf"], ref["qpf"], atol=1e-3)                      # the run total supplies the hour that is missing
+    assert np.isfinite(out["snow_mean"]).any() and np.isfinite(out["snow_kuchera"]).any()
+    assert info["quality"][0] & pipeline.Q_ESTIMATED and not info["quality"][0] & pipeline.Q_PARTIAL
+    assert not info["quality"][1] & pipeline.Q_PARTIAL                       # the repaired hours are not counted missing later on
+    assert np.nanmax(np.abs(out["snow_mean"] - ref["snow_mean"])) < 0.5 * np.nanmax(ref["snow_mean"])      # the type of the lost hour is estimated, not invented from nothing
     assert np.isfinite(out["gust"]).any() and np.isfinite(out["slr_kuchera"]).any()
+
+
+def test_unrecoverable_hours_give_a_lower_bound_not_a_blank(rg):
+    fake = FakeS3(NOW, missing={("APCP", 2), ("APCP", 3)})                     # the run total of F003 is gone too
+    out, info = pipeline.process_member(S3Source(fake), CYC, "m003", rg, 6)
+    ref, _ = pipeline.process_member(S3Source(FakeS3(NOW)), CYC, "m003", rg, 6)
+    assert np.isfinite(out["qpf"][0]).any() and np.isfinite(out["snow_mean"][0]).any()
+    assert np.nansum(out["qpf"][0]) < np.nansum(ref["qpf"][0])                 # F003 is what the one good hour adds up to ...
+    assert info["quality"][0] & pipeline.Q_PARTIAL                              # ... and says so
+    assert np.allclose(out["qpf"][1], ref["qpf"][1], atol=1e-3)                # F006 has its run total again: exact
+    assert not info["quality"][1] & pipeline.Q_PARTIAL
+
+
+def test_missing_type_flags_use_the_previous_hours_type(rg):
+    fake = FakeS3(NOW, missing={("CSNOW", 5), ("CICEP", 5), ("CFRZR", 5)})
+    out, info = pipeline.process_member(S3Source(fake), CYC, "m001", rg, 12)
+    ref, _ = pipeline.process_member(S3Source(FakeS3(NOW)), CYC, "m001", rg, 12)
+    assert np.isfinite(out["snow_kuchera"]).all(axis=(1, 2)).all()
+    assert np.allclose(out["qpf"], ref["qpf"], atol=1e-3)                      # liquid is untouched
+    assert info["quality"][1] & pipeline.Q_ESTIMATED and not info["quality"][0] & pipeline.Q_ESTIMATED
+    assert not any(q & pipeline.Q_ESTIMATED for q in info["quality"][2:])              # only the frame whose own block was estimated is flagged
+
+
+def test_missing_model_snowfall_total_is_bridged(rg, clean12):
+    ref, _ = clean12
+    fake = FakeS3(NOW, missing={("ASNOW", 6)})
+    out, info = pipeline.process_member(S3Source(fake), CYC, "m003", rg, 12)
+    assert np.isfinite(out["snow_model"][1]).any()                              # F006 is not blank ...
+    assert info["quality"][1] & pipeline.Q_INTERP                               # ... it is marked as interpolated
+    assert not info["quality"][1] & pipeline.Q_PARTIAL                          # (the lower bound that was set aside is not what is shown)
+    assert np.allclose(out["snow_model"][1], 0.5 * (out["snow_model"][0] + out["snow_model"][2]), atol=1e-4)
+    assert np.allclose(out["snow_model"][2], ref["snow_model"][2], atol=1e-4)  # the next run total is exact again
+    assert not info["quality"][2] & pipeline.Q_INTERP
+
+
+def test_model_snowfall_from_hourly_windows_only(rg, clean12):
+    ref, _ = clean12
+    fake = FakeS3(NOW, member_asnow_totals=False)
+    out, info = pipeline.process_member(S3Source(fake), CYC, "m003", rg, 12)
+    assert np.allclose(out["snow_model"], ref["snow_model"], rtol=0.01, atol=0.02, equal_nan=True)     # summed from the 1-hour windows (each one packed with its own rounding)
+    assert not any(q & (pipeline.Q_PARTIAL | pipeline.Q_INTERP) for q in info["quality"])
+
+
+def test_model_snowfall_with_a_missing_hour_is_a_lower_bound(rg):
+    fake = FakeS3(NOW, member_asnow_totals=False, missing={("ASNOW", 2)})
+    out, info = pipeline.process_member(S3Source(fake), CYC, "m003", rg, 6)
+    ref, _ = pipeline.process_member(S3Source(FakeS3(NOW, member_asnow_totals=False)), CYC, "m003", rg, 6)
+    assert np.isfinite(out["snow_model"]).any(axis=(1, 2)).all()
+    assert np.nansum(out["snow_model"][1]) <= np.nansum(ref["snow_model"][1]) + 1e-6
+    assert info["quality"][0] & pipeline.Q_PARTIAL and info["quality"][1] & pipeline.Q_PARTIAL      # it never recovers without a run total
+
+
+def test_fill_gaps():
+    n, shape = 7, (2, 3)
+    a = np.full((n,) + shape, np.nan, np.float32)
+    for k, v in {1: 1.0, 4: 4.0}.items():
+        a[k] = v
+    out = {"qpf": a.copy(), "snow_model": a.copy(), "gust": np.full_like(a, np.nan)}
+    q = [0] * n
+    pipeline.fill_gaps(out, q, max_gap=2)
+    assert [float(out["qpf"][k][0, 0]) for k in range(5)] == pytest.approx([0.5, 1.0, 2.0, 3.0, 4.0])    # leading hole from zero, inner hole linear
+    assert not np.isfinite(out["qpf"][5:]).any()                               # trailing frames stay empty
+    assert [bool(x & pipeline.Q_INTERP) for x in q] == [True, False, True, True, False, False, False]
+    assert all(q[k] & pipeline.Q_EMPTY for k in (5, 6))
+    long = np.full((6,) + shape, np.nan, np.float32)
+    long[0] = 1.0
+    long[5] = 6.0
+    o2 = {"qpf": long}
+    pipeline.fill_gaps(o2, [0] * 6, max_gap=2)
+    assert not np.isfinite(o2["qpf"][1:5]).any()                               # a 4-frame hole is too long to guess
+
+
+def test_fewer_methods_still_make_a_mean():
+    a, b = np.full((2, 2), 2.0, np.float32), np.full((2, 2), 4.0, np.float32)
+    assert np.allclose(pipeline._method_mean([a, None, None, None, None]), 2.0)
+    assert np.allclose(pipeline._method_mean([a, b, None, None, None]), 3.0)
+    assert not np.isfinite(pipeline._method_range([a, None, None])).any()      # a range needs two
+    assert np.allclose(pipeline._method_range([a, b, None]), 2.0)
 
 
 def test_deterministic_lift_is_fetched_once_for_all_levels(lift, rg):
@@ -255,3 +345,34 @@ def test_cobb_with_lift_products(member, member_lift):
 def test_without_lift_the_lift_products_stay_empty(member):
     out, _, _ = member
     assert not np.isfinite(out["slr_cobblift"]).any() and not np.isfinite(out["snow_cobblift"]).any()
+
+
+class _TwoMembersDown(FakeS3):
+    def _match(self, Key):
+        if "/m004/" in Key or "/m005/" in Key:
+            raise KeyError(Key)
+        return super()._match(Key)
+
+
+def test_incomplete_cycle_is_used_when_enough_members_finished():
+    src = S3Source(_TwoMembersDown(NOW))
+    assert pipeline.find_cycle(src, NOW, 6) is None                              # strict: two members never publish, so no cycle qualifies ...
+    assert pipeline.find_cycle(src, NOW, 6, min_members=3) == CYC                # ... but three complete members are enough
+    assert pipeline.find_cycle(src, NOW, 6, min_members=4) is None
+    assert pipeline.complete_sources(src, CYC, 6) == ["refs", "m001", "m002", "m003"]
+    assert pipeline.find_cycle(S3Source(FakeS3(NOW)), NOW, 6, min_members=3) == CYC
+
+
+def test_a_failing_source_does_not_stop_the_build(monkeypatch, tmp_path):
+    def boom(*a, **k):
+        raise RuntimeError("member exploded")
+    monkeypatch.setattr(build, "_run_source", boom)
+    s, blobs, info = build.run_source(("m002", CYC.isoformat(), 6, str(tmp_path / "x"), None, str(tmp_path)))
+    assert s == "m002" and blobs == {} and "member exploded" in info["error"]
+
+
+def test_up_to_date_waits_for_late_members():
+    m = {"cycle": "2026-11-05T12:00:00Z", "code": "c", "complete": ["refs", "m001", "m002", "m003"]}
+    assert build.up_to_date(m, "2026-11-05T12:00:00Z", "c", ["m003", "m002", "m001", "refs"])
+    assert not build.up_to_date(m, "2026-11-05T12:00:00Z", "c", ["refs", "m001", "m002", "m003", "m004"])     # m004 has finished since
+    assert build.up_to_date({**m, "complete": None}, "2026-11-05T12:00:00Z", "c", ["refs"])                    # older sites without the field

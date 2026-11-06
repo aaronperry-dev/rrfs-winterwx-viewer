@@ -165,12 +165,13 @@ class FakeS3:
         r"(?P<idx>\.idx)?$")
 
     def __init__(self, now: datetime, lag_hours: int = 4, refs_totals: bool = False, grid: DemoGrid | None = None,
-                 missing: set[tuple[str, int]] | None = None, member_hourly_apcp: bool = True):
+                 missing: set[tuple[str, int]] | None = None, member_hourly_apcp: bool = True, member_asnow_totals: bool = True):
         self.now = now.astimezone(timezone.utc)
         self.lag = lag_hours
         self.refs_totals = refs_totals
         self.member_hourly_apcp = member_hourly_apcp      # False: members publish run-total APCP only (no 1-hour windows)
-        self.missing = missing or set()          # {(var, forecast_hour)} messages that are "not in the file"
+        self.member_asnow_totals = member_asnow_totals    # False: members publish 1-hour ASNOW windows only (no run totals)
+        self.missing = missing or set()          # {(var, forecast_hour)} messages that are "not in the file" (for every source); (var, hour, member) for one member
         self.grid = grid or DemoGrid()
         self._storms: dict = {}
         self._files: OrderedDict = OrderedDict()
@@ -229,7 +230,6 @@ class FakeS3:
                     ("GUST", "surface", _info("inst", h), x["gust"]),
                     ("MAXUVV", "100-1000 mb", _info("max", h), x["uvv"]),
                     ("PRES", "surface", _info("inst", h), x["ps"] * 100),
-                    ("ASNOW", "surface", _info("acc0", h), x["asnow"]),
                     ("TMP", "2 m above ground", _info("inst", h), x["t2"] + K),
                     ("DPT", "2 m above ground", _info("inst", h), x["t2"] + K - 1.5),
                     ("UGRD", "10 m above ground", _info("inst", h), x["u"]),
@@ -241,6 +241,10 @@ class FakeS3:
                     ("APCP", "surface", _info("acc0", h), s.cum_rate(h))]
             if self.member_hourly_apcp:
                 msgs.append(("APCP", "surface", _info("acc1", h), x["rate"]))
+            if self.member_asnow_totals:
+                msgs.append(("ASNOW", "surface", _info("acc0", h), x["asnow"]))
+            else:
+                msgs.append(("ASNOW", "surface", _info("acc1", h), np.maximum(s.asnow(h) - s.asnow(h - 1), 0)))
         else:
             msgs = []
             z = np.full_like(x["t2"], 100.0, dtype=np.float64)                    # heights from the hypsometric equation, 1000 hPa up
@@ -250,7 +254,8 @@ class FakeS3:
             msgs.insert(0, ("HGT", "1000 mb", _info("inst", h), np.full_like(x["t2"], 100.0)))
             msgs += [("TMP", f"{p} mb", _info("inst", h), x["T"][p]) for p in T_LEV]
             msgs += [("RH", f"{p} mb", _info("inst", h), x["RH"][p]) for p in RH_LEV]
-        return [t for t in msgs if (t[0], h) not in self.missing]
+        mem = m["m"]
+        return [t for t in msgs if (t[0], h) not in self.missing and (t[0], h, mem) not in self.missing]
 
     def _file(self, key: str, m):
         if key not in self._files:

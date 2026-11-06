@@ -166,7 +166,8 @@ def station_all(rg_x: np.ndarray, rg_y: np.ndarray) -> list[dict]:
         col, row = int(np.argmin(np.abs(rg_x - px))), int(np.argmin(np.abs(rg_y - py)))
         if abs(rg_x[col] - px) > OUT_DX_M or abs(rg_y[row] - py) > OUT_DX_M:
             continue
-        out.append({"id": s.icao, "fx": round((px - x0) / (x1 - x0), 5), "fy": round((y1 - py) / (y1 - y0), 5), "r": row, "c": col, "p": s.priority})
+        out.append({"id": s.icao, "fx": round((px - x0) / (x1 - x0), 5), "fy": round((y1 - py) / (y1 - y0), 5), "r": row, "c": col, "p": s.priority,
+                    "name": s.name, "st": s.state})
     return out
 
 
