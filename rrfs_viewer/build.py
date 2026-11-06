@@ -12,6 +12,7 @@ import multiprocessing as mp
 import os
 import shutil
 import sys
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -39,15 +40,28 @@ def _client(demo_now: str | None):
     return make_client()
 
 
+LIFT_FILE = "lift.npy"          # deterministic DZDT on the display raster (float16), written once per build, read by every member
+
+
 def run_source(args) -> tuple[str, dict[str, bytes], dict]:
-    source, cycle_iso, max_fhr, regrid_path, demo_now = args
+    source, cycle_iso, max_fhr, regrid_path, demo_now, lift_dir = args
     t0 = time.time()
     cycle = datetime.fromisoformat(cycle_iso)
     rg = grib.Regrid.load(Path(regrid_path))
     src = S3Source(_client(demo_now))
     tick = lambda s, fr: log.info("%s F%03d  (%.0fs)", s, fr, time.time() - t0)
-    arrays, info = (pipeline.process_refs(src, cycle, rg, max_fhr, tick) if source == "refs"
-                    else pipeline.process_member(src, cycle, source, rg, max_fhr, tick))
+    if source == "det":                                   # not a displayed source: it only feeds the members' Cobb-with-lift products
+        lift, info = pipeline.process_lift(src, cycle, rg, max_fhr, tick)
+        if lift is not None:
+            np.save(Path(lift_dir) / LIFT_FILE, lift)
+        info["seconds"] = round(time.time() - t0, 1)
+        return source, {}, info
+    if source == "refs":
+        arrays, info = pipeline.process_refs(src, cycle, rg, max_fhr, tick)
+    else:
+        path = Path(lift_dir) / LIFT_FILE
+        lift = np.load(path, mmap_mode="r") if path.exists() else None
+        arrays, info = pipeline.process_member(src, cycle, source, rg, max_fhr, tick, lift=lift)
     blobs = {}
     for key, a in arrays.items():
         if np.isfinite(a).any():
@@ -120,6 +134,7 @@ def main(argv=None) -> int:
     ap.add_argument("--max-fhr", type=int, default=60)
     ap.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
     ap.add_argument("--sources", default="refs," + ",".join(MEMBERS))
+    ap.add_argument("--no-lift", action="store_true", help="skip the deterministic-RRFS DZDT fetch (the Cobb-with-lift products stay empty)")
     ap.add_argument("--cycle", help="force a cycle (YYYYMMDDHH) instead of the newest complete one")
     ap.add_argument("--skip-if-deployed", metavar="URL", help="exit early (code 0, no output directory) when the site at URL already shows this cycle built by this code version")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -156,18 +171,38 @@ def main(argv=None) -> int:
 
     # ---------------------------------------------------------------- the ensemble sources, in parallel processes
     sources = [s for s in args.sources.split(",") if s]
-    jobs = [(s, iso(cycle), args.max_fhr, str(cache / "regrid.npz"), demo_now) for s in sources]
+    lift_dir = tempfile.mkdtemp(prefix="rrfs_lift_")                  # ~300 MB at F060: scratch space, removed below, never the cache
+    mk = lambda s: (s, iso(cycle), args.max_fhr, str(cache / "regrid.npz"), demo_now, lift_dir)
     results: dict[str, tuple[dict, dict]] = {}
-    if args.workers <= 1:
-        for j in jobs:
-            s, blobs, info = run_source(j)
+    lift_info: dict = {}
+
+    def collect(s, blobs, info):
+        if s == "det":
+            lift_info.update(info)
+            log.info("deterministic lift: %s frames, %.0f MB downloaded, %d requests%s", info.get("frames_ok", 0), info.get("bytes", 0) / 1e6,
+                      info.get("requests", 0), f"  -> {info['problem']}" if info.get("problem") else "")
+            for k, h in sorted((info.get("hints") or {}).items()):
+                log.warning("det: field not found %s -> %s", k, h)
+        else:
             results[s] = (blobs, info)
             _report(s, blobs, info)
-    else:
-        with ProcessPoolExecutor(args.workers, mp_context=mp.get_context("spawn")) as pool:
-            for s, blobs, info in pool.map(run_source, jobs):
-                results[s] = (blobs, info)
-                _report(s, blobs, info)
+
+    # the deterministic lift first (the members read it), in parallel with the REFS mean, then the members
+    first = [] if args.no_lift else ["det"]
+    first += [s for s in sources if s == "refs"]
+    rest = [s for s in sources if s != "refs"]
+    try:
+        if args.workers <= 1:
+            for s in first + rest:
+                collect(*run_source(mk(s)))
+        else:
+            with ProcessPoolExecutor(args.workers, mp_context=mp.get_context("spawn")) as pool:
+                for out_ in pool.map(run_source, [mk(s) for s in first]):
+                    collect(*out_)
+                for out_ in pool.map(run_source, [mk(s) for s in rest]):
+                    collect(*out_)
+    finally:
+        shutil.rmtree(lift_dir, ignore_errors=True)
 
     # ---------------------------------------------------------------- write data files + manifest
     total = 0
@@ -201,7 +236,8 @@ def main(argv=None) -> int:
         "stats": {"data_bytes": total, "overlay_bytes": overlay_bytes,
                   "downloaded_bytes": {s: results[s][1]["bytes"] for s in results},
                   "s3_requests": {s: results[s][1]["requests"] for s in results},
-                  "refs_accumulation": results.get("refs", ({}, {}))[1].get("mode")},
+                  "refs_accumulation": results.get("refs", ({}, {}))[1].get("mode"),
+                  "det_lift": {k: lift_info[k] for k in ("frames_ok", "bytes", "requests", "problem") if k in lift_info}},
     }
     (out / "data.json").write_text(json.dumps(manifest, separators=(",", ":")))
     shutil.copy(SITE_DIR / "index.html", out / "index.html")

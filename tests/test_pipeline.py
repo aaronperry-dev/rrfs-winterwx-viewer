@@ -27,6 +27,18 @@ def member(rg):
     return out, info, fake
 
 
+@pytest.fixture(scope="module")
+def lift(rg):
+    arr, info = pipeline.process_lift(S3Source(FakeS3(NOW)), CYC, rg, 6)
+    return arr, info
+
+
+@pytest.fixture(scope="module")
+def member_lift(rg, lift):
+    out, info = pipeline.process_member(S3Source(FakeS3(NOW)), CYC, "m001", rg, 6, lift=lift[0])
+    return out, info
+
+
 def test_find_cycle_picks_newest_complete():
     assert pipeline.find_cycle(S3Source(FakeS3(NOW)), NOW, 6) == CYC
     early = datetime(2026, 11, 5, 15, 0, tzinfo=timezone.utc)
@@ -40,6 +52,8 @@ def test_member_products_complete_and_physical(member, rg):
     ny, nx = rg.shape
     for k, a in out.items():
         assert a.shape == (2, ny, nx), k
+        if "cobblift" in k:                       # needs the deterministic run's DZDT: checked in test_cobb_with_lift_products
+            continue
         assert np.isfinite(a).any(), f"{k} is empty"
     assert info["missing"] == {}
     n = lambda k: np.nan_to_num(out[k])
@@ -79,10 +93,6 @@ def test_literature_methods(member, rg):
     assert (n("snow_nbmthick") >= 3 * liq - 1e-3).all() and (n("snow_nbmthick") <= 40 * liq + 1e-3).all()
     assert (n("snow_byun") <= 18.8 * liq + 1e-3).all()
     assert (n("snow_clim") >= 10.6 * liq - 1e-3).all() and (n("snow_clim") <= 13.4 * liq + 1e-3).all()
-    # the NBM-style blend is the mean of the max-T-aloft and thickness ratios, so its total lies between theirs
-    lo, hi = np.minimum(n("snow_maxt"), n("snow_nbmthick")), np.maximum(n("snow_maxt"), n("snow_nbmthick"))
-    assert (n("snow_nbm") >= lo - 2e-3).all() and (n("snow_nbm") <= hi + 2e-3).all()
-    np.testing.assert_allclose(out["slr_nbm"], 0.5 * (out["slr_maxt"] + out["slr_nbmthick"]), atol=1e-4, equal_nan=True)
     # the spread is max - min over the forecast methods and never negative
     meth = np.stack([out[m] for m in pipeline.SPREAD_METHODS])
     ok = np.isfinite(out["snow_spread"])
@@ -91,6 +101,20 @@ def test_literature_methods(member, rg):
     # the multi-method mean is unchanged: still the five original methods only
     assert pipeline.SNOW_METHODS == ("snow_model", "snow_12", "snow_kuchera", "snow_maxt", "snow_thick")
     assert "snow_byun" not in pipeline.SPREAD_METHODS and "snow_clim" not in pipeline.SPREAD_METHODS
+
+
+def test_cobb_product_and_the_products_left_out(member):
+    """Cobb is in (without a lift term); its melt variant, the NBM blends and the melt-loss map stay out."""
+    out, _, _ = member
+    gone = ("snow_cobbmelt", "snow_nbm", "snow_nbmmelt", "slr_nbm", "melt_loss")
+    assert not [k for k in gone if k in out or k in pipeline.MEMBER_KEYS or k + "_1h" in out]
+    assert not hasattr(pipeline, "MELT_METHODS")
+    assert "snow_cobb" in pipeline.SPREAD_METHODS and "snow_cobb" not in pipeline.SNOW_METHODS     # the five-method mean is unchanged
+    liq = np.nan_to_num(out["snow_12"]) / 12.0
+    assert np.isfinite(out["slr_cobb"]).any()
+    assert np.nanmin(out["slr_cobb"]) >= 0 and np.nanmax(out["slr_cobb"]) <= 30 + 1e-3
+    assert (np.nan_to_num(out["snow_cobb"]) <= 30 * liq + 1e-3).all()
+    assert np.isfinite(out["snow_cobb"]).any() and np.isfinite(out["snow_cobb_1h"]).any()
 
 
 def test_byun_ratio_is_recomputable_from_stored_fields(member):
@@ -113,7 +137,7 @@ def test_byun_ratio_is_recomputable_from_stored_fields(member):
 def test_one_hour_fields_are_consistent_with_totals(member):
     out, _, _ = member
     for base in ("qpf", "snow_12", "snow_kuchera", "snow_maxt", "snow_thick", "snow_mean", "snow_model",
-                 "snow_nbmthick", "snow_nbm", "snow_byun", "snow_clim"):
+                 "snow_cobb", "snow_nbmthick", "snow_byun", "snow_clim"):
         one, tot = np.nan_to_num(out[base + "_1h"]), np.nan_to_num(out[base])
         assert one.min() >= -1e-4, base
         assert (one[1] <= tot[1] - tot[0] + 0.02).all(), base          # the last hour of a 3-h block <= the 3-h window
@@ -174,3 +198,60 @@ def test_missing_hour_poisons_only_totals(rg):
     out, info = pipeline.process_member(S3Source(fake), CYC, "m003", rg, 6)
     assert not np.isfinite(out["qpf"]).any()            # an accumulation with a hole is withheld, never under-reported
     assert np.isfinite(out["gust"]).any() and np.isfinite(out["slr_kuchera"]).any()
+
+
+def test_deterministic_lift_is_fetched_once_for_all_levels(lift, rg):
+    arr, info = lift
+    ny, nx = rg.shape
+    assert arr is not None and arr.shape == (2, 26, ny, nx) and arr.dtype == np.float16
+    assert info["frames_ok"] == 2 and not info.get("problem")
+    assert np.isfinite(arr).any(axis=(0, 2, 3)).all()                       # every level was filled
+    assert np.nanmax(arr) > 0.05 and abs(float(np.nanmax(arr))) < 20       # m/s, plausible
+
+
+def test_lift_is_unavailable_when_the_deterministic_file_is_missing(rg):
+    class NoDet(FakeS3):
+        def head_object(self, Bucket, Key, **kw):
+            if Key.startswith("rrfs."):
+                raise KeyError(Key)
+            return super().head_object(Bucket, Key, **kw)
+
+        def get_object(self, Bucket, Key, **kw):
+            if Key.startswith("rrfs."):
+                raise KeyError(Key)
+            return super().get_object(Bucket, Key, **kw)
+
+    arr, info = pipeline.process_lift(S3Source(NoDet(NOW)), CYC, rg, 6)
+    assert arr is None and "no deterministic file" in info["problem"]
+
+
+def test_grid_check_rejects_a_shifted_grid(rg):
+    lat = np.zeros(rg.native_shape)
+    lon = np.zeros(rg.native_shape)
+    ok = rg.idx >= 0
+    lat.ravel()[rg.idx[ok]] = rg.lat[ok]
+    lon.ravel()[rg.idx[ok]] = rg.lon[ok]
+    assert pipeline.grid_matches(rg, lat, lon)
+    assert not pipeline.grid_matches(rg, lat + 0.5, lon)
+    assert not pipeline.grid_matches(rg, lat[:-1], lon[:-1])
+
+
+def test_cobb_with_lift_products(member, member_lift):
+    out, _ = member_lift
+    assert np.isfinite(out["slr_cobblift"]).any() and np.isfinite(out["snow_cobblift"]).any() and np.isfinite(out["snow_cobblift_1h"]).any()
+    assert np.nanmin(out["slr_cobblift"]) >= 0 and np.nanmax(out["slr_cobblift"]) <= 30 + 1e-3
+    liq = np.nan_to_num(out["snow_12"]) / 12.0
+    assert (np.nan_to_num(out["snow_cobblift"]) <= 30 * liq + 1e-3).all()
+    # the lift changes the ratio where there is ascent, and nothing else about the member
+    base, plain = member[0], out["slr_cobb"]
+    np.testing.assert_allclose(base["slr_cobb"], plain, equal_nan=True)
+    assert np.nanmax(np.abs(out["slr_cobblift"] - plain)) > 0.2
+    for k in ("snow_12", "snow_kuchera", "snow_cobb", "qpf"):
+        np.testing.assert_allclose(out[k], base[k], equal_nan=True, atol=1e-5)
+    # it never feeds the spread or the mean
+    assert "snow_cobblift" not in pipeline.SPREAD_METHODS and "snow_cobblift" not in pipeline.SNOW_METHODS
+
+
+def test_without_lift_the_lift_products_stay_empty(member):
+    out, _, _ = member
+    assert not np.isfinite(out["slr_cobblift"]).any() and not np.isfinite(out["snow_cobblift"]).any()

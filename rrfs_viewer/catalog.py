@@ -74,14 +74,22 @@ PRODUCTS: tuple[Product, ...] = (
        "The literature methods below are not part of it.",
        (1, 3, 6, 12, 18, 24), "ge", "Snowfall - mean of methods", has1h=True, step1h=0.02),
     # ------------------------------------------------------------------ snowfall: literature methods (not part of the mean)
+    _P("snow_cobb", "Cobb snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
+       "Snow-type liquid equivalent x the Cobb & Waldstreicher cloud-layer ratio as NBM applies it: layer ratios from the 2011 temperature "
+       "curve (peak 26:1 near -16 C) averaged over 925-300 hPa on a 25 hPa grid, weighted by (RH/80)^2. NBM's lift weight is set to its "
+       "minimum everywhere because the RRFS member files carry no pressure-level vertical velocity, so this is a humidity-weighted "
+       "layer mean, not the full method. Capped at 30:1.",
+       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - Cobb layer ratio (no lift term)", has1h=True, step1h=0.02),
+    _P("snow_cobblift", "Cobb snowfall (with lift)", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
+       "As the Cobb snowfall above, with the layers also weighted by sqrt(VV), the upward vertical velocity. The RRFS member files have "
+       "none, so VV comes from the deterministic RRFS run's DZDT (every 25 hPa, 925-300 hPa; omega = -rho g w, in microbar/s, at least 1) "
+       "while temperature and humidity are the member's own. The deterministic run's lift is not the member's lift: where the two "
+       "disagree on where the ascent is, this ratio is too. Empty where the deterministic file is missing.",
+       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - Cobb layer ratio (deterministic lift)", has1h=True, step1h=0.02),
     _P("snow_nbmthick", "NBM thickness snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
        "Snow-type liquid equivalent x the National Blend of Models thickness ratio, a straight line in the 850-700 hPa thickness: "
        "-0.16559 x Z[m] + 263.35 (8:1 at 1540 m, 15:1 at 1500 m). One of the methods NBM blends operationally.",
        (1, 3, 6, 12, 18, 24), "ge", "Snowfall - NBM 850-700 mb thickness ratio", has1h=True, step1h=0.02),
-    _P("snow_nbm", "NBM-style blend snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
-       "Snow-type liquid equivalent x the equal-weight mean of the max-T-aloft and NBM thickness ratios, the recipe NBM uses for "
-       "ensembles without vertical velocity. NBM's Cobb member is left out: RRFS has no pressure-level omega.",
-       (1, 3, 6, 12, 18, 24), "ge", "Snowfall - NBM-style blend (max T aloft + thickness)", has1h=True, step1h=0.02),
     _P("snow_byun", "Byun snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
        "Snow-type liquid equivalent x the Byun et al. (2008) logistic ratio of 2 m temperature, with coefficients chosen by 3-hour "
        "precipitation. Fitted to Korean data and capped near 19:1: it is a wet-snow-sensitive lower estimate, and runs low in cold powder. "
@@ -92,7 +100,7 @@ PRODUCTS: tuple[Product, ...] = (
        "interpolated between them. A reference for how much the weather-dependent methods differ from a typical winter, not a forecast.",
        (1, 3, 6, 12, 18, 24), "ge", "Snowfall - regional climatological ratio (Baxter et al.)", has1h=True, step1h=0.02),
     _P("snow_spread", "Method spread", G_SNOW, "in", "inst", C.SPREAD, "u8", 0.0, 0.1, 1, False,
-       "Run-total snowfall: highest minus lowest of the model, 12:1, Kuchera, max-T-aloft, CMC thickness and NBM thickness estimates. "
+       "Run-total snowfall: highest minus lowest of the model, 12:1, Kuchera, max-T-aloft, CMC thickness, Cobb and NBM thickness estimates. "
        "Large where the choice of ratio method matters most. Valid at the frame time (run total), so no accumulation windows.",
        (1, 2, 4, 8), "ge", "Snowfall - spread between ratio methods (run total)"),
     # ------------------------------------------------------------------ snow-to-liquid ratios
@@ -107,12 +115,17 @@ PRODUCTS: tuple[Product, ...] = (
     _P("slr_thick", "Thickness ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
        "CMC thickness ratio: 10:1 unless the 850-700 hPa thickness is above 1540 m, then 10 x (30.6 - 0.1057 x Z1000-700 [dam]) (min 3:1).",
        (6, 8, 10), "le", "Snow-to-Liquid Ratio - 850-700 mb thickness"),
+    _P("slr_cobb", "Cobb ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
+       "Cobb & Waldstreicher cloud-layer ratio (2011 curve) averaged over 925-300 hPa with (RH/80)^2 weights and no lift term, capped at "
+       "30:1. Where the column is dry the weights are small and the ratio is set by whatever moist layers there are.",
+       (10, 12, 15, 20), "ge", "Snow-to-Liquid Ratio - Cobb layer (no lift term)"),
+    _P("slr_cobblift", "Cobb ratio (with lift)", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
+       "Cobb layer ratio as above, with each layer also weighted by sqrt(VV) from the deterministic RRFS run's DZDT (member temperature "
+       "and humidity). Capped at 30:1.",
+       (10, 12, 15, 20), "ge", "Snow-to-Liquid Ratio - Cobb layer (deterministic lift)"),
     _P("slr_nbmthick", "NBM thickness ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
        "NBM linear 850-700 hPa thickness ratio, -0.16559 x Z[m] + 263.35 (clipped 3:1 - 40:1).",
        (10, 12, 15, 20), "ge", "Snow-to-Liquid Ratio - NBM 850-700 mb thickness"),
-    _P("slr_nbm", "NBM-style blend ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
-       "Equal-weight mean of the max-T-aloft and NBM thickness ratios.", (10, 12, 15, 20), "ge",
-       "Snow-to-Liquid Ratio - NBM-style blend"),
     _P("slr_byun", "Byun ratio", G_SLR, ":1", "inst", C.SLR, "u8", 0.0, 0.2, 0, False,
        "Byun et al. (2008) logistic ratio of 2 m temperature and 3-hour precipitation. Near 0 above about +1 C, half of its limit "
        "(11.9-18.8) at 0 C, and never above that limit.", (6, 10, 12, 15), "ge", "Snow-to-Liquid Ratio - Byun et al."),

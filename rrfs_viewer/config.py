@@ -23,6 +23,8 @@ class FileKind:
 
     def key_for(self, source: str, cycle, fhr: int) -> str:
         d, cc = f"{cycle:%Y%m%d}", f"{cycle:%H}"
+        if source == "det":                          # deterministic RRFS, full pressure-level file (has DZDT every 25 hPa)
+            return f"rrfs.{d}/{cc}/rrfs.t{cc}z.prslev.3km.f{fhr:03d}.conus.grib2"
         if source == "refs":                         # official REFS ensemble mean (CONUS 3 km)
             return f"refs.{d}/{cc}/ensprod/refs.t{cc}z.mean.f{fhr:02d}.conus.grib2"
         suffix = {"2dfld": "2dfldnomads", "prslev": "prslevnomads"}[self.key]
@@ -31,10 +33,13 @@ class FileKind:
 
 FILE_2D = FileKind("2dfld")
 FILE_PRS = FileKind("prslev")
+LIFT_LEVELS = tuple(range(925, 299, -25))                               # deterministic DZDT levels (hPa) = winter.COBB_GRID
 
 # --------------------------------------------------------------------------- vertical levels fetched from the member prslev files
 T_LEVELS = (1000, 975, 950, 925, 900, 850, 800, 750, 700, 600, 500)     # TMP: Kuchera / max-T-aloft / DGZ / warm nose
 RH_LEVELS = (925, 900, 850, 800, 750, 700, 600, 500)                    # RH: saturation test inside the DGZ
+COBB_UPPER = (400, 300)                 # extra TMP + RH levels so the Cobb integration reaches NBM's 300 hPa top; kept apart from T_LEVELS
+                                        # so Kuchera / max-T-aloft / DGZ / warm nose do not change
 
 # --------------------------------------------------------------------------- region / display grid
 # lon_min, lon_max, lat_min, lat_max that bounds the map frame (checked in basemap.py)

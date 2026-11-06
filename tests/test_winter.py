@@ -164,3 +164,151 @@ def test_baxter_climatology_stays_within_the_published_means():
     assert r.min() >= min(vals) - 1e-4 and r.max() <= max(vals) + 1e-4
     assert r[0] == pytest.approx(12.3, abs=0.2) and r[1] < r[0]          # Caribou ~12.3; the Boston coast is lower (10.7 mean)
     assert r.dtype == np.float32 and W.slr_baxter(np.zeros((3, 4)) + 43, np.zeros((3, 4)) - 71).shape == (3, 4)
+
+
+# --------------------------------------------------------------------------- Cobb layer ratio, wet bulb, melt
+LEV = [925, 900, 850, 800, 750, 700, 600, 500, 400, 300]
+
+
+def _col(vals):
+    return np.asarray(vals, float).reshape(len(vals), 1, 1)
+
+
+@pytest.mark.parametrize("t,expect", [(-3.0, 7.75), (-15.0, 24.25), (-16.0, 26.0), (-30.0, 7.2), (-45.0, 7.2), (5.0, 0.0), (1.0, 0.0)])
+def test_cobb_isothermal_saturated_column_gives_the_table_value(t, expect):
+    r = W.slr_cobb(_col([t] * len(LEV)), _col([100.0] * len(LEV)), LEV, np.array([[1000.0]]))
+    assert r[0, 0] == pytest.approx(expect, abs=1e-4)
+
+
+def test_cobb_weights_layers_by_rh_squared():
+    # two saturated-vs-dry halves: -16 C (26:1) on the lower half at RH 100, -4 C (8.5:1) on the upper half at RH 50
+    n = len(LEV)
+    t = _col([-16.0] * 5 + [-4.0] * (n - 5))
+    rh = _col([100.0] * 5 + [50.0] * (n - 5))
+    r = W.slr_cobb(t, rh, LEV, np.array([[1000.0]]))[0, 0]
+    # 25 hPa layers: count the grid layers on each side of the 750/700 hPa break and weight by RH^2
+    lo = sum(1 for p in range(925, 299, -25) if p >= 750)
+    hi = sum(1 for p in range(925, 299, -25) if p < 750)
+    w_lo, w_hi = lo * 100.0 ** 2, hi * 50.0 ** 2
+    assert 8.5 < r < 26 and r > (26 * w_lo + 8.5 * w_hi) / (w_lo + w_hi) - 1.5      # transition layers blur the break by a little
+    assert r > 0.5 * (26 + 8.5)                                       # the humid layers dominate over an unweighted mean
+
+
+def test_cobb_ignores_layers_below_ground_and_survives_missing_data():
+    t = _col([-15.0] * len(LEV))
+    rh = _col([100.0] * len(LEV))
+    # a 40:1-looking warm layer underground (925/900) must not count when the surface is at 850 hPa
+    t_warm = t.copy()
+    t_warm[0], t_warm[1] = 3.0, 3.0
+    ground = W.slr_cobb(t_warm, rh, LEV, np.array([[850.0]]))[0, 0]
+    assert ground == pytest.approx(24.25, abs=1e-4)
+    assert W.slr_cobb(t_warm, rh, LEV, np.array([[1000.0]]))[0, 0] < 24.25     # but it does when the ground is below it
+    nan = np.full((len(LEV), 1, 1), np.nan)
+    assert np.isnan(W.slr_cobb(nan, nan, LEV, np.array([[1000.0]]))[0, 0])
+    # a column that stops at 500 hPa (no 400/300 files) still gives a ratio from the layers it has
+    r = W.slr_cobb(t[:8], rh[:8], LEV[:8], np.array([[1000.0]]))
+    assert r[0, 0] == pytest.approx(24.25, abs=1e-4)
+
+
+def test_cobb_interpolates_in_log_pressure():
+    # -10 C at 700 hPa to -20 C at 500 hPa: the 600 hPa layer sits at ln(600/700)/ln(500/700) of the way, i.e. -4.6 C from 700 -> about -14.6 C
+    lev = [700, 500]
+    t = np.array([-10.0, -20.0]).reshape(2, 1, 1)
+    rh = np.full((2, 1, 1), 100.0)
+    # integrate by hand on the 25 hPa grid between 700 and 500 hPa
+    ts = []
+    for p in range(700, 499, -25):
+        w = np.log(p / 700) / np.log(500 / 700)
+        ts.append(np.interp(-10.0 + w * -10.0, W.COBB_T_C, W.COBB_SR))
+    r = W.slr_cobb(t, rh, lev, np.array([[1000.0]]))[0, 0]
+    assert r == pytest.approx(np.mean(ts), abs=1e-4)
+
+
+def test_cobb_table_is_the_2011_curve():
+    assert W.cobb_layer_sr(np.array([-16.0, -12.0, -8.0, 0.0, 1.0, 10.0])).tolist() == [26.0, 17.5, 9.5, 3.0, 0.0, 0.0]
+    assert W.COBB_SR.max() == 26.0 and np.all(np.diff(W.COBB_T_C) > 0)
+
+
+def test_wet_bulb():
+    p = np.full(5, 1000.0)
+    tw = W.wet_bulb_c(np.array([2.0, 0.0, 10.0, 5.0, -5.0]), np.array([0.0, -3.0, 5.0, 5.0, -8.0]), p)
+    assert tw[3] == pytest.approx(5.0, abs=0.01)                         # saturated: Tw = T
+    assert np.all(tw <= np.array([2.0, 0.0, 10.0, 5.0, -5.0]) + 1e-4)
+    assert tw[0] == pytest.approx(1.18, abs=0.1) and tw[2] == pytest.approx(7.5, abs=0.15)     # textbook values
+    assert W.wet_bulb_c(np.array([3.0]), np.array([8.0]), np.array([1000.0]))[0] == pytest.approx(3.0, abs=0.01)   # Td > T is clamped
+
+
+@pytest.mark.parametrize("denom,table", [(15.0, [0.01, 0.03, 0.05, 0.07, 0.09, 0.12, 0.15, 0.18, 0.21]),
+                                         (10.0, [0.02, 0.05, 0.08, 0.12, 0.16, 0.21, 0.26, 0.30, 0.35])])
+def test_melt_rate_reproduces_the_published_tables(denom, table):
+    """Leone et al. 2023 (D = 15) and Cobb 2024 (D = 10) tables of hourly melt, 32 F ... 40 F."""
+    got = W.melt_rate_in_per_hr(np.arange(32.0, 41.0), denom)
+    np.testing.assert_allclose(got, table, atol=0.0075)                  # the slides round (and truncate) to two decimals
+    assert W.melt_rate_in_per_hr(np.array([31.0, 20.0, -5.0]), denom).tolist() == [0.0, 0.0, 0.0]
+    assert W.melt_rate_in_per_hr(np.array([40.0]), denom)[0] == W.melt_rate_in_per_hr(np.array([55.0]), denom)[0]    # capped at 40 F
+
+
+def test_melt_factor_worked_example_from_the_slides():
+    f = W.melt_factor(np.array([34.0, 38.0, 38.0, 30.0, 34.0]), np.array([0.15, 0.15, 0.05, 0.15, 0.0]), 15.0)
+    assert f[0] == pytest.approx(0.667, abs=0.01) and 12 * f[0] == pytest.approx(8.0, abs=0.1)      # 12:1 -> ~8:1
+    assert f[1] == 0.0 and f[2] == 0.0                                    # melt >= snow rate: melted as it fell
+    assert f[3] == 1.0 and f[4] == 1.0                                    # below onset, or no snow at all
+    assert np.all((f >= 0) & (f <= 1))
+    heavier = W.melt_factor(np.full(4, 35.0), np.array([0.05, 0.10, 0.20, 0.40]), 15.0)
+    assert np.all(np.diff(heavier) >= 0)                                  # heavier snow survives better
+
+
+# --------------------------------------------------------------------------- Cobb with a vertical-velocity term
+GRID = list(range(925, 299, -25))
+
+
+def _w(vals):
+    return np.asarray(vals, float).reshape(len(vals), 1, 1)
+
+
+def _two_layer_column():
+    """-16 C (26:1) in the 600-400 hPa part of the column, -4 C (8.5:1) elsewhere, all saturated."""
+    t = _col([-4.0 if p > 600 or p < 400 else -16.0 for p in LEV])
+    return t, _col([100.0] * len(LEV))
+
+
+def test_vv_unit_conversion_and_floor():
+    # w = 0.10 m/s at 700 hPa, -10 C: rho = 70000 / (287.05 * 263.15) = 0.927 kg/m3, omega = -0.909 Pa/s = 9.09 microbar/s
+    assert W.vv_ubar_per_s(0.10, -10.0, 700.0) == pytest.approx(9.09, abs=0.02)
+    assert W.vv_ubar_per_s(-0.5, -10.0, 700.0) == 1.0                     # downward motion counts as 1
+    assert W.vv_ubar_per_s(np.nan, -10.0, 700.0) == 1.0                   # so does a missing value
+    assert W.vv_ubar_per_s(0.0005, -10.0, 700.0) == 1.0                   # and anything weaker than the floor
+
+
+def test_cobb_without_lift_equals_zero_lift():
+    t, rh = _two_layer_column()
+    ps = np.array([[1000.0]])
+    base = W.slr_cobb(t, rh, LEV, ps)
+    np.testing.assert_allclose(W.slr_cobb(t, rh, LEV, ps, w_ms=np.zeros((26, 1, 1))), base, atol=1e-5)
+    np.testing.assert_allclose(W.slr_cobb(t, rh, LEV, ps, w_ms=-np.ones((26, 1, 1))), base, atol=1e-5)
+    np.testing.assert_allclose(W.slr_cobb(t, rh, LEV, ps, w_ms=np.full((26, 1, 1), np.nan)), base, atol=1e-5)
+
+
+def test_cobb_lift_pulls_the_ratio_toward_the_layer_with_the_ascent():
+    t, rh = _two_layer_column()
+    ps = np.array([[1000.0]])
+    cold = np.array([0.30 if 400 <= p <= 600 else 0.0 for p in GRID]).reshape(26, 1, 1)     # ascent inside the cold (26:1) layer
+    warm = np.array([0.30 if p >= 800 else 0.0 for p in GRID]).reshape(26, 1, 1)             # ascent in the warm (8.5:1) layer
+    base = W.slr_cobb(t, rh, LEV, ps)[0, 0]
+    r_cold = W.slr_cobb(t, rh, LEV, ps, w_ms=cold)[0, 0]
+    r_warm = W.slr_cobb(t, rh, LEV, ps, w_ms=warm)[0, 0]
+    assert r_warm < base < r_cold <= W.COBB_MAX
+    assert r_cold > 18 and r_warm < 14
+
+
+def test_cobb_lift_weight_is_the_square_root_of_vv():
+    # a two-level column: -4 C (8.5:1) at 800 hPa and -16 C (26:1) at 500 hPa, both saturated, ascent only at 500 hPa
+    lev = [800, 500]
+    t, rh = _col([-4.0, -16.0]), _col([100.0, 100.0])
+    ps = np.array([[1000.0]])
+    w = np.zeros((26, 1, 1))
+    w[GRID.index(500)] = 0.04                          # 4 cm/s at 500 hPa only
+    base = W.slr_cobb(t, rh, lev, ps)[0, 0]
+    assert W.slr_cobb(t, rh, lev, ps, w_ms=w)[0, 0] > base
+    # VV at 500 hPa (T=-16 C): rho = 50000/(287.05*257.15) = 0.6774, VV = 10 * 0.6774 * 9.80665 * 0.04 = 2.657: sqrt = 1.63 vs 1
+    assert W.vv_ubar_per_s(0.04, -16.0, 500.0) == pytest.approx(2.657, abs=0.01)

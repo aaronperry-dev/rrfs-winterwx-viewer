@@ -24,7 +24,7 @@ import numpy as np
 
 from . import grib, winter
 from .catalog import STORE
-from .config import FILE_2D, FILE_PRS, MEMBERS, RH_LEVELS, T_LEVELS, frames
+from .config import COBB_UPPER, FILE_2D, FILE_PRS, LIFT_LEVELS, MEMBERS, RH_LEVELS, T_LEVELS, frames
 from .s3 import S3Source
 
 log = logging.getLogger(__name__)
@@ -153,10 +153,15 @@ class RunTotal:
 # ============================================================================== ensemble members
 MEMBER_KEYS = tuple(p.key for p in STORE)
 SNOW_METHODS = ("snow_model", "snow_12", "snow_kuchera", "snow_maxt", "snow_thick")      # the five that make the multi-method mean
-EXTRA_METHODS = ("snow_nbmthick", "snow_nbm", "snow_byun", "snow_clim")                   # literature methods shown on their own
+EXTRA_METHODS = ("snow_cobb", "snow_cobblift", "snow_nbmthick", "snow_byun", "snow_clim")   # literature methods shown on their own
+# "snow_cobb" runs without its lift term (the public RRFS member files carry no omega); "snow_cobblift" weights the layers with the
+# deterministic RRFS run's DZDT (process_lift, fetched once per cycle) on each member's own temperature and humidity.  Its melt variant and the NBM blends are not in the
+# dashboard: winter.py keeps melt_factor / wet_bulb_c / slr_blend with tests, see README.
+COBB_T_LEVELS = tuple(sorted(set(T_LEVELS) | set(COBB_UPPER), reverse=True))
+COBB_RH_LEVELS = tuple(sorted(set(RH_LEVELS) | set(COBB_UPPER), reverse=True))
 # Spread = max - min over the physically based forecast methods.  Byun (fitted to Korean data, capped near 19:1) and the
-# climatology (not a forecast) are shown but left out so they do not set the spread; snow_nbm is a mean of two members of the set.
-SPREAD_METHODS = SNOW_METHODS + ("snow_nbmthick",)
+# climatology (not a forecast) are shown but left out so they do not set the spread.
+SPREAD_METHODS = SNOW_METHODS + ("snow_cobb", "snow_nbmthick")
 Z_LEVELS = (1000, 850, 700)
 
 
@@ -196,17 +201,72 @@ def _plan_member(F, k, acc_p: Acc, acc_s: Acc):
     R["uvv"] = Req(FILE_2D, fr, "MAXUVV", "100-1000 mb", None)
     for p in T_LEVELS:
         R[("T", p)] = Req(FILE_PRS, fr, "TMP", f"{p} mb", None)
-    for p in RH_LEVELS:
+    for p in COBB_RH_LEVELS:
         R[("RH", p)] = Req(FILE_PRS, fr, "RH", f"{p} mb", None)
+    for p in COBB_UPPER:
+        R[("T", p)] = Req(FILE_PRS, fr, "TMP", f"{p} mb", None)
     for p in Z_LEVELS:
         R[("Z", p)] = Req(FILE_PRS, fr, "HGT", f"{p} mb", None)
     reqs = list(R.values()) + [r for p in plans.values() if p for r in p[0]]
     return R, plans, reqs
 
 
+# ============================================================================== deterministic lift
+def grid_matches(rg: grib.Regrid, lat: np.ndarray, lon: np.ndarray, tol_deg: float = 0.06) -> bool:
+    """Is this native grid the one ``rg`` was built from?  Compares the native cell each display cell points at with the display cell."""
+    if lat.shape != rg.native_shape:
+        return False
+    ok = rg.idx >= 0
+    dlat = np.abs(lat.ravel()[rg.idx[ok]] - rg.lat[ok])
+    dlon = np.abs(((lon.ravel()[rg.idx[ok]] - rg.lon[ok]) + 180.0) % 360.0 - 180.0)
+    return bool(ok.any() and np.percentile(dlat, 99) < tol_deg and np.percentile(dlon, 99) < tol_deg)
+
+
+def process_lift(src: S3Source, cycle: datetime, rg: grib.Regrid, max_fhr: int, progress=None) -> tuple[np.ndarray | None, dict]:
+    """Geometric vertical velocity ``DZDT`` [m/s, up] of the deterministic RRFS on the display raster, every 25 hPa from 925 to 300.
+
+    Returns ``(array (n_frames, 26, ny, nx) float16, NaN where missing)`` and an info dict; the array is None when the deterministic
+    file is unavailable or is not on the members' grid.  One run, so it is fetched once and shared by all members.
+    """
+    F = frames(max_fhr)
+    ny, nx = rg.shape
+    f = Fetcher(src, cycle, "det", rg)
+    info: dict = {"frames_ok": 0}
+    loc0 = next((l for l in (src.locate(FILE_PRS, "det", cycle, h) for h in F) if l is not None), None)
+    if loc0 is None:
+        info.update(bytes=src.bytes_downloaded, requests=src.requests, problem="no deterministic file for this cycle")
+        return None, info
+    msg = src.fetch_message(loc0, "DZDT", f"{LIFT_LEVELS[0]} mb")
+    if msg is None:
+        info.update(bytes=src.bytes_downloaded, requests=src.requests, problem="no DZDT in the deterministic file")
+        return None, info
+    _, (glat, glon) = grib.decode(msg, want_geometry=True)
+    if not grid_matches(rg, glat, glon):
+        info.update(bytes=src.bytes_downloaded, requests=src.requests, problem="deterministic grid differs from the members' grid")
+        return None, info
+    out = np.full((len(F), len(LIFT_LEVELS), ny, nx), np.nan, np.float16)
+    for k, fr in enumerate(F):
+        reqs = [Req(FILE_PRS, fr, "DZDT", f"{p} mb", None) for p in LIFT_LEVELS]
+        src.locate(FILE_PRS, "det", cycle, fr)               # read the .idx once, before the 26 parallel range requests need it
+        A = f.decode(f.bulk(reqs))
+        have = [A.get(r) for r in reqs]
+        if any(a is None for a in have):                    # a frame with any missing level is left empty rather than half filled
+            continue
+        out[k] = np.clip(np.stack(have), -20.0, 20.0)
+        info["frames_ok"] += 1
+        if progress:
+            progress("det", fr)
+    info.update(missing=f.missing, hints=f.hints, bytes=src.bytes_downloaded, requests=src.requests)
+    return (out if info["frames_ok"] else None), info
+
+
 def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid, max_fhr: int,
-                   progress=None) -> tuple[dict[str, np.ndarray], dict]:
-    """All member products on the display raster: ``{product: (n_frames, ny, nx) float32}`` (NaN = missing)."""
+                   progress=None, lift: np.ndarray | None = None) -> tuple[dict[str, np.ndarray], dict]:
+    """All member products on the display raster: ``{product: (n_frames, ny, nx) float32}`` (NaN = missing).
+
+    ``lift`` is the deterministic ``DZDT`` from :func:`process_lift` (frames x 26 levels x ny x nx); without it the Cobb-with-lift
+    products stay empty.
+    """
     F = frames(max_fhr)
     ny, nx = rg.shape
     nan = lambda: np.full((len(F), ny, nx), np.nan, np.float32)
@@ -278,6 +338,13 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
                            for p in T_LEVELS])
             d, s_, r_ = winter.dgz_metrics(Tk - 273.15, rh, T_LEVELS, ps)
             out["dgz_depth"][k], out["dgz_sat"][k], out["dgz_rhi"][k] = d, s_, r_
+            cobb_t = [g(("T", p)) for p in COBB_RH_LEVELS]
+            cobb_rh = [g(("RH", p)) for p in COBB_RH_LEVELS]
+            if all(a is not None for a in cobb_t + cobb_rh):
+                ct, cr = np.stack(cobb_t) - 273.15, np.stack(cobb_rh)
+                slr["snow_cobb"] = out["slr_cobb"][k] = winter.slr_cobb(ct, cr, COBB_RH_LEVELS, ps)
+                if lift is not None and np.isfinite(lift[k, 0]).any():
+                    slr["snow_cobblift"] = out["slr_cobblift"][k] = winter.slr_cobb(ct, cr, COBB_RH_LEVELS, ps, w_ms=np.asarray(lift[k], np.float32))
         # thickness ratio: model heights when present, otherwise the hypsometric equation on the temperature levels
         Z = {p: g(("Z", p)) for p in Z_LEVELS}
         if all(a is not None for a in Z.values()):
@@ -291,8 +358,6 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
         if dz_1000_700 is not None:
             slr["snow_thick"] = out["slr_thick"][k] = winter.slr_thickness_cmc(dz_1000_700, dz_850_700)
             slr["snow_nbmthick"] = out["slr_nbmthick"][k] = winter.slr_thickness_nbm(dz_850_700)
-            if slr["snow_maxt"] is not None:
-                slr["snow_nbm"] = out["slr_nbm"][k] = winter.slr_blend(slr["snow_maxt"], slr["snow_nbmthick"])
 
         # ---------------------------------------------------------------- hourly precipitation accounting
         inc1 = {"qpf": None, "liq": None}

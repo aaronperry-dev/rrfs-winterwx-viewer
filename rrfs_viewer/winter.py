@@ -16,6 +16,13 @@ Sources
   data, so it never exceeds ~19:1: a wet-snow-sensitive lower bound, not a cold-powder estimate.
 * Regional climatology (Baxter, Graves & Moore 2005, Weather and Forecasting 20, 729-744, Table 2): CWA mean ratios from 1971-2000
   COOP data, spread over the map by inverse-distance weighting.  A reference, not a forecast; there is no seasonal cycle.
+* Cobb & Waldstreicher (2005) as implemented in the National Blend of Models (Cobb 2024 NBM v4.1 slides; Cobb SREF write-up for the
+  2011 temperature-ratio table): every 25 hPa layer from 925 to 300 hPa contributes ``SR(T)`` weighted by ``sqrt(VV) x RH^2 / 6400``;
+  the ratio is the weighted mean.  RRFS has no pressure-level omega, so ``VV`` is taken as NBM's floor value of 1 in every layer, which
+  is also how NBM treats levels where vertical motion is missing: the lift term drops out and the humidity term remains.
+* Cobb melt (Leone, Cobb & Rudack 2023, NBM v4.2): potential melt of falling snow ``[(0.5 Tw[F] - 15.5) / D]^1.3`` inch of liquid per
+  hour, ratio multiplied by ``(QPF - melt) / QPF`` and set to zero when melt exceeds QPF.  ``D`` is 15 in the NBM-team deck (marked
+  the final choice) and 10 in a later talk by Cobb; see ``MELT_DENOM``.
 * Dendritic growth zone (DGZ): the layer between the -12 and -18 degC isotherms (Cobb & Waldstreicher 2005; NWS TA-1604).
 * NWS wind chill: https://www.weather.gov/safety/cold-wind-chill-chart
 * NWS blizzard criteria: sustained wind or frequent gusts >= 35 mph, falling/blowing snow reducing visibility to
@@ -171,6 +178,112 @@ def slr_baxter(lat, lon, power: float = 2.0, floor_km: float = 60.0):
         num += w * val
         den += w
     return (num / den).astype(np.float32)
+
+
+# Cobb layer snow ratio as a function of layer temperature [degC]: the 2011 version of the Cobb-Waldstreicher curve (the 2005 version
+# peaked at 50:1 in a narrow -16 degC spike; the 2011 curve is broader and peaks at 26:1).  Linear between the points.
+COBB_T_C = np.array([-300, -30, -28, -26, -24, -22, -20, -18, -16, -14, -12, -10, -8, -6, -4, -2, 0, 1, 300], float)
+COBB_SR = np.array([7.2, 7.2, 6.8, 7.0, 8.8, 12.0, 18.0, 23.0, 26.0, 22.5, 17.5, 12.0, 9.5, 9.0, 8.5, 7.0, 3.0, 0.0, 0.0], float)
+COBB_P_BOT, COBB_P_TOP, COBB_P_STEP = 925, 300, 25          # NBM integrates 925-300 hPa on a 25 hPa grid
+COBB_MAX = 30.0                                             # cap used for the SREF Cobb product (the curve itself tops out at 26)
+
+
+def cobb_layer_sr(t_c):
+    return np.interp(t_c, COBB_T_C, COBB_SR)
+
+
+COBB_GRID = tuple(range(COBB_P_BOT, COBB_P_TOP - 1, -COBB_P_STEP))            # 925, 900, ..., 300 hPa (26 levels)
+UBAR_S_PER_PA_S = 10.0                                                       # 1 Pa/s = 10 microbar/s
+G0, RD = 9.80665, 287.05
+
+
+def vv_ubar_per_s(w_ms, t_c, p_hpa):
+    """Cobb's upward vertical velocity ``VV`` [microbar/s, at least 1] from geometric ``w`` [m/s, up] with ``omega = -rho g w``.
+
+    The unit is an assumption: the NBM slides give only the floor "1" (downward motion and missing data count as 1), and microbar/s is
+    the omega unit of the original Cobb & Waldstreicher / BUFKIT work; 1 microbar/s is about 1.3 cm/s of ascent near 700 hPa.
+    """
+    rho = 100.0 * p_hpa / (RD * (np.asarray(t_c, np.float64) + 273.15))
+    vv = UBAR_S_PER_PA_S * rho * G0 * np.asarray(w_ms, np.float64)
+    return np.maximum(np.where(np.isfinite(vv), vv, 1.0), 1.0)
+
+
+def slr_cobb(t_c, rh, levels_hpa, ps_hpa, w_ms=None):
+    """Cloud-layer Cobb ratio.  Without ``w_ms`` the vertical-velocity term is fixed at 1 (see module docstring).
+
+    ``t_c`` (degC) and ``rh`` (% , as the model gives it) are ``(nlev, ny, nx)`` on ``levels_hpa``.  They are interpolated linearly in
+    ln p to a 25 hPa grid (as NBM does for data on standard levels); layers below the ground, or outside the span of the data, are left
+    out, and a layer whose lower bracketing level is underground takes the upper one.  NaN where no layer has a usable T and RH.
+
+    ``w_ms`` (optional): geometric vertical velocity [m/s, positive up] already on the 25 hPa grid ``COBB_GRID``, shape
+    ``(26, ny, nx)``.  Each layer is then weighted by ``sqrt(VV)`` (``vv_ubar_per_s``) as well; NaN or downward ``w`` gives the floor of 1.
+    """
+    lev = np.asarray(levels_hpa, float)
+    order = np.argsort(-lev)                                   # bottom (high p) to top
+    lev, t_c, rh = lev[order], np.asarray(t_c)[order].astype(np.float64), np.asarray(rh)[order].astype(np.float64)
+    ps = np.asarray(ps_hpa, np.float64)
+    ok = lev[:, None, None] <= ps[None] + 1e-6                 # level above the ground
+    t_c, rh = np.where(ok, t_c, np.nan), np.where(ok, rh, np.nan)
+    num = np.zeros(ps.shape)
+    den = np.zeros(ps.shape)
+    for pt in range(COBB_P_BOT, COBB_P_TOP - 1, -COBB_P_STEP):
+        if pt > lev[0] + 1e-6 or pt < lev[-1] - 1e-6:
+            continue                                           # outside the data: no extrapolation
+        i = int(np.searchsorted(-lev, -pt, side="left"))       # first level with p <= pt
+        lo, hi = (i, i) if abs(lev[i] - pt) < 1e-6 else (i - 1, i)
+        w = 0.0 if lo == hi else np.log(pt / lev[lo]) / np.log(lev[hi] / lev[lo])
+        def at(a):
+            a_lo, a_hi = a[lo], a[hi]
+            return np.where(np.isnan(a_lo), a_hi, np.where(np.isnan(a_hi), a_lo, a_lo + w * (a_hi - a_lo)))
+        t, r = at(t_c), at(rh)
+        good = np.isfinite(t) & np.isfinite(r) & (pt <= ps + 1e-6)
+        wt = np.where(good, np.clip(r, 0.0, 100.0) ** 2 / 6400.0, 0.0)         # RHw
+        if w_ms is not None:
+            wt = wt * np.sqrt(vv_ubar_per_s(w_ms[(COBB_P_BOT - pt) // COBB_P_STEP], np.where(good, t, 0.0), pt))     # x VVw
+        num += np.where(good, cobb_layer_sr(np.where(good, t, 0.0)), 0.0) * wt
+        den += wt
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.where(den > 0, num / den, np.nan)
+    return np.minimum(out, COBB_MAX).astype(np.float32)
+
+
+def wet_bulb_c(t_c, td_c, p_hpa):
+    """Wet-bulb temperature from air and dew-point temperature (degC) and pressure, by Newton iteration on the psychrometric equation."""
+    t = np.asarray(t_c, np.float64)
+    td = np.minimum(np.asarray(td_c, np.float64), t)
+    p = np.asarray(p_hpa, np.float64)
+    es = lambda x: 6.112 * np.exp(17.67 * x / (x + 243.5))
+    e = es(td)
+    tw = 0.5 * (t + td)
+    for _ in range(8):
+        g = 6.62e-4 * (1.0 + 1.15e-3 * tw) * p                      # psychrometric "constant" times p [hPa / degC]
+        f = es(tw) - g * (t - tw) - e
+        df = es(tw) * 17.67 * 243.5 / (tw + 243.5) ** 2 + g
+        tw = tw - f / df
+    return np.minimum(tw, t).astype(np.float32)
+
+
+MELT_DENOM = 15.0         # 15 in the NBM-team deck (Leone et al. 2023, "final selection for NBM V4.2"); 10 in Cobb's March 2024 slides
+MELT_ONSET_F, MELT_CAP_F = 31.0, 40.0                      # zero at Tw = 31 F; the rate stops growing at 40 F
+
+
+def melt_rate_in_per_hr(tw_f, denom: float | None = None):
+    """Potential melt of falling snow [in of liquid per hour]: ``((0.5 Tw - 15.5) / D) ** 1.3`` (0.01 at 32 F, 0.05 at 34 F, 0.15 at 38 F, 0.21 at 40 F for D = 15)."""
+    d = MELT_DENOM if denom is None else denom
+    tw = np.clip(np.asarray(tw_f, np.float64), MELT_ONSET_F, MELT_CAP_F)
+    return ((0.5 * tw - 15.5) / d) ** 1.3
+
+
+def melt_factor(tw_f, snow_in_per_hr, denom: float | None = None):
+    """Fraction of the snow that survives melting: ``(QPF - melt) / QPF``, 0 when the melt is at least the snow rate, 1 where no snow falls.
+
+    Both the temperature and the rate are for the same hour; ``snow_in_per_hr`` is the snow-type liquid of that hour in inches.
+    """
+    q = np.asarray(snow_in_per_hr, np.float64)
+    melt = melt_rate_in_per_hr(tw_f, denom)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        f = np.clip((q - melt) / q, 0.0, 1.0)
+    return np.where(q > 0, f, 1.0).astype(np.float32)
 
 
 # --------------------------------------------------------------------------- humidity over ice, DGZ

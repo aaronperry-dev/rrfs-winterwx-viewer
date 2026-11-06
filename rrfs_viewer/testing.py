@@ -19,9 +19,10 @@ R_EARTH = 6371229.0
 DX = 3000.0
 CENTRE = (-71.4, 44.2)
 LEVELS_ALL = (250, 300, 400, 500, 600, 700, 750, 800, 850, 900, 925, 950, 975, 1000)
-T_LEV = (1000, 975, 950, 925, 900, 850, 800, 750, 700, 600, 500)
-RH_LEV = (925, 900, 850, 800, 750, 700, 600, 500)
+T_LEV = (1000, 975, 950, 925, 900, 850, 800, 750, 700, 600, 500, 400, 300)
+RH_LEV = (925, 900, 850, 800, 750, 700, 600, 500, 400, 300)
 HGT_LEV = (1000, 850, 700, 500)
+LIFT_LEV = tuple(range(925, 299, -25))
 
 
 def _noise(shape, seed, sigma):
@@ -159,6 +160,7 @@ class FakeS3:
     """Implements the boto3 calls the pipeline uses: head_object and get_object (with ``Range``)."""
     _KEY = re.compile(
         r"^(?:refs\.(?P<d1>\d{8})/(?P<c1>\d{2})/ensprod/refs\.t(?P=c1)z\.mean\.f(?P<h1>\d{2})\.conus\.grib2"
+        r"|rrfs\.(?P<d3>\d{8})/(?P<c3>\d{2})/rrfs\.t(?P=c3)z\.prslev\.3km\.f(?P<h3>\d{3})\.conus\.grib2"
         r"|rrfsens\.(?P<d2>\d{8})/(?P<c2>\d{2})/(?P<m>m00[1-5])/rrfs\.t(?P=c2)z\.(?P=m)\.(?P<k>2dfld|prslev)nomads\.3km\.f(?P<h2>\d{3})\.conus\.grib2)"
         r"(?P<idx>\.idx)?$")
 
@@ -189,10 +191,15 @@ class FakeS3:
     # ------------------------------------------------------------------ file synthesis
     def _messages(self, key: str, m) -> list[tuple[str, str, str, np.ndarray]]:
         """(var, level, info, values) for one file."""
-        cyc = datetime.strptime((m["d1"] or m["d2"]) + (m["c1"] or m["c2"]), "%Y%m%d%H").replace(tzinfo=timezone.utc)
-        h = int(m["h1"] or m["h2"])
+        cyc = datetime.strptime((m["d1"] or m["d2"] or m["d3"]) + (m["c1"] or m["c2"] or m["c3"]), "%Y%m%d%H").replace(tzinfo=timezone.utc)
+        h = int(m["h1"] or m["h2"] or m["h3"])
         K, MPH = 273.15, 1.0
         msgs: list[tuple[str, str, str, np.ndarray]] = []
+        if m["h3"]:                                       # ---- deterministic run: DZDT [m/s] every 25 hPa, ascent peaking near 600 hPa
+            x = self._storm(1, cyc).hour(h)
+            up = np.asarray(x["uvv"], np.float32)
+            return [("DZDT", f"{p} mb", _info("inst", h), (up * np.exp(-(((p - 600.0) / 220.0) ** 2))).astype(np.float32))
+                    for p in LIFT_LEV if ("DZDT", h) not in self.missing]
         if m["h1"]:                                       # ---- REFS mean (members' mean; flags -> fractions)
             S = [self._storm(i, cyc) for i in range(1, 6)]
             H = [s.hour(h) for s in S]
@@ -247,7 +254,7 @@ class FakeS3:
 
     def _file(self, key: str, m):
         if key not in self._files:
-            cyc = datetime.strptime((m["d1"] or m["d2"]) + (m["c1"] or m["c2"]), "%Y%m%d%H").replace(tzinfo=timezone.utc)
+            cyc = datetime.strptime((m["d1"] or m["d2"] or m["d3"]) + (m["c1"] or m["c2"] or m["c3"]), "%Y%m%d%H").replace(tzinfo=timezone.utc)
             blob, idx, off = b"", [], 0
             for i, (var, level, info, vals) in enumerate(self._messages(key, m), 1):
                 msg = self.grid.message(np.asarray(vals, np.float32), cyc)
@@ -264,8 +271,8 @@ class FakeS3:
         m = self._KEY.match(Key)
         if not m:
             raise KeyError(Key)
-        cyc = datetime.strptime((m["d1"] or m["d2"]) + (m["c1"] or m["c2"]), "%Y%m%d%H").replace(tzinfo=timezone.utc)
-        if not self._published(cyc, int(m["h1"] or m["h2"])):
+        cyc = datetime.strptime((m["d1"] or m["d2"] or m["d3"]) + (m["c1"] or m["c2"] or m["c3"]), "%Y%m%d%H").replace(tzinfo=timezone.utc)
+        if not self._published(cyc, int(m["h1"] or m["h2"] or m["h3"])):
             raise KeyError(Key)
         return m
 
