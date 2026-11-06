@@ -1116,8 +1116,14 @@ let plumeSeen = !("IntersectionObserver" in window), plumeLoc = "KBOS", plumeSno
 try { const v = localStorage.getItem("rrfs-plume-snow"); if (v) plumeSnow = v; } catch (e) { /* storage blocked: keep the default */ }
 const PLUME = { qpf: { id: "pl-qpf", ylab: "Total Accumulated QPF (inches)" }, snow: { id: "pl-snow", ylab: "Total Accumulated Snowfall (inches)" } };
 const plumeModel = {};
-const plumeStations = () => (D.stations_all || []).slice().sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
-const stationLabel = s => `${s.id} · ${s.name || ""}${s.st ? " (" + s.st + ")" : ""}`;
+const STATE_NAMES = { CT: "Connecticut", ME: "Maine", MA: "Massachusetts", NH: "New Hampshire", RI: "Rhode Island", VT: "Vermont", NY: "New York" };
+const shortName = s => (s.name || s.id).split(" / ")[0].replace(/ (Airport|Airfield)$/, "");       // "Boston Logan International Airport" -> "Boston Logan International"
+const stationLabel = s => `${s.id} · ${s.name || ""}${s.st ? " (" + s.st + ")" : ""}`;           // plot title
+const plumeGroups = () => {                                  // [[state name, stations by name]], states alphabetical
+  const g = {};
+  for (const s of D.stations_all || []) (g[s.st || "Other"] = g[s.st || "Other"] || []).push(s);
+  return Object.entries(g).map(([st, l]) => [STATE_NAMES[st] || st, l.sort((a, b) => shortName(a).localeCompare(shortName(b)))]).sort((a, b) => a[0].localeCompare(b[0]));
+};
 function defaultStation() { const all = D.stations_all || []; return all.find(s => s.id === "KBOS") || all.slice().sort((a, b) => a.p - b.p)[0] || null; }
 function nearestAny(r, c, within) { let b = null, bd = within * within; for (const s of D.stations_all || []) { const d = (s.r - r) ** 2 + (s.c - c) ** 2; if (d < bd) { bd = d; b = s; } } return b; }
 function plumePoint() {                                     // { r, c, label, id }
@@ -1129,7 +1135,8 @@ const plumeProducts = () => D.products.filter(p => p.kind === "cum" && p.unit ==
   .sort((a, b) => (b.key === "snow_mean") - (a.key === "snow_mean"));
 function initPlumes() {
   const loc = $("#pl-loc"), snow = $("#pl-snow-sel"), opt = (v, t) => { const o = document.createElement("option"); o.value = v; o.textContent = t; return o; };
-  loc.append(opt("map", "Clicked map point"), ...plumeStations().map(s => opt(s.id, stationLabel(s))));
+  loc.append(opt("map", "Clicked map point"));
+  for (const [state_, list] of plumeGroups()) { const g = document.createElement("optgroup"); g.label = state_; g.append(...list.map(s => opt(s.id, `${shortName(s)} (${s.id})`))); loc.append(g); }
   const prods = plumeProducts();
   if (!prods.some(p => p.key === plumeSnow)) plumeSnow = prods.length ? prods[0].key : "";
   snow.append(...prods.map(p => opt(p.key, p.label)));
