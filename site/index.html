@@ -228,6 +228,8 @@
         <div class="rows members" id="seg-members" role="group" aria-label="Members in the member mean"></div>
         <div class="sublabel">Show one member alone</div><div class="btns five" id="seg-single" role="group" aria-label="Single member"></div></div></div>
       <div class="panel"><h2>Other Views</h2><div class="body"><div class="btns" id="seg-layout" role="group" aria-label="Layout"></div></div></div>
+      <div class="panel" id="p-gis"><h2>Map Layers</h2><div class="body"><div class="rows" id="seg-gis" role="group" aria-label="Map layers"></div>
+        <p class="note">Map view only; these appear in the PNG when switched on. Natural Earth 1:10m, so roads are generalised and the city list is short.</p></div></div>
       <div class="panel"><h2>Export</h2><div class="body"><div class="btns one"><button type="button" id="btn-png" disabled title="Save the current map as a PNG with title, subtitle, init time and valid time">⬇ Download PNG</button></div>
         <p class="note">Map view only. The image has the title, subtitle, init (run) time and valid time on top.</p></div></div>
       <div class="panel" id="p-summary"><h2 id="sum-title">New England land area</h2><div class="body">
@@ -580,18 +582,21 @@ function drawLegend(ctx, x, y, w, h, style, fs) {
     ctx.beginPath(); ctx.moveTo(tx, y + h); ctx.lineTo(tx, y + h + 4); ctx.stroke(); ctx.fillText(tick(t), tx, y + h + 5); }
 }
 // ---- boundary lines as vectors (same colours and widths as the overlay PNG), drawn instead of the PNG once zoomed in so they stay sharp
+function decodePolys(polys, U) {                            // [x0, y0, dx, dy, ...] integers -> Float32Array of frame fractions + bounding box
+  return polys.map(p => {
+    const a = new Float32Array(p.length); let x = 0, y = 0;
+    for (let i = 0; i < p.length; i += 2) { x += p[i]; y += p[i + 1]; a[i] = x / U; a[i + 1] = y / U; }
+    const bb = [Infinity, -Infinity, Infinity, -Infinity];
+    for (let i = 0; i < a.length; i += 2) { if (a[i] < bb[0]) bb[0] = a[i]; if (a[i] > bb[1]) bb[1] = a[i]; if (a[i + 1] < bb[2]) bb[2] = a[i + 1]; if (a[i + 1] > bb[3]) bb[3] = a[i + 1]; }
+    return { a, bb };
+  });
+}
 let LINES = null;
 async function loadLines() {
   if (!D.lines) return;
   try {
-    const j = JSON.parse(new TextDecoder().decode(await inflate(`${D.lines}?v=${D.version}`))), U = j.units, paths = {};
-    for (const name of j.order) paths[name] = j.lines[name].map(p => {
-      const a = new Float32Array(p.length); let x = 0, y = 0;
-      for (let i = 0; i < p.length; i += 2) { x += p[i]; y += p[i + 1]; a[i] = x / U; a[i + 1] = y / U; }
-      const bb = [Infinity, -Infinity, Infinity, -Infinity];
-      for (let i = 0; i < a.length; i += 2) { if (a[i] < bb[0]) bb[0] = a[i]; if (a[i] > bb[1]) bb[1] = a[i]; if (a[i + 1] < bb[2]) bb[2] = a[i + 1]; if (a[i + 1] > bb[3]) bb[3] = a[i + 1]; }
-      return { a, bb };
-    });
+    const j = JSON.parse(new TextDecoder().decode(await inflate(`${D.lines}?v=${D.version}`))), paths = {};
+    for (const name of j.order) paths[name] = decodePolys(j.lines[name], j.units);
     LINES = { order: j.order, styles: j.styles, frame: j.frame, paths };
     if (view.z > 1) redraw();
   } catch (e) { LINES = null; }                             // without them the PNG is simply stretched
@@ -618,6 +623,106 @@ function drawOverlay(ctx, x, y, w, h, vw) {                 // w / 1150 is the s
   ctx.restore();
   ctx.fillStyle = "#000"; ctx.fillRect(x, y, 2 * sc, h); ctx.fillRect(x + w - sc, y, sc, h); ctx.fillRect(x, y, w, sc); ctx.fillRect(x, y + h - sc, w, sc);   // the map frame, as in the PNG
 }
+// ---- optional GIS layers (Map Layers panel): highways with route labels and cities, from data/gis.bin, loaded the first time one is switched on
+const GIS_KEYS = [["i", "Interstates"], ["u", "US highways"], ["s", "State highways"], ["l", "Route labels"], ["c", "Cities"]];
+const gisOn = { i: false, u: false, s: false, l: true, c: false };
+const gisAny = () => gisOn.i || gisOn.u || gisOn.s || gisOn.c;
+const ROADS = [["state", "s", "#4d5560", 0.85, 2.3], ["us", "u", "#5e35b1", 1.25, 3.0], ["interstate", "i", "#b00020", 1.8, 3.8]];   // [layer, toggle, colour, width px, casing px] at the full-size map
+let GIS = null, gisLoading = false;
+async function loadGis() {
+  if (GIS || gisLoading || !D.gis) return;
+  gisLoading = true;
+  try {
+    const j = JSON.parse(new TextDecoder().decode(await inflate(`${D.gis}?v=${D.version}`))), roads = {};
+    for (const k of Object.keys(j.roads)) roads[k] = decodePolys(j.roads[k], j.units);
+    GIS = { roads, labels: j.labels, cities: j.cities };
+    redraw();
+  } catch (e) { GIS = null; }
+  gisLoading = false;
+}
+const gisScale = vw => 1 + 0.22 * Math.log2(vw.z);          // roads and symbols grow a little as you zoom in
+let roadCache = null;                                       // the stroked roads, kept until the view or the switches change (stepping through hours only repaints the field)
+function drawRoads(ctx, x, y, w, h, vw) {
+  if (!GIS || !(gisOn.i || gisOn.u || gisOn.s)) return;
+  const key = [w, h, vw.z.toFixed(5), vw.cx.toFixed(5), vw.cy.toFixed(5), +gisOn.i, +gisOn.u, +gisOn.s].join();
+  if (!roadCache || roadCache.key !== key) {
+    const cv = roadCache ? roadCache.canvas : document.createElement("canvas"); cv.width = w; cv.height = h;     // (setting the size also clears it)
+    strokeRoads(cv.getContext("2d"), 0, 0, w, h, vw);
+    roadCache = { key, canvas: cv };
+  }
+  ctx.drawImage(roadCache.canvas, x, y);
+}
+function strokeRoads(ctx, x, y, w, h, vw) {
+  const { u0, v0 } = viewOrigin(vw), z = vw.z, sc = w / MAP.w * gisScale(vw), sx = w * z, sy = h * z, ox = x - u0 * sx, oy = y - v0 * sy, u1 = u0 + 1 / z, v1 = v0 + 1 / z;
+  ctx.lineJoin = "round"; ctx.lineCap = "round";
+  for (const [layer, on, col, lw, cw] of ROADS) {
+    if (!gisOn[on]) continue;
+    const pth = new Path2D();
+    for (const { a, bb } of GIS.roads[layer]) {
+      if (bb[1] < u0 || bb[0] > u1 || bb[3] < v0 || bb[2] > v1) continue;
+      let lx = ox + a[0] * sx, ly = oy + a[1] * sy; pth.moveTo(lx, ly);
+      for (let i = 2; i < a.length; i += 2) {
+        const px = ox + a[i] * sx, py = oy + a[i + 1] * sy;
+        if (Math.abs(px - lx) + Math.abs(py - ly) < 0.8 && i < a.length - 2) continue;   // vertices closer than a pixel add nothing (and cost time at full view)
+        pth.lineTo(px, py); lx = px; ly = py;
+      }
+    }
+    ctx.globalAlpha = 0.85; ctx.strokeStyle = "#fff"; ctx.lineWidth = cw * sc; ctx.stroke(pth);   // a white casing keeps the road readable on every colour of the field
+    ctx.globalAlpha = 1; ctx.strokeStyle = col; ctx.lineWidth = lw * sc; ctx.stroke(pth);
+  }
+}
+function drawGisLabels(ctx, x, y, w, h, vw, stationList) {   // cities, then route labels; both avoid the station values and each other
+  if (!GIS || !gisAny()) return;
+  const { u0, v0 } = viewOrigin(vw), z = vw.z, k = w / MAP.w, sc = k * gisScale(vw), pos = (fx, fy) => [x + (fx - u0) * z * w, y + (fy - v0) * z * h];
+  const taken = [], free = b => b[0] >= x + 2 && b[2] <= x + w - 2 && b[1] >= y + 2 && b[3] <= y + h - 2 && !taken.some(t => b[0] < t[2] && b[2] > t[0] && b[1] < t[3] && b[3] > t[1]);
+  for (const s of stationList) { const [px, py] = pos(s.fx, s.fy); taken.push([px - 17 * k, py - 8 * k, px + 17 * k, py + 8 * k]); }
+  ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip(); ctx.textBaseline = "middle"; ctx.lineJoin = "round";
+  if (gisOn.c) {
+    const fs = 12.5 * sc; ctx.font = `600 ${fs}px system-ui, sans-serif`;
+    for (const [name, fx, fy, cap] of GIS.cities) {
+      const [px, py] = pos(fx, fy); if (px < x - 20 || px > x + w + 20 || py < y - 20 || py > y + h + 20) continue;
+      const r = (cap ? 6.2 : 3.6) * sc, tw = ctx.measureText(name).width, th = fs * 1.1, g = r + 2 * sc;
+      const spots = [[px + g, py - th * 0.15, "left"], [px - g, py - th * 0.15, "right"], [px - tw / 2, py - g - th * 0.5, "left"], [px - tw / 2, py + g + th * 0.5, "left"]];
+      let placed = null;
+      for (const [tx, ty, al] of spots) {
+        const bx = al === "left" ? tx : tx - tw, b = [bx - 1, ty - th / 2, bx + tw + 1, ty + th / 2];
+        if (free(b)) { placed = [tx, ty, al, b]; break; }
+      }
+      const mk = [px - r, py - r, px + r, py + r];
+      if (placed) taken.push(placed[3]); taken.push(mk);
+      ctx.fillStyle = "#111"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.6 * sc;
+      if (cap) {                                              // state capitals: a star
+        ctx.beginPath(); for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, q = i % 2 ? r * 0.45 : r; ctx[i ? "lineTo" : "moveTo"](px + q * Math.cos(a), py + q * Math.sin(a)); } ctx.closePath();
+      } else { ctx.beginPath(); ctx.arc(px, py, r, 0, 7); }
+      ctx.stroke(); ctx.fill();
+      if (placed) { ctx.textAlign = placed[2]; ctx.lineWidth = 3.4 * sc; ctx.strokeStyle = "#fff"; ctx.strokeText(name, placed[0], placed[1]); ctx.fillStyle = "#111"; ctx.fillText(name, placed[0], placed[1]); }
+    }
+  }
+  if (gisOn.l) {
+    const on = [gisOn.i, gisOn.u, gisOn.s], fs = [10.5, 10, 9.5], look = [["#b00020", "#b00020", "#fff"], ["#fff", "#5e35b1", "#5e35b1"], ["#fff", "#6b747e", "#2b3138"]];   // per class: fill, border, text
+    ctx.textAlign = "center"; let n = 0;
+    for (const [text, cl, fx, fy, mz] of GIS.labels) {
+      if (!on[cl] || mz > z + 1e-6) continue;
+      const [px, py] = pos(fx, fy); if (px < x || px > x + w || py < y || py > y + h) continue;
+      ctx.font = `700 ${fs[cl] * sc}px system-ui, sans-serif`;
+      const tw = ctx.measureText(text).width + 7 * sc, th = fs[cl] * sc * 1.45, b = [px - tw / 2, py - th / 2, px + tw / 2, py + th / 2];
+      if (!free(b)) continue;
+      taken.push(b);
+      const [fill, edge, ink] = look[cl];
+      ctx.beginPath(); ctx.roundRect(b[0], b[1], tw, th, th * 0.32); ctx.fillStyle = fill; ctx.fill(); ctx.strokeStyle = edge; ctx.lineWidth = 1.1 * sc; ctx.stroke();
+      ctx.fillStyle = ink; ctx.fillText(text, px, py + 0.5);
+      if (++n >= 260) break;
+    }
+  }
+  ctx.restore();
+}
+function buildGisPanel() {
+  const draw = () => seg($("#seg-gis"), GIS_KEYS.map(([k, label]) => ({ value: k, label, on: gisOn[k], disabled: k === "l" && !(gisOn.i || gisOn.u || gisOn.s),
+    title: k === "l" ? "Route numbers on the highways (more appear as you zoom in)" : undefined })),
+    null, k => { gisOn[k] = !gisOn[k]; if (gisAny()) loadGis(); draw(); redraw(); }, true);
+  draw(); gisPanelRefresh = draw;
+}
+let gisPanelRefresh = () => {};
 function zoomStations(vw) {                                 // labels that fit at this zoom: same priority rule and spacing (in screen px) as the full view
   if (vw.z === 1 || !D.stations_all) return D.stations;
   const { u0, v0 } = viewOrigin(vw), z = vw.z, sep = D.station_px.sep, edge = D.station_px.edge, kept = [];
@@ -634,11 +739,14 @@ function drawMain(ctx, v, mode, markers, vw = view) {
   const W = 1200, H = 836, { u0, v0 } = viewOrigin(vw), z = vw.z;
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
   paintField(ctx, MAP.x, MAP.y, MAP.w, MAP.h, v.values, v.style, vw);
+  drawRoads(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw);           // optional layers: highways under the boundary lines, cities and route labels over them
   drawOverlay(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw);
+  const stationList = zoomStations(vw);
+  drawGisLabels(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, stationList);
   // station values (nearest cell), bold with a white halo
   const { nx } = D.grid, lv = v.style.levels; ctx.font = "700 11px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
   ctx.lineJoin = "round"; ctx.lineWidth = 3.2; ctx.strokeStyle = "#fff"; ctx.fillStyle = "#000";
-  for (const s of zoomStations(vw)) {
+  for (const s of stationList) {
     const val = v.values[s.r * nx + s.c]; if (val !== val) continue;
     if (v.style.colors[0] === null && val < lv[0]) continue;
     const t = fnum(val, v.dec), x = MAP.x + (s.fx - u0) * z * MAP.w, y = MAP.y + (s.fy - v0) * z * MAP.h;
@@ -653,6 +761,7 @@ function drawMain(ctx, v, mode, markers, vw = view) {
     }
   }
   drawLegend(ctx, 48, MAP.y + MAP.h + 22, 735, 28, v.style, 12.5);
+  if (gisAny()) { ctx.font = "11.5px system-ui, sans-serif"; ctx.textAlign = "right"; ctx.textBaseline = "alphabetic"; ctx.fillStyle = "#59636e"; ctx.fillText("Roads and cities: Natural Earth (generalised)", W - 25, MAP.y + MAP.h + 22); }
   bold(ctx, W - 25, MAP.y + MAP.h + 42, "aaronperry-dev.github.io", " (Aaron Perry)", 13, true);
 }
 
@@ -690,7 +799,7 @@ let renderToken = 0, loadTimer = null;
 async function render() {
   const token = ++renderToken, p = prod(); prefetchGen++;
   writeHash(); statusLine(); controls();
-  $("#mapwrap").hidden = state.layout !== "map"; $("#stampwrap").hidden = state.layout === "map"; $("#p-summary").hidden = state.layout !== "map";
+  $("#mapwrap").hidden = state.layout !== "map"; $("#stampwrap").hidden = state.layout === "map"; $("#p-summary").hidden = state.layout !== "map"; $("#p-gis").hidden = state.layout !== "map" || !D.gis;
   syncExport();
   $("#blurb").textContent = p.desc;
   const msg = $("#msg"), notice = $("#notice");
@@ -910,7 +1019,7 @@ function statusLine() {
   $("#sel-date").innerHTML = `<option>${c.toISOString().slice(0, 10)}</option>`; $("#sel-run").innerHTML = `<option>${z}</option>`;
 }
 function readHash() {
-  const [pk, mode, f, w, layout, vw] = location.hash.slice(1).split("/");
+  const [pk, mode, f, w, layout, vw, gl] = location.hash.slice(1).split("/");
   if (D.products.some(p => p.key === pk)) state.product = pk;
   if (mode && (MODES.some(m => m[0] === mode) || D.members.includes(mode))) state.mode = mode;
   if (f !== undefined && f !== "" && +f >= 0 && +f < D.frames.length) state.frame = +f;
@@ -920,9 +1029,13 @@ function readHash() {
   Object.assign(view, { z: 1, cx: 0.5, cy: 0.5, cells: false });
   if (z > 1 && cx >= 0 && cx <= 1 && cy >= 0 && cy <= 1) { Object.assign(view, { z, cx, cy, cells: c === 1 }); clampView(); }
   else if (c === 1) view.cells = true;
+  if (gl !== undefined) { for (const [k] of GIS_KEYS) gisOn[k] = gl.includes(k); if (gisAny()) loadGis(); gisPanelRefresh(); }   // 7th part: the letters of the layers that are on
 }
-const writeHash = () => history.replaceState(null, "", `#${state.product}/${state.mode}/${state.frame}/${state.win}/${state.layout}`
-  + (view.z > 1 || view.cells ? `/${view.z.toFixed(2)},${view.cx.toFixed(4)},${view.cy.toFixed(4)}${view.cells ? ",1" : ""}` : ""));
+const writeHash = () => {
+  const vw = view.z > 1 || view.cells ? `${view.z.toFixed(2)},${view.cx.toFixed(4)},${view.cy.toFixed(4)}${view.cells ? ",1" : ""}` : "";
+  const gl = gisAny() ? GIS_KEYS.filter(([k]) => gisOn[k]).map(([k]) => k).join("") : "";
+  history.replaceState(null, "", `#${state.product}/${state.mode}/${state.frame}/${state.win}/${state.layout}` + (vw || gl ? `/${vw}` : "") + (gl ? `/${gl}` : ""));
+};
 function set(patch) { if (patch.frame !== undefined && patch.frame !== state.frame) lastDir = Math.sign(patch.frame - state.frame); Object.assign(state, patch); render(); }
 function prefetch() {                                       // heavy views: compute the neighbouring hours in the background so stepping and playing are instant
   if (state.layout !== "map" || (state.mode !== "pmm" && state.mode !== "lpmm")) return;
@@ -1037,6 +1150,7 @@ window.addEventListener("hashchange", () => { readHash(); render(); });
     readHash();
     overlay = new Image(); overlay.src = `${D.overlay}?v=${D.version}`; await overlay.decode().catch(() => {});
     loadLines();                                            // the vector boundaries for zoomed views (not awaited: only needed once the user zooms)
+    if (D.gis) buildGisPanel(); else $("#p-gis").hidden = true;
     updateZoomUI();
     const bits = await inflate(`data/land.bin?v=${D.version}`), n = D.grid.nx * D.grid.ny; landMask = new Uint8Array(n);
     for (let i = 0; i < n; i++) landMask[i] = (bits[i >> 3] >> (7 - (i & 7))) & 1;

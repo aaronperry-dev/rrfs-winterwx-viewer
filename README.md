@@ -23,6 +23,7 @@ directory and deploys it as a Pages artifact.
 | **Percentiles** layout | All ten statistics (Min, P5, P10, P25, P50, Mean, P75, P90, P95, Max) side by side for the current product, window and time; click one to open it. |
 | **Time** | Timeline bar in the style of the SPC HREF viewer: day labels, one `Fnnn` cell per forecast hour (click or drag), a floating box with the valid time in UTC, `< ▶ >` buttons and a `- SPEED: n +` control. Keys: `<` `>` or ← → step, `p` or space plays, `h` hides the top menu, `s` saves the map as a PNG. Hover a cell for UTC and Eastern times. |
 | **Zoom and pan** | Scroll wheel (about the cursor), the **+ / − / Full** buttons, keys `+` `-` `0`, double-click, pinch on touch screens; drag to pan (or `shift` + arrows). Works for every product and ensemble view, and the small-multiple views (members, percentiles) follow the same zoom. The zoom is kept in the URL (`#product/mode/frame/window/layout/zoom,cx,cy`), so a zoomed view can be shared. Values are **interpolated bilinearly**, and only then put into the colour classes, so no colour is invented and the class edges follow the interpolated field (bilinear stays inside the range of the four surrounding cells, so it creates no false maxima or minima). The **Cells** button shows the nearest 3 km cell instead, for checking what the model actually has; the readout under the pointer and the station labels always give the value of the cell itself. Past 1× the state, county, coast and lake lines are drawn as vectors (`data/lines.bin`, same colours and widths as the overlay PNG) so they stay sharp, and more station labels appear as there is room (same priority rule and spacing in screen pixels). The full view (1×) is the unchanged image: the page draws it exactly as before. |
+| **Map Layers** | Switches in the sidebar (all off by default, so the default map and PNG are unchanged): **Interstates**, **US highways**, **State highways**, **Route labels** and **Cities** (state capitals as stars). Roads get a white casing so they read on every field colour; route labels are drawn as small shields (`I-95`, `US 1`, `MA 2`) and avoid the station values and each other, with interstates labelled first and US and state routes appearing as you zoom in. They work at every zoom, are kept in the URL (7th part, the letters of the layers that are on), and are included in the PNG (with a small *Roads and cities: Natural Earth* credit) when on. The data (`data/gis.bin`, about 0.4 MB compressed) is only downloaded the first time a layer is switched on. Source: Natural Earth 1:10m `roads_north_america` (interstate, US and the numbered state routes; minor state roads left out) and `populated_places_simple` (the 28 places Natural Earth lists in the six states). |
 | **Export PNG** | **Download PNG** in the sidebar (or key `s`) saves the current map, in Map view, as a 1200 px image with a header above it (of the zoomed part of the map when zoomed in, in the same layout and styling): the title (product and window), the subtitle (ensemble view, unit or probability threshold, run total, the members used, and a *synthetic demo data* flag on demo builds), the init (run) time, and the valid time with forecast hour in UTC and Eastern. The image is rendered from the same data as the page, without the point-forecast marker, and named like `rrfs_snow_kuchera_mean_6h_20261105_12z_f018.png`. |
 | **Click the map** | Point forecast: every member, the member mean and the REFS mean as lines over the forecast. |
 | Hover the point-forecast graph | Tooltip with the valid time (UTC and Eastern) and the value of every member, the member mean and the REFS mean at that forecast hour, with a cursor line; click the graph to jump the map to that time. |
@@ -65,7 +66,7 @@ then the map with a right-hand sidebar of checkbox-style options (ensemble view,
 | Temperature | **2 m temperature, wind chill** | `TMP`; NWS wind-chill formula (T ≤ 50 °F, wind > 3 mph) |
 
 Colour ramps are fixed physical bins (a colour always means the same value in every frame and for every member). QPF and snowfall use the NWS Gray/Portland legends; wind and
-wind-chill legends are the same NWS-style ramps as the RTMA dashboard.
+wind-chill legends are the same NWS-style ramps as the RTMA dashboard. The snow-ratio (SLR) maps use the ColorBrewer **RdYlBu** ramp, reversed: warm colours (red) are low ratios (dense, wet snow), cool colours (blue) are high ratios (light, fluffy snow), with pale yellow at 12–14:1 and one colour per bin (below 4, 4–6, 6–8, 8–10, 10–12, 12–14, 14–16, 16–18, 18–20, 20–25, 25–30:1; above 30 keeps the top blue).
 
 ## Data and the "lean fetch"
 
@@ -155,7 +156,7 @@ in demo mode is synthetic and marked as such on the page.
 * **Zoomed maps show the same 3 km data, not more detail.** Interpolation only makes the shading smooth; it adds no information, and
   features smaller than a few grid cells are not resolved however far you zoom. The display raster is a nearest-neighbour resample of the native
   grid, so a "cell" can sit up to about 1.5 km from where the model's own cell is. Boundary lines are Natural Earth 1:10m (about 1:10 million scale),
-  so at high zoom they are generalised. The *New England land area* summary tiles and the point chart always use the whole domain.
+  so at high zoom they are generalised, and so are the optional highways (a road can sit a kilometre or more from where it really is). The city layer is Natural Earth's short list (28 places in the six states, none of the smaller cities); a finer list needs another source. The *New England land area* summary tiles and the point chart always use the whole domain.
 * **Snowfall methods are guidance, not forecasts.** A ratio is applied to model QPF, so all of them inherit its errors. The ratio at the
   end of each 3-hour block is used for the whole block. There are two thickness methods: the CMC/Murphy relation, which only *lowers* the
   ratio in marginal, warm-layer snow, and the NBM line, which also raises it in cold layers (about 15:1 at 1500 m, 23:1 at 1450 m). The
@@ -212,6 +213,7 @@ rrfs_viewer/
   colors.py      colour ramps (OKLab)
   encode.py      quantise, spatial/temporal delta, shuffle, gzip
   basemap.py     cartopy overlay (boundaries, frame, and the same lines as vectors for zoomed views), land mask, METAR layout
+  gis.py         optional highway, route-label and city layers (data/gis.bin)
   build.py       cycle choice, parallel workers, data.json, site assembly
   testing.py     offline fake S3 with real GRIB2 (demo + tests)
 site/index.html  the dashboard (single file, no dependencies)

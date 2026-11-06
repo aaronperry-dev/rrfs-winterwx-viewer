@@ -220,6 +220,14 @@ def main(argv=None) -> int:
     lines = basemap.overlay_lines(layers)                   # the same boundaries as vectors: the page draws these instead of the PNG once zoomed in
     (out / "data" / "lines.bin").write_bytes(gzip.compress(json.dumps(lines, separators=(",", ":")).encode(), 9, mtime=0))
 
+    try:                                                    # optional layers (toggled on the page); the site works without them
+        from . import gis
+        (out / "data" / "gis.bin").write_bytes(gzip.compress(json.dumps(gis.build(), separators=(",", ":")).encode(), 9, mtime=0))
+        gis_file = "data/gis.bin"
+    except Exception as exc:
+        log.warning("highway / city layers unavailable: %s", exc)
+        gis_file = None
+
     manifest = {
         "generated": iso(now), "version": int(now.timestamp()), "demo": args.demo, "code": code,
         "cycle": iso(cycle), "max_fhr": args.max_fhr, "frames": list(F),
@@ -227,7 +235,7 @@ def main(argv=None) -> int:
         "grid": {"nx": nx, "ny": ny}, "overlay": "overlay.png", "overlay_px": list(basemap.OVERLAY_PX),
         "sources": {s: {"label": SOURCE_LABELS[s], "ok": bool(results.get(s, ({}, {}))[0])} for s in ["refs", *MEMBERS]},
         "members": list(MEMBERS), "groups": list(GROUPS),
-        "stations": basemap.station_layout(rg.x, rg.y), "stations_all": basemap.station_all(rg.x, rg.y), "lines": "data/lines.bin",
+        "stations": basemap.station_layout(rg.x, rg.y), "stations_all": basemap.station_all(rg.x, rg.y), "lines": "data/lines.bin", "gis": gis_file,
         "station_px": {"sep": round(MIN_SEP_M / ((basemap.EXTENT[1] - basemap.EXTENT[0]) / basemap.OVERLAY_PX[0]), 3),
                        "edge": round(EDGE_M / ((basemap.EXTENT[1] - basemap.EXTENT[0]) / basemap.OVERLAY_PX[0]), 3)},
         "products": [{

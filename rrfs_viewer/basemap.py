@@ -75,6 +75,18 @@ def _line_parts(g):
     return []
 
 
+def frame_polyline(c: np.ndarray) -> list[int] | None:
+    """One polyline (projected metres, shape (n, 2)) as integers in frame units: the first vertex, then vertex-to-vertex steps.  None if < 2 distinct points."""
+    x0, x1, y0, y1 = EXTENT
+    q = np.stack([np.round((c[:, 0] - x0) / (x1 - x0) * LINE_UNITS), np.round((y1 - c[:, 1]) / (y1 - y0) * LINE_UNITS)], axis=1).astype(np.int64)
+    keep = np.ones(len(q), bool)
+    keep[1:] = np.any(np.diff(q, axis=0) != 0, axis=1)          # drop repeated points after rounding
+    q = q[keep]
+    if len(q) < 2:
+        return None
+    return [int(q[0, 0]), int(q[0, 1]), *np.diff(q, axis=0).ravel().tolist()]
+
+
 def overlay_lines(layers: bnd.Boundaries) -> dict:
     """The overlay's lines as integer polylines in frame units, for the page to draw at any zoom.
 
@@ -91,14 +103,9 @@ def overlay_lines(layers: bnd.Boundaries) -> dict:
             for c in _line_parts(geom.intersection(clip)):
                 if len(c) < 2:
                     continue
-                q = np.stack([np.round((c[:, 0] - x0) / w * LINE_UNITS), np.round((y1 - c[:, 1]) / h * LINE_UNITS)], axis=1).astype(np.int64)
-                keep = np.ones(len(q), bool)
-                keep[1:] = np.any(np.diff(q, axis=0) != 0, axis=1)          # drop repeated points after rounding
-                q = q[keep]
-                if len(q) < 2:
-                    continue
-                d = np.diff(q, axis=0)
-                polys.append([int(q[0, 0]), int(q[0, 1]), *d.ravel().tolist()])
+                p = frame_polyline(c)
+                if p is not None:
+                    polys.append(p)
         out[name] = polys
     return {"units": LINE_UNITS, "order": list(LINE_STYLES), "frame": round(FRAME_LW_PT * DPI / 72.0, 4),
             "styles": {k: [round(lw * DPI / 72.0, 4), a] for k, (lw, a) in LINE_STYLES.items()}, "lines": out}

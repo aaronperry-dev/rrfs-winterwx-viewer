@@ -143,8 +143,13 @@ VIS = ramp_style(
     [(0, "#3b0a56"), (0.25, "#8a1c8f"), (0.5, "#d03a7a"), (1, "#f2703b"), (2, "#f6b83f"), (3, "#f5e27a"),
      (5, "#cfe6c2"), (7, "#a8d3e6"), (10, "#e9f4fb")],
     [0.1, 0.25, 0.5, 1, 2, 3, 5, 7, 10], under="#2a0640", over=None)
-SLR = ramp_style([(3, "#b3541e"), (8, "#f0a860"), (10, "#f4ecd0"), (14, "#9fd2e8"), (20, "#3d86d6"),
-                  (30, "#5b2fa8"), (40, "#a02a9e")], [4, 6, 8, 10, 12, 14, 16, 18, 20, 25, 30], under="#9a4318")
+# Snow-to-liquid ratio: ColorBrewer RdYlBu (11 classes), reversed so warm colours are LOW ratios (dense, wet snow) and cool
+# colours are HIGH ratios (light, fluffy snow).  One class per bin: <4 (darkest red), 4-6, 6-8, 8-10, 10-12, 12-14, 14-16,
+# 16-18, 18-20, 20-25, 25-30; ratios above 30 keep the top blue.  The midpoint class (12-14) is the pale yellow #ffffbf, which stays distinct from the white no-data fill.
+_SLR_LEVELS = [4, 6, 8, 10, 12, 14, 16, 18, 20, 25, 30]
+_SLR_COLORS = ["#a50026", "#d73027", "#f46d43", "#fdae61", "#fee090", "#ffffbf", "#e0f3f8", "#abd9e9", "#74add1",
+               "#4575b4", "#313695"]
+SLR = Style(list(_SLR_LEVELS), [*_SLR_COLORS, _SLR_COLORS[-1]], list(_SLR_LEVELS), True)
 SPREAD = ramp_style([(0.5, "#eeeaf7"), (2, "#b9aee3"), (4, "#7d56c4"), (8, "#c4306f"), (14, "#6e0d2c")],
                     [0.5, 1, 2, 3, 4, 6, 8, 12])
 DGZ = ramp_style([(5, "#eaf0fc"), (25, "#9cc0ee"), (50, "#4a82d8"), (100, "#4a2fa8"), (200, "#a02a9e")],
