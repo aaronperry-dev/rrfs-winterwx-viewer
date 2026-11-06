@@ -151,6 +151,11 @@
   #stamplegend { margin-bottom: 12px; }
   #stamplegend canvas { width: 100%; max-width: 900px; height: auto; display: block; margin: 0 auto; background: #fff; border: 1px solid var(--line); }
 
+  /* ---- basemap key */
+  .ramp { height: 11px; border: 1px solid var(--line); border-radius: 2px; }
+  .rampl { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); margin: 2px 0 0; font-variant-numeric: tabular-nums; }
+  .sublabel.first { margin-top: 0; }
+
   footer { margin: 18px 14px 0; color: var(--muted); font-size: 12.5px; }
   footer a { color: inherit; }
   .hidetop .topbar, .hidetop .tabs, .hidetop .subtabs { display: none; }
@@ -230,6 +235,13 @@
       <div class="panel"><h2>Other Views</h2><div class="body"><div class="btns" id="seg-layout" role="group" aria-label="Layout"></div></div></div>
       <div class="panel" id="p-gis"><h2>Map Layers</h2><div class="body"><div class="rows" id="seg-gis" role="group" aria-label="Map layers"></div>
         <p class="note">Map view only (the county lines also show on the small maps); everything switched on appears in the PNG. Roads and cities: Natural Earth 1:10m, so roads are generalised. Towns: GeoNames. Peaks: USGS / Wikipedia.</p></div></div>
+      <div class="panel" id="p-base" hidden><h2>Basemap</h2><div class="body">
+        <div class="sublabel first">Relief over the data</div><div class="rows three" id="seg-relief" role="group" aria-label="Relief over the data"></div>
+        <div class="sublabel">Land elevation</div><div class="ramp" id="rp-land"></div><div class="rampl" id="rl-land"></div>
+        <div class="sublabel">Ocean depth</div><div class="ramp" id="rp-ocean"></div><div class="rampl" id="rl-ocean"></div>
+        <div class="sublabel">Lake depth</div><div class="ramp" id="rp-lake"></div><div class="rampl" id="rl-lake"></div>
+        <p class="note">Land is tinted by elevation and hill-shaded, oceans and lakes by depth. The basemap is always under the map, whatever product and layers are shown; the
+          control sets how much of the relief shows through the data colours (it never changes which colour means what). <span id="base-credit"></span></p></div></div>
       <div class="panel"><h2>Export</h2><div class="body"><div class="btns one"><button type="button" id="btn-png" disabled title="Save the current map as a PNG with title, subtitle, init time and valid time">⬇ Download PNG</button></div>
         <p class="note">Map view only. The image has the title, subtitle, init (run) time and valid time on top.</p></div></div>
       <div class="panel" id="p-summary"><h2 id="sum-title">New England land area</h2><div class="body">
@@ -252,7 +264,7 @@
   <footer>
     Data: NOAA/NCEP RRFS v1 ensemble members and REFS mean from the <a href="https://registry.opendata.aws/noaa-rrfs/">NOAA Open Data (AWS S3)</a> bucket,
     fetched field by field with byte-range requests. The member mean, spread, minimum, maximum, percentiles and probabilities are computed in your browser from the members
-    you leave switched on; the REFS mean is NOAA's own (it also blends time-lagged members and the HRRR). Fields that need pressure-level profiles
+    you leave switched on; the REFS mean is NOAA's own (it also blends time-lagged members and the HRRR). Basemap: terrain and bathymetry from the Mapzen / AWS Terrain Tiles (USGS, NOAA, GEBCO, SRTM), outlines from Natural Earth. Fields that need pressure-level profiles
     (Kuchera and max-T-aloft snowfall, DGZ metrics, warm nose, gusts, blizzard) exist only for the members. <span id="demo-note"></span>
   </footer>
 </div>
@@ -265,7 +277,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const TZ = "America/New_York";
 const MAP = { x: 25, y: 14, w: 1150, h: 742 };            // map frame inside the 1200 x 836 composition (title lives in the page header)
 const state = { group: null, product: "snow_kuchera", mode: "mean", thr: null, win: 0, lpmm: 180, frame: 0, layout: "map", on: {}, point: null };
-let D, overlay, countiesImg, landMask, playTimer = null, speed = 3;
+let D, overlay, countiesImg, landMask, baseImg = null, reliefImg = null, playTimer = null, speed = 3;
 const view = { z: 1, cx: 0.5, cy: 0.5, cells: false };     // zoom and the centre of the visible part of the frame (0..1 across the frame, y down); cells: nearest 3 km cell instead of interpolation
 const ZMAX = 12;
 const store = new Map();                                    // "product.source" -> Promise<{u: Uint8Array|Uint16Array, p}>
@@ -538,8 +550,25 @@ function geometry(W, H, vw) {                               // bilinear sampling
   return (geom = { W, H, z, u0, v0, xi, xf, yi, yf });
 }
 const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1, imgBuf = new Map();   // imgBuf: "WxH" -> ImageData reused between paints
-let lowCv = null, fieldMs = 0; const fieldHist = [];
-function paintField(ctx, x0, y0, W, H, values, style, vw = view, ds = 1) {    // always paints onto white (no data / below the first level = white), so the pixels can be written directly
+let fieldCv = null, fieldMs = 0; const fieldHist = [];
+// ---- terrain / water basemap (data/terrain, drawn at every zoom, under every product and every map layer).  `basemap` is opaque and sits under the field: it is
+// what shows wherever a product has no colour.  `relief` (hillshade on land, a faint tint on water) is drawn onto the painted pixels only, so terrain and water stay
+// visible through products that cover the whole map.  The "Relief over data" control scales it; the colours of the legend hardly move.
+const RELIEF_LEVELS = [["Light", 0.3], ["Medium", 0.55], ["Strong", 1]];
+let baseFailed = false, reliefIdx = 1; try { const v = +localStorage.getItem("rrfs-relief"); if (v >= 0 && v < RELIEF_LEVELS.length) reliefIdx = v; } catch (e) { /* storage blocked: keep the default */ }
+const imgOk = im => !!im && im.complete && im.naturalWidth > 0;
+function cropLayer(ctx, name, img, x, y, w, h, vw, fast) {                // the part of a frame-sized image that `vw` shows, as a cached w x h raster (like the line layers)
+  const { u0, v0 } = viewOrigin(vw), z = vw.z, iw = img.naturalWidth, ih = img.naturalHeight;
+  drawLayer(ctx, name, x, y, w, h, vw, "", fast, c => { c.imageSmoothingEnabled = true; c.imageSmoothingQuality = "high"; c.drawImage(img, u0 * iw, v0 * ih, iw / z, ih / z, 0, 0, w, h); });
+}
+function drawBasemap(ctx, x, y, w, h, vw, fast = false) { if (imgOk(baseImg)) cropLayer(ctx, "basemap", baseImg, x, y, w, h, vw, fast); }
+function shadeField(fc, W, H, vw) {                                       // fc: the context of the W x H canvas holding only the painted pixels
+  if (!imgOk(reliefImg)) return;
+  fc.save(); fc.globalCompositeOperation = "source-atop"; fc.globalAlpha = RELIEF_LEVELS[reliefIdx][1];      // source-atop: only where the field has colour
+  cropLayer(fc, "relief", reliefImg, 0, 0, W, H, vw, false);
+  fc.restore();
+}
+function paintField(ctx, x0, y0, W, H, values, style, vw = view, ds = 1) {    // writes only the coloured pixels (no data / below the first level stay transparent: the basemap, or white, shows through)
   // ds = 2 samples every other pixel in each direction and shows each sample as a 2 x 2 block: used only while dragging or zooming on a slow device (see redraw)
   const W0 = W, H0 = H; if (ds > 1) { W = Math.ceil(W / ds); H = Math.ceil(H / ds); }
   // Values are interpolated (bilinear) first and only then put into colour classes, so no colour is ever invented and the class edges follow the
@@ -548,7 +577,7 @@ function paintField(ctx, x0, y0, W, H, values, style, vw = view, ds = 1) {    //
   let lut = lutCache.get(style);                            // one packed 32-bit colour per level interval
   if (!lut) { lut = style.colors.map(c => { if (!c) return 0; const [r, gr, b] = hex(c); return (LITTLE ? (255 << 24 | b << 16 | gr << 8 | r) : (r << 24 | gr << 16 | b << 8 | 255)) >>> 0; }); lutCache.set(style, lut); }
   let img = imgBuf.get(W + "x" + H); if (!img) imgBuf.set(W + "x" + H, img = new ImageData(W, H));
-  const px = new Uint32Array(img.data.buffer).fill(0xFFFFFFFF);
+  const px = new Uint32Array(img.data.buffer).fill(0);
   for (let j = 0; j < H; j++) {
     const r0 = g.yi[j] * nx, fy = g.yf[j], row = j * W;
     for (let i = 0; i < W; i++) {
@@ -566,15 +595,13 @@ function paintField(ctx, x0, y0, W, H, values, style, vw = view, ds = 1) {    //
       const col = lut[lo]; if (col) px[row + i] = col;
     }
   }
-  if (ds === 1) {
-    ctx.putImageData(img, x0, y0);
-    if (W * H > 400000) { fieldHist.push(performance.now() - t0); if (fieldHist.length > 3) fieldHist.shift(); fieldMs = Math.min(...fieldHist); }   // how slow this device is at the full-size map (best of the last 3: a cold first paint says little)
-    return;
-  }
-  if (!lowCv) lowCv = document.createElement("canvas");
-  if (lowCv.width !== W || lowCv.height !== H) { lowCv.width = W; lowCv.height = H; }
-  lowCv.getContext("2d").putImageData(img, 0, 0);
-  ctx.save(); ctx.imageSmoothingEnabled = false; ctx.drawImage(lowCv, x0, y0, W0, H0); ctx.restore();
+  if (!fieldCv) fieldCv = document.createElement("canvas");
+  if (fieldCv.width !== W || fieldCv.height !== H) { fieldCv.width = W; fieldCv.height = H; }
+  const fc = fieldCv.getContext("2d");
+  fc.putImageData(img, 0, 0);
+  shadeField(fc, W, H, vw);
+  ctx.save(); ctx.imageSmoothingEnabled = false; ctx.drawImage(fieldCv, x0, y0, W0, H0); ctx.restore();       // composited over whatever is under it (the basemap)
+  if (ds === 1 && W * H > 400000) { fieldHist.push(performance.now() - t0); if (fieldHist.length > 3) fieldHist.shift(); fieldMs = Math.min(...fieldHist); }   // how slow this device is at the full-size map (best of the last 3: a cold first paint says little)
 }
 function bold(ctx, x, y, b, r, size, right) {
   ctx.textBaseline = "alphabetic";
@@ -798,6 +825,21 @@ function buildGisPanel() {
   draw(); gisPanelRefresh = draw;
 }
 let gisPanelRefresh = () => {};
+function buildBasemapPanel() {
+  const B = D.basemap; if (!B || baseFailed) return;
+  $("#p-base").hidden = false;
+  const draw = () => seg($("#seg-relief"), RELIEF_LEVELS.map(([label], i) => ({ value: i, label, title: "How strongly the hillshade and water tint show through the data colours" })), reliefIdx, i => {
+    reliefIdx = i; try { localStorage.setItem("rrfs-relief", String(i)); } catch (e) { /* not worth failing for */ }
+    draw(); if (state.layout === "map") redraw(); else render();
+  });
+  draw();
+  const ft = m => Math.round(m * 3.28084 / 100) * 100;
+  for (const [k, lo, hi] of [["land", "0 ft", `${ft(B.legend.land.max_m).toLocaleString("en-US")} ft`], ["ocean", "shallow", `${ft(B.legend.ocean.max_m).toLocaleString("en-US")} ft`], ["lake", "shallow", `${ft(B.legend.lake.max_m).toLocaleString("en-US")} ft`]]) {
+    $(`#rp-${k}`).style.background = `linear-gradient(to right, ${B.legend[k].colors.join(", ")})`;
+    $(`#rl-${k}`).innerHTML = `<span>${lo}</span><span>${hi}</span>`;
+  }
+  $("#base-credit").textContent = B.credit || "";
+}
 function zoomStations(vw) {                                 // labels that fit at this zoom: same priority rule and spacing (in screen px) as the full view
   if (vw.z === 1 || !D.stations_all) return D.stations;
   const { u0, v0 } = viewOrigin(vw), z = vw.z, sep = D.station_px.sep, edge = D.station_px.edge, kept = [];
@@ -813,6 +855,7 @@ const fcap = (f = state.frame) => `F${String(D.frames[f]).padStart(3, "0")}`;
 function drawMain(ctx, v, mode, markers, vw = view, ds = 1) {
   const W = 1200, H = 836, { u0, v0 } = viewOrigin(vw), z = vw.z;
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
+  drawBasemap(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);         // terrain and water first: under the field, and the only thing visible where a product has no colour
   paintField(ctx, MAP.x, MAP.y, MAP.w, MAP.h, v.values, v.style, vw, ds);
   drawCounties(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);        // optional layers: county lines and highways under the boundary lines; cities, towns, peaks and route labels over them
   drawRoads(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);
@@ -840,6 +883,7 @@ function drawMain(ctx, v, mode, markers, vw = view, ds = 1) {
   const credit = [(gisOn.i || gisOn.u || gisOn.s || gisOn.c) && "Roads, cities: Natural Earth (generalised)", gisOn.t && "Towns: GeoNames (CC BY 4.0)", gisOn.p && "Peaks: USGS / Wikipedia"].filter(Boolean).join(" · ");
   if (credit) { ctx.font = "11.5px system-ui, sans-serif"; ctx.textAlign = "right"; ctx.textBaseline = "alphabetic"; ctx.fillStyle = "#59636e"; ctx.fillText(credit, W - 25, MAP.y + MAP.h + 22); }
   bold(ctx, W - 25, MAP.y + MAP.h + 42, "aaronperry-dev.github.io", " (Aaron Perry)", 13, true);
+  if (D.basemap && D.basemap.credit) { ctx.font = "11.5px system-ui, sans-serif"; ctx.textAlign = "right"; ctx.textBaseline = "alphabetic"; ctx.fillStyle = "#59636e"; ctx.fillText(D.basemap.credit, W - 25, MAP.y + MAP.h + 62); }
 }
 
 // ---------------------------------------------------------------- PNG export: title, subtitle, init and valid time above the map
@@ -927,7 +971,7 @@ async function renderStamps(token, p) {
     viewField(m, state.frame, { tok: token }).then(v => {
       if (token !== renderToken) return; const c = cv.getContext("2d"); c.fillStyle = "#fff"; c.fillRect(0, 0, 575, 371);
       if (v.error) { c.fillStyle = "#59636e"; c.font = "15px system-ui"; c.textAlign = "center"; c.fillText(m === "refs" ? "not in the REFS mean file" : "no data", 287, 190); return; }
-      paintField(c, 0, 0, 575, 371, v.values, v.style); drawCounties(c, 0, 0, 575, 371, view); drawOverlay(c, 0, 0, 575, 371, view);
+      drawBasemap(c, 0, 0, 575, 371, view); paintField(c, 0, 0, 575, 371, v.values, v.style); drawCounties(c, 0, 0, 575, 371, view); drawOverlay(c, 0, 0, 575, 371, view);
       if (v.style !== p) {                                  // spread / probability use their own scale: label + mini colour bar
         const c2 = cv.getContext("2d"), t = m === "prob" ? `P(${p.thr_dir === "le" ? "≤" : "≥"}${v.thr} ${p.unit})` : `σ (${p.unit})`;
         c2.font = "700 15px system-ui"; const tw = c2.measureText(t).width + 16;
@@ -1245,6 +1289,13 @@ window.addEventListener("hashchange", () => { readHash(); render(); });
     overlay = new Image(); overlay.src = `${D.overlay}?v=${D.version}`; await overlay.decode().catch(() => {});
     if (D.counties) { countiesImg = new Image(); countiesImg.src = `${D.counties}?v=${D.version}`; await countiesImg.decode().catch(() => {}); }      // the light-gray county lines, a layer of their own
     loadLines();                                            // the vector boundaries for zoomed views (not awaited: only needed once the user zooms)
+    if (D.basemap) {                                        // terrain and water basemap + relief: content-hashed file names, so browsers keep them between builds
+      const get = src => { const im = new Image(); im.src = src; return im.decode().then(() => im, () => null); };      // null = could not be loaded: the map is simply white there, as before
+      const both = Promise.all([get(D.basemap.img), get(D.basemap.relief)]).then(([a, b]) => { baseImg = a; reliefImg = b; if (!a) { baseFailed = true; $("#p-base").hidden = true; } });      // (no image, no panel)
+      const first = await Promise.race([both.then(() => "ok"), new Promise(r => setTimeout(() => r("late"), 6000))]);
+      if (first === "late") both.then(() => { if (state.layout === "map") redraw(); else render(); });      // slow connection: the map appears first and the basemap joins when it arrives
+    }
+    buildBasemapPanel();
     if (D.gis) buildGisPanel(); else $("#p-gis").hidden = true;
     updateZoomUI();
     const bits = await inflate(`data/land.bin?v=${D.version}`), n = D.grid.nx * D.grid.ny; landMask = new Uint8Array(n);

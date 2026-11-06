@@ -43,13 +43,14 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # Natural Earth 1:10m boundaries (~40 MB, downloaded once, then cached) and the native->display grid mapping (~15 MB).
+      # Natural Earth 1:10m boundaries (~40 MB, downloaded once, then cached), the native->display grid mapping (~15 MB) and the terrain / water
+      # basemap (elevation tiles ~50 MB downloaded once, plus the two rendered WebP images).  A change to terrain.py re-renders the basemap from the cached tiles.
       - uses: actions/cache@v4
         with:
           path: |
             ~/.local/share/cartopy
             .cache
-          key: static-v1-${{ hashFiles('rrfs_viewer/config.py', 'rrfs_viewer/basemap.py') }}
+          key: static-v1-${{ hashFiles('rrfs_viewer/config.py', 'rrfs_viewer/basemap.py', 'rrfs_viewer/terrain.py') }}
           restore-keys: static-v1-
 
       - name: Build site

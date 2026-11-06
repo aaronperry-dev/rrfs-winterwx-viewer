@@ -136,6 +136,7 @@ def main(argv=None) -> int:
     ap.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
     ap.add_argument("--sources", default="refs," + ",".join(MEMBERS))
     ap.add_argument("--no-lift", action="store_true", help="skip the deterministic-RRFS DZDT fetch (the Cobb-with-lift products stay empty)")
+    ap.add_argument("--no-terrain", action="store_true", help="skip the terrain / water basemap (the map background stays white)")
     ap.add_argument("--cycle", help="force a cycle (YYYYMMDDHH) instead of the newest complete one")
     ap.add_argument("--skip-if-deployed", metavar="URL", help="exit early (code 0, no output directory) when the site at URL already shows this cycle built by this code version")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -229,6 +230,18 @@ def main(argv=None) -> int:
         log.warning("highway / city layers unavailable: %s", exc)
         gis_file = None
 
+    basemap_block = None                                    # terrain + water basemap: rendered once and cached (the elevation tiles are fetched the first time only)
+    if not args.no_terrain:
+        try:
+            from . import terrain
+            fetch = None
+            if args.demo:                                   # offline: invented terrain, like the invented storm
+                from .testing import SyntheticTerrain
+                fetch = SyntheticTerrain()
+            basemap_block = terrain.ensure(out, cache, fetch=fetch, synthetic=args.demo)
+        except Exception as exc:                            # the site works without it (white background, as before)
+            log.warning("terrain basemap unavailable: %s", exc)
+
     manifest = {
         "generated": iso(now), "version": int(now.timestamp()), "demo": args.demo, "code": code,
         "cycle": iso(cycle), "max_fhr": args.max_fhr, "frames": list(F),
@@ -236,7 +249,7 @@ def main(argv=None) -> int:
         "grid": {"nx": nx, "ny": ny}, "overlay": "overlay.png", "counties": "counties.png", "overlay_px": list(basemap.OVERLAY_PX),
         "sources": {s: {"label": SOURCE_LABELS[s], "ok": bool(results.get(s, ({}, {}))[0])} for s in ["refs", *MEMBERS]},
         "members": list(MEMBERS), "groups": list(GROUPS),
-        "stations": basemap.station_layout(rg.x, rg.y), "stations_all": basemap.station_all(rg.x, rg.y), "lines": "data/lines.bin", "gis": gis_file,
+        "basemap": basemap_block, "stations": basemap.station_layout(rg.x, rg.y), "stations_all": basemap.station_all(rg.x, rg.y), "lines": "data/lines.bin", "gis": gis_file,
         "station_px": {"sep": round(MIN_SEP_M / ((basemap.EXTENT[1] - basemap.EXTENT[0]) / basemap.OVERLAY_PX[0]), 3),
                        "edge": round(EDGE_M / ((basemap.EXTENT[1] - basemap.EXTENT[0]) / basemap.OVERLAY_PX[0]), 3)},
         "products": [{

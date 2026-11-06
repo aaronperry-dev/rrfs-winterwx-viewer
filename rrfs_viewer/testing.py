@@ -291,3 +291,77 @@ class FakeS3:
             a, b = re.match(r"bytes=(\d+)-(\d*)", Range).groups()
             data = data[int(a): (int(b) + 1 if b else None)]
         return {"Body": io.BytesIO(data)}
+
+
+# ============================================================================== invented terrain (demo build and tests)
+class SyntheticTerrain:
+    """Offline stand-in for the AWS terrain tiles: ``SyntheticTerrain()(z, x, y)`` returns a "terrarium" PNG of an invented landscape.
+
+    Land and sea follow the real Natural Earth coast; the land rises inland, with the real summits of ``data/peaks.csv`` and a broad ridged
+    texture on top, and the sea floor drops away from the coast.  It exists to exercise the terrain code and to preview the colours without
+    network access.  It is not geography.
+    """
+
+    def __init__(self):
+        import cartopy.io.shapereader as shpreader
+        import shapely
+        from scipy import ndimage
+
+        from . import boundaries
+        from .config import DISPLAY_BBOX
+
+        lon0, lon1, lat0, lat1 = DISPLAY_BBOX
+        pad = 4.0
+        box = shapely.geometry.box(lon0 - pad, lat0 - pad, lon1 + pad, lat1 + pad)
+        recs = [r.geometry for r in shpreader.Reader(boundaries.natural_earth_path("physical", "land")).records()]
+        land = shapely.union_all([g.intersection(box) for g in recs if g is not None and g.intersects(box)])
+        self.step = 0.04
+        self.lon_g = np.arange(lon0 - pad, lon1 + pad + 1e-9, self.step)
+        self.lat_g = np.arange(lat0 - pad, lat1 + pad + 1e-9, self.step)
+        LON, LAT = np.meshgrid(self.lon_g, self.lat_g)
+        mask = shapely.contains_xy(land, LON, LAT)
+        km = (self.step * 111.0 * np.cos(np.radians(44.0)), self.step * 111.0)           # km per grid step east, north
+        self.inland = ndimage.distance_transform_edt(mask, sampling=(km[1], km[0])).astype(np.float32)
+        self.offshore = ndimage.distance_transform_edt(~mask, sampling=(km[1], km[0])).astype(np.float32)
+        rng = np.random.default_rng(7)
+        k = 28
+        wave = 1.0 / np.geomspace(2.5, 45.0, k)                                          # wavelengths 45 km .. 2.5 km, in cycles per km
+        ang = rng.uniform(0, 2 * np.pi, k)
+        self._k = np.stack([wave * np.cos(ang), wave * np.sin(ang)], 1)
+        self._phase = rng.uniform(0, 2 * np.pi, k)
+        self._amp = (wave / wave.min()) ** -0.9
+        self._amp /= np.sqrt((self._amp ** 2).sum() / 2)
+        import csv
+        from pathlib import Path
+        with open(Path(__file__).parent / "data" / "peaks.csv", newline="") as f:
+            self.peaks = [(float(r["lon"]), float(r["lat"]), float(r["feet"]) * 0.3048) for r in csv.DictReader(f)]
+
+    def _grid(self, field, lon, lat):
+        from scipy import ndimage
+        return ndimage.map_coordinates(field, [(lat - self.lat_g[0]) / self.step, (lon - self.lon_g[0]) / self.step], order=1, mode="nearest")
+
+    def elevation(self, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
+        x = (lon - (-71.4)) * 111.0 * np.cos(np.radians(44.0))                           # km east / north of the map centre
+        y = (lat - 44.2) * 111.0
+        wav = np.zeros(lon.shape)
+        for (kx, ky), ph, a in zip(self._k, self._phase, self._amp):
+            wav += a * np.sin(2 * np.pi * (kx * x + ky * y) + ph)
+        ridged = 1.0 - np.abs(wav) / 2.0                                                  # 0..1, sharp crests
+        inland, offshore = self._grid(self.inland, lon, lat), self._grid(self.offshore, lon, lat)
+        land = 6 + 1.4 * np.minimum(inland, 110) + (25 + 2.2 * np.minimum(inland, 100)) * ridged + 18 * wav
+        for plon, plat, m in self.peaks:
+            d2 = ((lon - plon) * 111.0 * np.cos(np.radians(plat))) ** 2 + ((lat - plat) * 111.0) ** 2
+            land += 0.30 * m * np.exp(-d2 / (2 * 38.0 ** 2)) + 0.62 * m * np.exp(-d2 / (2 * 9.0 ** 2))
+        d2 = ((lon + 74.0) * 111.0 * np.cos(np.radians(44.0))) ** 2 + ((lat - 44.1) * 111.0) ** 2
+        land += 520 * np.exp(-d2 / (2 * 55.0 ** 2)) * (0.6 + 0.4 * ridged)             # an Adirondack-like dome
+        sea = -(6 + 2.4 * offshore ** 1.08) * (1 + 0.04 * wav)
+        return np.where(inland > 0, np.maximum(land, 1.0), np.maximum(sea, -4200.0)).astype(np.float32)
+
+    def __call__(self, z: int, x: int, y: int) -> bytes:
+        from .terrain import encode_terrarium, tile_coords
+        n = 2.0 ** z
+        px = (x + (np.arange(256) + 0.5) / 256.0) / n
+        py = (y + (np.arange(256) + 0.5) / 256.0) / n
+        lon = np.broadcast_to(px * 360.0 - 180.0, (256, 256))
+        lat = np.broadcast_to(np.degrees(np.arctan(np.sinh(np.pi * (1 - 2 * py)))).reshape(256, 1), (256, 256))
+        return encode_terrarium(self.elevation(np.array(lon), np.array(lat)))

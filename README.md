@@ -24,6 +24,7 @@ directory and deploys it as a Pages artifact.
 | **Time** | Timeline bar in the style of the SPC HREF viewer: day labels, one `Fnnn` cell per forecast hour (click or drag), a floating box with the valid time in UTC, `< ▶ >` buttons and a `- SPEED: n +` control. Keys: `<` `>` or ← → step, `p` or space plays, `h` hides the top menu, `s` saves the map as a PNG. Hover a cell for UTC and Eastern times. |
 | **Zoom and pan** | Scroll wheel (about the cursor), the **+ / − / Full** buttons, keys `+` `-` `0`, double-click, pinch on touch screens; drag to pan (or `shift` + arrows). Works for every product and ensemble view, and the small-multiple views (members, percentiles) follow the same zoom. The zoom is kept in the URL (`#product/mode/frame/window/layout/zoom,cx,cy`), so a zoomed view can be shared. Values are **interpolated bilinearly**, and only then put into the colour classes, so no colour is invented and the class edges follow the interpolated field (bilinear stays inside the range of the four surrounding cells, so it creates no false maxima or minima). The **Cells** button shows the nearest 3 km cell instead, for checking what the model actually has; the readout under the pointer and the station labels always give the value of the cell itself. Past 1× the state, county, coast and lake lines are drawn as vectors (`data/lines.bin`, same colours and widths as the overlay PNGs) so they stay sharp, and more station labels appear as there is room (same priority rule and spacing in screen pixels). The full view (1×) is the unchanged image: the page draws it exactly as before. **Speed:** a repaint is one pass over the visible pixels (about 15–25 ms on a software-rendered browser, with no GPU), coalesced to one per animation frame however many wheel or pointer events arrive. The stroked boundary lines and highways are kept as a raster for the current view, so stepping through the hours while zoomed (or drawing the many small maps of the stamp layouts) only repaints the field. On a device where painting the full-size field takes more than about 17 ms, dragging and zooming paint the field at half resolution (2 × 2 blocks) and reuse the last line raster, moved and scaled to the new view, and 140 ms after the last movement the exact full-resolution map is drawn again (identical to what a fast device draws directly). The URL is updated once movement stops, because Safari refuses more than about 100 URL changes in 30 seconds. |
 | **Map Layers** | Switches in the sidebar: **Counties** (on by default), **Interstates**, **US highways**, **State highways**, **Route labels**, **Cities** (state capitals as stars), **Towns**, **City/town names** and **Peaks**. Counties are drawn **light gray** (`#b4b4b4`) as a layer of their own (`counties.png`, and vectors past 1×); the state, coast and lake lines keep their black colour and widths. With the county switch off the map is the old one without county lines. Everything else is off by default. Roads get a white casing so they read on every field colour; route labels are drawn as small shields (`I-95`, `US 1`, `MA 2`) and avoid the station values and each other, with interstates labelled first and US and state routes appearing as you zoom in. **Towns** are small dots with names: about 1,100 places of 1,000 people or more in the six states (`rrfs_viewer/data/places.csv`), each shown from a zoom that depends on its population (25,000+ from 1.6×, 10,000+ from 2.4×, 5,000+ from 3.2×, 2,500+ from 4.2×, the rest from 5.6×), and only where there is room. **City/town names** switches the names of the cities and towns off (the dots stay). **Peaks** are brown triangles with the name and the summit elevation in feet below it (46 summits in the six states, `rrfs_viewer/data/peaks.csv`; the highest appear at 1×, others from 2.2× and 3.6×; a summit's name appears where it fits). All layers work at every zoom, are kept in the URL (7th part, the letters of the layers that are on; absent = the defaults), and are included in the PNG (with a small credit line) when on. The data (`data/gis.bin`, about 0.5 MB compressed) is only downloaded the first time a road, city, town or peak layer is switched on; the counties need no extra download. Sources: Natural Earth 1:10m `roads_north_america` and `populated_places_simple` (public domain; the 28 places it lists in the six states); towns from [GeoNames](https://www.geonames.org) (CC BY 4.0), cleaned of neighbourhoods and census pieces; peak positions and elevations compiled from Wikipedia / USGS references (rounded; elevations of a few peaks differ by a few feet between sources). |
+| **Basemap** | The map is no longer white: **land** is tinted by elevation and hill-shaded (pale, low-chroma greens and greys, so the data colours stay the loudest thing on the map), and **oceans and lakes** are shaded by depth (pale blue-greys). It is **always on**: it lies under every product, ensemble view, layout (map, all members, percentiles), zoom and Map Layers setting, and is in the PNG export. Where a product has no colour (below its first level, or no data) the terrain and water show as they are. Products that cover the whole map (temperature, wind ...) would hide it, so a second image, the **relief** (hillshade as black / white alpha on land, a faint depth-scaled blue on water), is drawn *onto the coloured pixels only*; the sidebar's **Basemap -> Relief over the data** (Light · Medium · Strong, remembered in the browser) sets how much of it shows. It never changes which colour means what (the legends are untouched), only lightens or darkens each colour by a few per cent on slopes and tints it slightly on water. Elevation and depth keys are in the same sidebar panel. See *Basemap* below. |
 | **Export PNG** | **Download PNG** in the sidebar (or key `s`) saves the current map, in Map view, as a 1200 px image with a header above it (of the zoomed part of the map when zoomed in, in the same layout and styling): the title (product and window), the subtitle (ensemble view, unit or probability threshold, run total, the members used, and a *synthetic demo data* flag on demo builds), the init (run) time, and the valid time with forecast hour in UTC and Eastern. The image is rendered from the same data as the page, without the point-forecast marker, and named like `rrfs_snow_kuchera_mean_6h_20261105_12z_f018.png`. |
 | **Click the map** | Point forecast: every member, the member mean and the REFS mean as lines over the forecast. |
 | Hover the point-forecast graph | Tooltip with the valid time (UTC and Eastern) and the value of every member, the member mean and the REFS mean at that forecast hour, with a cursor line; click the graph to jump the map to that time. |
@@ -100,12 +101,27 @@ five members are on S3 and the dashboard's member mean covers only those. The RE
 members (no gusts, no pressure-level profiles). Fields it lacks are shown as unavailable in the `RRFS Mean (REFS)` view and
 fall back to the member mean with a notice.
 
+## Basemap: terrain and water
+
+Two static images are rendered **once** (`rrfs_viewer/terrain.py`), in the same Lambert frame as the boundary overlay, and published as `terrain/basemap.<hash>.webp` (opaque RGB, 3450 × 2226) and `terrain/relief.<hash>.webp` (RGBA, 1725 × 1113). Their names carry a content hash, so browsers keep them between the four daily builds.
+
+* **Elevation and depth**: the public AWS *Terrain Tiles* (`elevation-tiles-prod`, "terrarium" encoding; SRTM, USGS 3DEP/NED, GMTED, ETOPO1, GEBCO), zoom 9 (about 220 m per pixel at 44 °N, ~430 tiles, 40-70 MB, downloaded **once** and cached in `.cache/terrain_tiles`). They carry sea-floor depths and the Great Lakes' bathymetry; smaller lakes are flat in them.
+* **Land, ocean, lake outlines**: Natural Earth 1:10m `land`, `lakes` and `lakes_north_america`, the same data as the coast and lake lines of the overlay, so fills and lines agree. Land / lake / ocean are separated with anti-aliased masks.
+* **Land**: an OKLab elevation ramp (pale sage at sea level to a warm grey at ~1,950 m, the highest summits in the frame) times a **multi-directional hillshade** (sun mostly from the north-west, 40° high, vertical exaggeration 3, because New England relief is low). Shadows are limited so no part of the map gets dark.
+* **Oceans**: a depth ramp, pale at the coast to a grey-blue at 4,000 m, spaced on √depth so the shelf gets the resolution. **Lakes**: their own, slightly greener ramp, by depth below the lake's surface (surface = the 90th percentile of the elevation inside the lake polygon, so a lake that is flat in the elevation data is a single shallow tone).
+* **Relief over the data**: the same hillshade as black (shadow) or white (lit) alpha on land, and a blue tint on water growing with the square root of the depth; drawn with canvas `source-atop`, i.e. only where the field has colour, at 0.3 / 0.55 / 1 of the amplitude baked into the image.
+* **Colours stay out of the way**: all ramps are low in chroma (`tests/test_terrain.py` checks that the lightness only decreases with elevation / depth, and that the chroma stays small). A near-white or light-blue data class is still clearly distinct from the basemap, but if you want it paler or stronger, the constants at the top of `terrain.py` (`LAND_RAMP`, `OCEAN_RAMP`, `LAKE_RAMP`, `BASE_*`, `RELIEF_*`, `OCEAN_*`, `LAKE_*`, `VERT_EXAG`, `SUN_*`) are the only place to change; the tiles are cached, so re-rendering takes about 15 s.
+* **Caching**: a render is cached under `.cache/terrain/<key>/` (the key is a hash of `terrain.py` and the frame), and the Actions cache keeps `.cache` between runs (the cache key includes `terrain.py`). To pre-render the assets and commit them instead (no tile download on CI at all): `python -m rrfs_viewer.terrain` writes `rrfs_viewer/data/terrain/`; the build uses those files while their key still matches the code (`--force` re-renders).
+* **If it cannot be made**: the tiles unreachable gives a *flat* basemap (land tint, ocean and lake colours, no hillshade or depth; not cached, so the next build tries again); any other failure leaves the old white background, and the page copes with a missing `basemap` in `data.json`. `--no-terrain` skips the step.
+* **Demo**: `--demo` renders an *invented* landscape (`testing.SyntheticTerrain`: the real coast and summits, invented relief), so the build stays offline. It is only for checking the page and is not geography.
+* **Attribution** (shown on the page, in the footer and in the PNG): Mapzen / AWS Terrain Tiles (USGS, NOAA, GEBCO, SRTM); Natural Earth.
+
 ## Size
 
 Measured on the offline demo (455 × 293 display grid, 4 frames, 6 sources, 37 stored series including the 1-hour ones): 19 MB of data
 files + a 46 kB overlay. Scaled to the 20 frames of a full run that is roughly 95 MB for the whole site (synthetic fields; real fields
 may compress differently). Before the frame delta was added, a 24 h demo build (8 frames) wrote 45.8 MB of data files; with it, 35.2 MB (-23%;
--30% on the 16-bit QPF/snowfall files, -5% on the 8-bit ones). Real fields are noisier, so check `stats.data_bytes` in `data.json` after the first live run. A visitor downloads only the product being viewed, and 1-hour fields only when the 1 h window is chosen:
+-30% on the 16-bit QPF/snowfall files, -5% on the 8-bit ones). Real fields are noisier, so check `stats.data_bytes` in `data.json` after the first live run. The basemap adds about 1-2 MB of static images (two WebP files, cached by content hash). A visitor downloads only the product being viewed, and 1-hour fields only when the 1 h window is chosen:
 about 3-6 MB for all six sources, cached afterwards.
 What a build **downloads** from S3 is much larger than what it publishes (every needed message at full CONUS resolution). The first live
 run's REFS-mean pass fetched 73 MB; expect a few GB for the five members, which is free on a public repository but is the thing to
@@ -130,7 +146,7 @@ Designed so that scheduled generation is never stopped by GitHub:
 2. **Settings → Pages → Build and deployment → Source: GitHub Actions.**
 3. **Actions → Update RRFS winter dashboard → Run workflow** (tick *force* the first time).
 
-The site appears at `https://<user>.github.io/<repo>/`.
+The site appears at `https://<user>.github.io/<repo>/`. The first run also downloads the elevation tiles (once, see *Basemap*) and takes a minute or two longer.
 
 ## Run it locally
 
@@ -138,6 +154,8 @@ The site appears at `https://<user>.github.io/<repo>/`.
 pip install -r requirements.txt
 python -m rrfs_viewer.build --out public                      # real data, newest complete cycle
 python -m rrfs_viewer.build --demo --max-fhr 12 --out public   # offline: synthetic storm via a fake S3 bucket
+python -m rrfs_viewer.build --no-terrain --out public          # without the terrain / water basemap
+python -m rrfs_viewer.terrain --synthetic --out /tmp/terrain    # just the basemap images, from invented terrain (offline)
 python -m http.server -d public 8000
 pytest
 ```
@@ -200,6 +218,9 @@ in demo mode is synthetic and marked as such on the page.
 * Precipitation type is the model's categorical flag (0 or 1) at the valid time; hourly flags are averaged between consecutive hours when
   splitting accumulations by type.
 
+* **The basemap is a backdrop, not data.** The images have 3 × the overlay's resolution, so past about 3× zoom the terrain is soft (the lines stay sharp); the elevation tiles are about 220 m per pixel, generalised, and shaded with a 3× vertical exaggeration. Lake depth appears only where the elevation tiles contain bathymetry (the Great Lakes); a lake that is flat in them gets one shallow tone, and a narrow lake between steep banks can look a little deeper than it is. Natural Earth's 1:10m lake outlines leave out small ponds, and outlines are generalised by up to a kilometre or so.
+* **The relief over the data darkens or lightens colours by a few per cent.** On steep slopes the shading is visible in a data colour; use *Light* if that bothers you, and remember the legend swatches are never shaded. The station values and the hover readout are always the cell values.
+
 ## Layout
 
 ```
@@ -213,14 +234,15 @@ rrfs_viewer/
   colors.py      colour ramps (OKLab)
   encode.py      quantise, spatial/temporal delta, shuffle, gzip
   basemap.py     cartopy overlay (boundaries, frame, and the same lines as vectors for zoomed views), land mask, METAR layout
+  terrain.py     terrain and water basemap: elevation tiles -> hypsometric tint x hillshade, depth ramps, relief overlay (WebP), cache
   gis.py         optional highway, route-label, city, town and peak layers (data/gis.bin; towns and peaks from data/places.csv and data/peaks.csv)
   build.py       cycle choice, parallel workers, data.json, site assembly
-  testing.py     offline fake S3 with real GRIB2 (demo + tests)
+  testing.py     offline fake S3 with real GRIB2, and invented terrain tiles (demo + tests)
 site/index.html  the dashboard (single file, no dependencies)
 .github/workflows/update.yml
 ```
 
 ## Credits
 
-Data: NOAA/NCEP RRFS via the NOAA Open Data Dissemination programme on AWS. Method references: Kuchera (2004), Cobb &
+Data: NOAA/NCEP RRFS via the NOAA Open Data Dissemination programme on AWS. Basemap: Mapzen / AWS Terrain Tiles (USGS, NOAA, GEBCO, SRTM and others, see the [attribution list](https://github.com/tilezen/joerd/blob/master/docs/attribution.md)) and Natural Earth. Method references: Kuchera (2004), Cobb &
 Waldstreicher (2005), the SREF snow/liquid-ratio write-up (Cobb 2011 curve), Cobb (2024, Cobb SLR methodology and application in NBM v4.1), Leone, Cobb & Rudack (2023, Cobb melting SLR method), Baxter et al. (2005), Byun et al. (2008), Veals et al. (2025), NBM v5.0 winter-suite documentation, NWS wind-chill and blizzard definitions.
