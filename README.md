@@ -22,7 +22,8 @@ directory and deploys it as a Pages artifact.
 | **All members** layout | Postage-stamp grid: REFS mean, member mean, spread, probability and every member side by side. |
 | **Percentiles** layout | All ten statistics (Min, P5, P10, P25, P50, Mean, P75, P90, P95, Max) side by side for the current product, window and time; click one to open it. |
 | **Time** | Timeline bar in the style of the SPC HREF viewer: day labels, one `Fnnn` cell per forecast hour (click or drag), a floating box with the valid time in UTC, `< ▶ >` buttons and a `- SPEED: n +` control. Keys: `<` `>` or ← → step, `p` or space plays, `h` hides the top menu, `s` saves the map as a PNG. Hover a cell for UTC and Eastern times. |
-| **Export PNG** | **Download PNG** in the sidebar (or key `s`) saves the current map, in Map view, as a 1200 px image with a header above it: the title (product and window), the subtitle (ensemble view, unit or probability threshold, run total, the members used, and a *synthetic demo data* flag on demo builds), the init (run) time, and the valid time with forecast hour in UTC and Eastern. The image is rendered from the same data as the page, without the point-forecast marker, and named like `rrfs_snow_kuchera_mean_6h_20261105_12z_f018.png`. |
+| **Zoom and pan** | Scroll wheel (about the cursor), the **+ / − / Full** buttons, keys `+` `-` `0`, double-click, pinch on touch screens; drag to pan (or `shift` + arrows). Works for every product and ensemble view, and the small-multiple views (members, percentiles) follow the same zoom. The zoom is kept in the URL (`#product/mode/frame/window/layout/zoom,cx,cy`), so a zoomed view can be shared. Values are **interpolated bilinearly**, and only then put into the colour classes, so no colour is invented and the class edges follow the interpolated field (bilinear stays inside the range of the four surrounding cells, so it creates no false maxima or minima). The **Cells** button shows the nearest 3 km cell instead, for checking what the model actually has; the readout under the pointer and the station labels always give the value of the cell itself. Past 1× the state, county, coast and lake lines are drawn as vectors (`data/lines.bin`, same colours and widths as the overlay PNG) so they stay sharp, and more station labels appear as there is room (same priority rule and spacing in screen pixels). The full view (1×) is the unchanged image: the page draws it exactly as before. |
+| **Export PNG** | **Download PNG** in the sidebar (or key `s`) saves the current map, in Map view, as a 1200 px image with a header above it (of the zoomed part of the map when zoomed in, in the same layout and styling): the title (product and window), the subtitle (ensemble view, unit or probability threshold, run total, the members used, and a *synthetic demo data* flag on demo builds), the init (run) time, and the valid time with forecast hour in UTC and Eastern. The image is rendered from the same data as the page, without the point-forecast marker, and named like `rrfs_snow_kuchera_mean_6h_20261105_12z_f018.png`. |
 | **Click the map** | Point forecast: every member, the member mean and the REFS mean as lines over the forecast. |
 | Hover the point-forecast graph | Tooltip with the valid time (UTC and Eastern) and the value of every member, the member mean and the REFS mean at that forecast hour, with a cursor line; click the graph to jump the map to that time. |
 | Hover | Value under the cursor. Land-area low / average / high tiles for the current map. |
@@ -151,6 +152,10 @@ in demo mode is synthetic and marked as such on the page.
   `VIS`, pressure-level `TMP`/`RH`) follow the published RRFS/REFS product tables and the layout of comparable NCEP files; they were
   developed offline; the first live run found the REFS-mean precipitation windows were not as assumed (now handled adaptively). Missing messages are not fatal: the product is simply empty for that frame/member (a hole in the hourly
   `APCP` withholds all later accumulations rather than under-reporting them), and the Actions log lists what was missing.
+* **Zoomed maps show the same 3 km data, not more detail.** Interpolation only makes the shading smooth; it adds no information, and
+  features smaller than a few grid cells are not resolved however far you zoom. The display raster is a nearest-neighbour resample of the native
+  grid, so a "cell" can sit up to about 1.5 km from where the model's own cell is. Boundary lines are Natural Earth 1:10m (about 1:10 million scale),
+  so at high zoom they are generalised. The *New England land area* summary tiles and the point chart always use the whole domain.
 * **Snowfall methods are guidance, not forecasts.** A ratio is applied to model QPF, so all of them inherit its errors. The ratio at the
   end of each 3-hour block is used for the whole block. There are two thickness methods: the CMC/Murphy relation, which only *lowers* the
   ratio in marginal, warm-layer snow, and the NBM line, which also raises it in cold layers (about 15:1 at 1500 m, 23:1 at 1450 m). The
@@ -206,7 +211,7 @@ rrfs_viewer/
   catalog.py     the product list: units, quantisation, thresholds, text
   colors.py      colour ramps (OKLab)
   encode.py      quantise, spatial/temporal delta, shuffle, gzip
-  basemap.py     cartopy overlay (boundaries, frame), land mask, METAR layout
+  basemap.py     cartopy overlay (boundaries, frame, and the same lines as vectors for zoomed views), land mask, METAR layout
   build.py       cycle choice, parallel workers, data.json, site assembly
   testing.py     offline fake S3 with real GRIB2 (demo + tests)
 site/index.html  the dashboard (single file, no dependencies)

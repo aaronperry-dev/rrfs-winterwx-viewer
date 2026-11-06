@@ -82,6 +82,15 @@
   .mapcard canvas { display: block; width: 100%; height: auto; cursor: crosshair; }
   .mapcard .msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px;
                   background: rgba(255,255,255,.84); color: #1c2128; font-size: 15px; }
+  .zoomctl { position: absolute; left: 3.2%; top: 3.4%; display: flex; flex-direction: column; gap: 4px; align-items: stretch; z-index: 2; width: 38px; }
+  .zoomctl button { appearance: none; border: 1px solid #7d8791; border-radius: 5px; background: rgba(255,255,255,.94); color: #1c2128; font: 700 18px/1 var(--font);
+                    height: 34px; padding: 0; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+  .zoomctl button.txt { font-size: 11px; }
+  .zoomctl button:hover:not(:disabled) { background: #fff; border-color: #27487f; }
+  .zoomctl button:disabled { opacity: .4; cursor: default; }
+  .zoomctl button[aria-pressed="true"] { background: var(--red); color: #fff; border-color: var(--red); }
+  .zoomctl .zr { text-align: center; font: 700 11px/1.2 var(--font); color: #1c2128; background: rgba(255,255,255,.94); border: 1px solid #7d8791; border-radius: 5px; padding: 3px 0; }
+  .mapcard canvas.drag { cursor: grabbing; }
   .notice { margin: 8px 0 0; padding: 6px 10px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-ink); font-size: 13px; }
   .tip { position: fixed; z-index: 5; pointer-events: none; padding: 3px 8px; border-radius: 6px; background: #1c2128; color: #fff; font-size: 12.5px; font-variant-numeric: tabular-nums; }
 
@@ -194,7 +203,14 @@
         <div id="mh-run"></div>
       </div>
       <div id="mapwrap">
-        <div class="mapcard"><canvas id="map" width="1200" height="836" tabindex="0" aria-label="Map"></canvas><div class="msg" id="msg" hidden></div></div>
+        <div class="mapcard"><canvas id="map" width="1200" height="836" tabindex="0" aria-label="Map"></canvas>
+          <div class="zoomctl" role="group" aria-label="Map zoom">
+            <button type="button" id="z-in" aria-label="Zoom in" title="Zoom in (+ or scroll wheel)">+</button>
+            <button type="button" id="z-out" aria-label="Zoom out" title="Zoom out (- or scroll wheel)">&minus;</button>
+            <button type="button" id="z-reset" class="txt" aria-label="Full view" title="Full view (0)">Full</button>
+            <button type="button" id="z-cells" class="txt" aria-pressed="false" title="Show the raw 3 km model cells instead of interpolated values">Cells</button>
+            <div class="zr" id="z-read" aria-live="polite">1&times;</div>
+          </div><div class="msg" id="msg" hidden></div></div>
       </div>
       <p class="notice" id="notice" hidden></p>
       <section id="stampwrap" hidden>
@@ -222,7 +238,8 @@
         <p class="note" id="blurb"></p></div></div>
       <div class="panel"><h2>Keyboard Shortcuts</h2><div class="body"><ul class="keys">
         <li><kbd>&lt;</kbd> / <kbd>←</kbd> previous time</li><li><kbd>&gt;</kbd> / <kbd>→</kbd> next time</li>
-        <li><kbd>p</kbd> / <kbd>space</kbd> play / pause</li><li><kbd>h</kbd> toggle top menu</li><li><kbd>s</kbd> save the map as a PNG</li><li>Click the map for a point forecast</li></ul></div></div>
+        <li><kbd>p</kbd> / <kbd>space</kbd> play / pause</li><li><kbd>h</kbd> toggle top menu</li><li><kbd>s</kbd> save the map as a PNG</li><li>Click the map for a point forecast</li>
+        <li><kbd>+</kbd> / <kbd>-</kbd> zoom, <kbd>0</kbd> full view, <kbd>shift</kbd>+arrows pan; scroll wheel, drag and double-click also work</li></ul></div></div>
       <div class="panel"><h2>More Information</h2><div class="body"><ul class="links">
         <li><a href="https://registry.opendata.aws/noaa-rrfs/">RRFS data on NOAA Open Data (AWS)</a></li>
         <li><a href="https://github.com/aaronperry-dev/rrfs-winterwx-viewer#readme">Products and methods (README)</a></li>
@@ -247,6 +264,8 @@ const TZ = "America/New_York";
 const MAP = { x: 25, y: 14, w: 1150, h: 742 };            // map frame inside the 1200 x 836 composition (title lives in the page header)
 const state = { group: null, product: "snow_kuchera", mode: "mean", thr: null, win: 0, lpmm: 180, frame: 0, layout: "map", on: {}, point: null };
 let D, overlay, landMask, playTimer = null, speed = 3;
+const view = { z: 1, cx: 0.5, cy: 0.5, cells: false };     // zoom and the centre of the visible part of the frame (0..1 across the frame, y down); cells: nearest 3 km cell instead of interpolation
+const ZMAX = 12;
 const store = new Map();                                    // "product.source" -> Promise<{u: Uint8Array|Uint16Array, p}>
 
 // ---------------------------------------------------------------- helpers
@@ -505,16 +524,21 @@ function spreadStyle(p) {
 // ---------------------------------------------------------------- drawing
 const hex = h => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
 let lutCache = new WeakMap(), geom = null;
-function geometry(W, H) {                                   // bilinear sampling positions for a W x H target
-  if (geom && geom.W === W && geom.H === H) return geom;
+const viewOrigin = vw => vw.z === 1 ? { u0: 0, v0: 0 } : { u0: vw.cx - 0.5 / vw.z, v0: vw.cy - 0.5 / vw.z };   // top-left of the visible part, in frame fractions
+function geometry(W, H, vw) {                               // bilinear sampling positions for a W x H target showing the part of the frame in `vw`
+  const z = vw.z, { u0, v0 } = viewOrigin(vw);
+  if (geom && geom.W === W && geom.H === H && geom.z === z && geom.u0 === u0 && geom.v0 === v0) return geom;
   const { nx, ny } = D.grid, xi = new Int32Array(W), xf = new Float32Array(W), yi = new Int32Array(H), yf = new Float32Array(H);
-  for (let i = 0; i < W; i++) { const g = Math.min(nx - 1.001, Math.max(0, (i + 0.5) * nx / W - 0.5)); xi[i] = g | 0; xf[i] = g - xi[i]; }
-  for (let j = 0; j < H; j++) { const g = Math.min(ny - 1.001, Math.max(0, (ny - (j + 0.5) * ny / H) - 0.5)); yi[j] = g | 0; yf[j] = g - yi[j]; }   // row 0 of the data is the south edge
-  return (geom = { W, H, xi, xf, yi, yf });
+  // at z = 1 these are exactly the expressions of the unzoomed map (same operations in the same order), so the full view does not change
+  for (let i = 0; i < W; i++) { const g = Math.min(nx - 1.001, Math.max(0, (i + 0.5) * (nx / z) / W + u0 * nx - 0.5)); xi[i] = g | 0; xf[i] = g - xi[i]; }
+  for (let j = 0; j < H; j++) { const g = Math.min(ny - 1.001, Math.max(0, (ny - (j + 0.5) * (ny / z) / H - v0 * ny) - 0.5)); yi[j] = g | 0; yf[j] = g - yi[j]; }   // row 0 of the data is the south edge
+  return (geom = { W, H, z, u0, v0, xi, xf, yi, yf });
 }
 const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1, imgBuf = new Map();   // imgBuf: "WxH" -> ImageData reused between paints
-function paintField(ctx, x0, y0, W, H, values, style) {    // always paints onto white (no data / below the first level = white), so the pixels can be written directly
-  const { nx } = D.grid, g = geometry(W, H), lv = style.levels, nl = lv.length;
+function paintField(ctx, x0, y0, W, H, values, style, vw = view) {    // always paints onto white (no data / below the first level = white), so the pixels can be written directly
+  // Values are interpolated (bilinear) first and only then put into colour classes, so no colour is ever invented and the class edges follow the
+  // interpolated field; vw.cells shows the nearest 3 km cell instead.  Bilinear never leaves the range of the four surrounding cells.
+  const { nx } = D.grid, g = geometry(W, H, vw), lv = style.levels, nl = lv.length, cells = vw.cells;
   let lut = lutCache.get(style);                            // one packed 32-bit colour per level interval
   if (!lut) { lut = style.colors.map(c => { if (!c) return 0; const [r, gr, b] = hex(c); return (LITTLE ? (255 << 24 | b << 16 | gr << 8 | r) : (r << 24 | gr << 16 | b << 8 | 255)) >>> 0; }); lutCache.set(style, lut); }
   let img = imgBuf.get(W + "x" + H); if (!img) imgBuf.set(W + "x" + H, img = new ImageData(W, H));
@@ -524,7 +548,8 @@ function paintField(ctx, x0, y0, W, H, values, style) {    // always paints onto
     for (let i = 0; i < W; i++) {
       const k = r0 + g.xi[i], fx = g.xf[i], a = values[k], b = values[k + 1], c = values[k + nx], d = values[k + nx + 1];
       let v;
-      if (a === a && b === b && c === c && d === d) v = (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+      if (cells) { v = fx < .5 ? (fy < .5 ? a : c) : (fy < .5 ? b : d); if (v !== v) continue; }
+      else if (a === a && b === b && c === c && d === d) v = (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
       else {                                                // next to missing data: the nearest valid corner, else any valid one
         v = fx < .5 ? (fy < .5 ? a : c) : (fy < .5 ? b : d);
         if (v !== v) v = a === a ? a : b === b ? b : c === c ? c : d;
@@ -554,25 +579,78 @@ function drawLegend(ctx, x, y, w, h, style, fs) {
   for (const t of style.ticks) { const i = lv.indexOf(t); if (i < 0) continue; const tx = x + i * bw;
     ctx.beginPath(); ctx.moveTo(tx, y + h); ctx.lineTo(tx, y + h + 4); ctx.stroke(); ctx.fillText(tick(t), tx, y + h + 5); }
 }
+// ---- boundary lines as vectors (same colours and widths as the overlay PNG), drawn instead of the PNG once zoomed in so they stay sharp
+let LINES = null;
+async function loadLines() {
+  if (!D.lines) return;
+  try {
+    const j = JSON.parse(new TextDecoder().decode(await inflate(`${D.lines}?v=${D.version}`))), U = j.units, paths = {};
+    for (const name of j.order) paths[name] = j.lines[name].map(p => {
+      const a = new Float32Array(p.length); let x = 0, y = 0;
+      for (let i = 0; i < p.length; i += 2) { x += p[i]; y += p[i + 1]; a[i] = x / U; a[i + 1] = y / U; }
+      const bb = [Infinity, -Infinity, Infinity, -Infinity];
+      for (let i = 0; i < a.length; i += 2) { if (a[i] < bb[0]) bb[0] = a[i]; if (a[i] > bb[1]) bb[1] = a[i]; if (a[i + 1] < bb[2]) bb[2] = a[i + 1]; if (a[i + 1] > bb[3]) bb[3] = a[i + 1]; }
+      return { a, bb };
+    });
+    LINES = { order: j.order, styles: j.styles, frame: j.frame, paths };
+    if (view.z > 1) redraw();
+  } catch (e) { LINES = null; }                             // without them the PNG is simply stretched
+}
+function drawOverlay(ctx, x, y, w, h, vw) {                 // w / 1150 is the size of this map relative to the full-size one (line widths scale with it)
+  if (vw.z === 1) { if (overlay.complete) ctx.drawImage(overlay, x, y, w, h); return; }
+  const { u0, v0 } = viewOrigin(vw), z = vw.z;
+  if (!LINES) {                                             // fallback: a crop of the PNG
+    if (overlay.complete) ctx.drawImage(overlay, u0 * overlay.naturalWidth, v0 * overlay.naturalHeight, overlay.naturalWidth / z, overlay.naturalHeight / z, x, y, w, h);
+    return;
+  }
+  const sc = w / MAP.w, sx = w * z, sy = h * z, ox = x - u0 * sx, oy = y - v0 * sy, u1 = u0 + 1 / z, v1 = v0 + 1 / z;
+  ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+  ctx.lineJoin = "round"; ctx.lineCap = "butt"; ctx.strokeStyle = "#000";
+  for (const name of LINES.order) {
+    const [lw, alpha] = LINES.styles[name]; ctx.lineWidth = lw * sc; ctx.globalAlpha = alpha;
+    for (const { a, bb } of LINES.paths[name]) {
+      if (bb[1] < u0 || bb[0] > u1 || bb[3] < v0 || bb[2] > v1) continue;
+      ctx.beginPath(); ctx.moveTo(ox + a[0] * sx, oy + a[1] * sy);
+      for (let i = 2; i < a.length; i += 2) ctx.lineTo(ox + a[i] * sx, oy + a[i + 1] * sy);
+      ctx.stroke();                                         // one stroke per ring, as the PNG renderer does, so shared borders are as dark as there
+    }
+  }
+  ctx.restore();
+  ctx.fillStyle = "#000"; ctx.fillRect(x, y, 2 * sc, h); ctx.fillRect(x + w - sc, y, sc, h); ctx.fillRect(x, y, w, sc); ctx.fillRect(x, y + h - sc, w, sc);   // the map frame, as in the PNG
+}
+function zoomStations(vw) {                                 // labels that fit at this zoom: same priority rule and spacing (in screen px) as the full view
+  if (vw.z === 1 || !D.stations_all) return D.stations;
+  const { u0, v0 } = viewOrigin(vw), z = vw.z, sep = D.station_px.sep, edge = D.station_px.edge, kept = [];
+  for (const s of D.stations_all) {
+    const x = (s.fx - u0) * z * MAP.w, y = (s.fy - v0) * z * MAP.h;
+    if (x < edge || x > MAP.w - edge || y < edge || y > MAP.h - edge) continue;
+    if (s.p > 0 && kept.some(k => (x - k.x) ** 2 + (y - k.y) ** 2 < sep * sep)) continue;
+    kept.push({ x, y, s });
+  }
+  return kept.map(k => k.s);
+}
 const fcap = (f = state.frame) => `F${String(D.frames[f]).padStart(3, "0")}`;
-function drawMain(ctx, v, mode, markers) {
-  const W = 1200, H = 836;
+function drawMain(ctx, v, mode, markers, vw = view) {
+  const W = 1200, H = 836, { u0, v0 } = viewOrigin(vw), z = vw.z;
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
-  paintField(ctx, MAP.x, MAP.y, MAP.w, MAP.h, v.values, v.style);
-  if (overlay.complete) ctx.drawImage(overlay, MAP.x, MAP.y, MAP.w, MAP.h);
+  paintField(ctx, MAP.x, MAP.y, MAP.w, MAP.h, v.values, v.style, vw);
+  drawOverlay(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw);
   // station values (nearest cell), bold with a white halo
   const { nx } = D.grid, lv = v.style.levels; ctx.font = "700 11px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
   ctx.lineJoin = "round"; ctx.lineWidth = 3.2; ctx.strokeStyle = "#fff"; ctx.fillStyle = "#000";
-  for (const s of D.stations) {
+  for (const s of zoomStations(vw)) {
     const val = v.values[s.r * nx + s.c]; if (val !== val) continue;
     if (v.style.colors[0] === null && val < lv[0]) continue;
-    const t = fnum(val, v.dec), x = MAP.x + s.fx * MAP.w, y = MAP.y + s.fy * MAP.h;
+    const t = fnum(val, v.dec), x = MAP.x + (s.fx - u0) * z * MAP.w, y = MAP.y + (s.fy - v0) * z * MAP.h;
     ctx.strokeText(t, x, y); ctx.fillText(t, x, y);
   }
   if (markers && state.point) {
-    const x = MAP.x + (state.point.c + .5) / nx * MAP.w, y = MAP.y + (1 - (state.point.r + .5) / D.grid.ny) * MAP.h;
-    ctx.strokeStyle = "#000"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.stroke();
-    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.stroke();
+    const fx = ((state.point.c + .5) / nx - u0) * z, fy = ((1 - (state.point.r + .5) / D.grid.ny) - v0) * z;
+    if (fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1) {         // (off the map when zoomed to somewhere else)
+      const x = MAP.x + fx * MAP.w, y = MAP.y + fy * MAP.h;
+      ctx.strokeStyle = "#000"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.stroke();
+      ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.stroke();
+    }
   }
   drawLegend(ctx, 48, MAP.y + MAP.h + 22, 735, 28, v.style, 12.5);
   bold(ctx, W - 25, MAP.y + MAP.h + 42, "aaronperry-dev.github.io", " (Aaron Perry)", 13, true);
@@ -662,7 +740,7 @@ async function renderStamps(token, p) {
     viewField(m, state.frame, { tok: token }).then(v => {
       if (token !== renderToken) return; const c = cv.getContext("2d"); c.fillStyle = "#fff"; c.fillRect(0, 0, 575, 371);
       if (v.error) { c.fillStyle = "#59636e"; c.font = "15px system-ui"; c.textAlign = "center"; c.fillText(m === "refs" ? "not in the REFS mean file" : "no data", 287, 190); return; }
-      paintField(c, 0, 0, 575, 371, v.values, v.style); if (overlay.complete) c.drawImage(overlay, 0, 0, 575, 371);
+      paintField(c, 0, 0, 575, 371, v.values, v.style); drawOverlay(c, 0, 0, 575, 371, view);
       if (v.style !== p) {                                  // spread / probability use their own scale: label + mini colour bar
         const c2 = cv.getContext("2d"), t = m === "prob" ? `P(${p.thr_dir === "le" ? "≤" : "≥"}${v.thr} ${p.unit})` : `σ (${p.unit})`;
         c2.font = "700 15px system-ui"; const tw = c2.measureText(t).width + 16;
@@ -832,14 +910,19 @@ function statusLine() {
   $("#sel-date").innerHTML = `<option>${c.toISOString().slice(0, 10)}</option>`; $("#sel-run").innerHTML = `<option>${z}</option>`;
 }
 function readHash() {
-  const [pk, mode, f, w, layout] = location.hash.slice(1).split("/");
+  const [pk, mode, f, w, layout, vw] = location.hash.slice(1).split("/");
   if (D.products.some(p => p.key === pk)) state.product = pk;
   if (mode && (MODES.some(m => m[0] === mode) || D.members.includes(mode))) state.mode = mode;
   if (f !== undefined && f !== "" && +f >= 0 && +f < D.frames.length) state.frame = +f;
   if (WINDOWS.includes(+w) && w !== undefined && w !== "") state.win = +w;
   if (layout === "stamps" || layout === "pctl") state.layout = layout;
+  const [z, cx, cy, c] = (vw || "").split(",").map(Number);   // optional 6th part "zoom,cx,cy[,1 = cells]"; absent = the full view
+  Object.assign(view, { z: 1, cx: 0.5, cy: 0.5, cells: false });
+  if (z > 1 && cx >= 0 && cx <= 1 && cy >= 0 && cy <= 1) { Object.assign(view, { z, cx, cy, cells: c === 1 }); clampView(); }
+  else if (c === 1) view.cells = true;
 }
-const writeHash = () => history.replaceState(null, "", `#${state.product}/${state.mode}/${state.frame}/${state.win}/${state.layout}`);
+const writeHash = () => history.replaceState(null, "", `#${state.product}/${state.mode}/${state.frame}/${state.win}/${state.layout}`
+  + (view.z > 1 || view.cells ? `/${view.z.toFixed(2)},${view.cx.toFixed(4)},${view.cy.toFixed(4)}${view.cells ? ",1" : ""}` : ""));
 function set(patch) { if (patch.frame !== undefined && patch.frame !== state.frame) lastDir = Math.sign(patch.frame - state.frame); Object.assign(state, patch); render(); }
 function prefetch() {                                       // heavy views: compute the neighbouring hours in the background so stepping and playing are instant
   if (state.layout !== "map" || (state.mode !== "pmm" && state.mode !== "lpmm")) return;
@@ -862,6 +945,10 @@ $("#spd-up").addEventListener("click", () => setSpeed(1));
 document.addEventListener("keydown", e => {
   if (e.altKey || e.ctrlKey || e.metaKey || !D || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
   const k = e.key;
+  if (state.layout === "map" && (k === "+" || k === "=")) { zoomTo(view.z * 1.6); return; }
+  if (state.layout === "map" && (k === "-" || k === "_")) { zoomTo(view.z / 1.6); return; }
+  if (state.layout === "map" && k === "0") { Object.assign(view, { z: 1, cx: 0.5, cy: 0.5 }); redraw(); return; }
+  if (e.shiftKey && view.z > 1 && k.startsWith("Arrow")) { e.preventDefault(); panBy(k === "ArrowLeft" ? -0.25 : k === "ArrowRight" ? 0.25 : 0, k === "ArrowUp" ? -0.25 : k === "ArrowDown" ? 0.25 : 0); return; }
   if (k === "ArrowRight" || k === ">" || k === ".") step(1);
   else if (k === "ArrowLeft" || k === "<" || k === ",") step(-1);
   else if (k === "p" || k === "P") play(!playTimer);
@@ -871,8 +958,9 @@ document.addEventListener("keydown", e => {
 });
 function cellAt(ev) {
   const cv = $("#map"), rc = cv.getBoundingClientRect(), k = 1200 / rc.width;
-  const x = ((ev.clientX - rc.left) * k - MAP.x) / MAP.w, y = ((ev.clientY - rc.top) * k - MAP.y) / MAP.h;
-  if (x < 0 || x >= 1 || y < 0 || y >= 1) return null;
+  const px = ((ev.clientX - rc.left) * k - MAP.x) / MAP.w, py = ((ev.clientY - rc.top) * k - MAP.y) / MAP.h;
+  if (px < 0 || px >= 1 || py < 0 || py >= 1) return null;
+  const { u0, v0 } = viewOrigin(view), x = u0 + px / view.z, y = v0 + py / view.z;      // position in the full frame
   return { c: Math.min(D.grid.nx - 1, (x * D.grid.nx) | 0), r: Math.min(D.grid.ny - 1, ((1 - y) * D.grid.ny) | 0) };
 }
 $("#map").addEventListener("mousemove", ev => {
@@ -882,7 +970,60 @@ $("#map").addEventListener("mousemove", ev => {
   tip.hidden = v !== v; if (v === v) { tip.textContent = `${fnum(v, current.v.dec)} ${current.v.unit}`; tip.style.left = ev.clientX + 14 + "px"; tip.style.top = ev.clientY + 12 + "px"; }
 });
 $("#map").addEventListener("mouseleave", () => { $("#tip").hidden = true; });
-$("#map").addEventListener("click", ev => { const cell = cellAt(ev); if (cell) { state.point = cell; if (current) { drawMain($("#map").getContext("2d"), current.v, current.mode, true); } chart(); } });
+$("#map").addEventListener("click", ev => { if (dragged) { dragged = false; return; } const cell = cellAt(ev); if (cell) { state.point = cell; if (current) { drawMain($("#map").getContext("2d"), current.v, current.mode, true); } chart(); } });
+// ---- zoom and pan: wheel, +/- buttons and keys, drag, pinch, double-click.  Only the view changes; the data and the colours stay as they are.
+let rafId = 0, dragged = false;
+function clampView() {
+  view.z = Math.min(ZMAX, Math.max(1, view.z)); if (view.z < 1.0001) view.z = 1;
+  const h = 0.5 / view.z; view.cx = view.z === 1 ? 0.5 : Math.min(1 - h, Math.max(h, view.cx)); view.cy = view.z === 1 ? 0.5 : Math.min(1 - h, Math.max(h, view.cy));
+}
+function updateZoomUI() {
+  $("#z-read").textContent = view.z === 1 ? "1\u00d7" : view.z.toFixed(1) + "\u00d7";
+  $("#z-in").disabled = view.z >= ZMAX; $("#z-out").disabled = $("#z-reset").disabled = view.z === 1;
+  $("#z-cells").setAttribute("aria-pressed", String(view.cells));
+  $("#map").style.touchAction = view.z > 1 ? "none" : "pan-y";
+}
+function redraw() {                                         // one repaint per animation frame, however many events arrive
+  if (rafId) return;
+  rafId = requestAnimationFrame(() => { rafId = 0; updateZoomUI(); writeHash(); if (current && state.layout === "map") drawMain($("#map").getContext("2d"), current.v, current.mode, true); });
+}
+function zoomTo(z, px = 0.5, py = 0.5) {                    // keep the frame point under (px, py), fractions of the map rectangle, where it is
+  const { u0, v0 } = viewOrigin(view), fu = u0 + px / view.z, fv = v0 + py / view.z;
+  view.z = z; view.cx = fu - px / view.z + 0.5 / view.z; view.cy = fv - py / view.z + 0.5 / view.z; clampView(); redraw();
+}
+function mapFrac(ev) { const rc = $("#map").getBoundingClientRect(), k = 1200 / rc.width; return [((ev.clientX - rc.left) * k - MAP.x) / MAP.w, ((ev.clientY - rc.top) * k - MAP.y) / MAP.h]; }
+const inMap = ([x, y]) => x >= 0 && x <= 1 && y >= 0 && y <= 1;
+function panBy(dx, dy) { view.cx += dx / view.z; view.cy += dy / view.z; clampView(); redraw(); }          // dx, dy: fractions of the visible width / height
+$("#map").addEventListener("wheel", ev => {
+  ev.preventDefault();
+  const f = mapFrac(ev), s = Math.exp(-ev.deltaY * (ev.deltaMode === 1 ? 0.05 : ev.ctrlKey ? 0.01 : 0.0015));
+  zoomTo(view.z * s, ...(inMap(f) ? f : [0.5, 0.5]));
+}, { passive: false });
+$("#map").addEventListener("dblclick", ev => { const f = mapFrac(ev); if (inMap(f)) zoomTo(view.z * 2, ...f); });
+const ptrs = new Map(); let pinch = null, downAt = null;
+$("#map").addEventListener("pointerdown", ev => {
+  if (ev.pointerType === "mouse" && ev.button !== 0) return;
+  ptrs.set(ev.pointerId, [ev.clientX, ev.clientY]); downAt = [ev.clientX, ev.clientY];
+  if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; pinch = { d: Math.hypot(a[0] - b[0], a[1] - b[1]), z: view.z }; }
+});
+$("#map").addEventListener("pointermove", ev => {
+  const prev = ptrs.get(ev.pointerId); if (!prev) return;
+  ptrs.set(ev.pointerId, [ev.clientX, ev.clientY]);
+  const cv = $("#map"), rc = cv.getBoundingClientRect(), k = 1200 / rc.width;
+  if (ptrs.size === 2 && pinch) {
+    const [a, b] = [...ptrs.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]), mid = { clientX: (a[0] + b[0]) / 2, clientY: (a[1] + b[1]) / 2 }, f = mapFrac(mid);
+    dragged = true; zoomTo(pinch.z * d / pinch.d, ...(inMap(f) ? f : [0.5, 0.5])); return;
+  }
+  if (ptrs.size !== 1 || view.z === 1) return;
+  if (!dragged && Math.hypot(ev.clientX - downAt[0], ev.clientY - downAt[1]) < 5) return;                     // a click, not a drag
+  dragged = true; cv.classList.add("drag"); $("#tip").hidden = true;
+  panBy(-(ev.clientX - prev[0]) * k / MAP.w, -(ev.clientY - prev[1]) * k / MAP.h);
+});
+const endPtr = ev => { ptrs.delete(ev.pointerId); if (ptrs.size < 2) pinch = null; if (!ptrs.size) { $("#map").classList.remove("drag"); setTimeout(() => { dragged = false; }, 0); } };
+$("#map").addEventListener("pointerup", endPtr); $("#map").addEventListener("pointercancel", endPtr);
+$("#z-in").addEventListener("click", () => zoomTo(view.z * 1.6)); $("#z-out").addEventListener("click", () => zoomTo(view.z / 1.6));
+$("#z-reset").addEventListener("click", () => { Object.assign(view, { z: 1, cx: 0.5, cy: 0.5 }); redraw(); });
+$("#z-cells").addEventListener("click", () => { view.cells = !view.cells; redraw(); });
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => chart());
 window.addEventListener("hashchange", () => { readHash(); render(); });
 
@@ -895,6 +1036,8 @@ window.addEventListener("hashchange", () => { readHash(); render(); });
     state.group = prod().group;
     readHash();
     overlay = new Image(); overlay.src = `${D.overlay}?v=${D.version}`; await overlay.decode().catch(() => {});
+    loadLines();                                            // the vector boundaries for zoomed views (not awaited: only needed once the user zooms)
+    updateZoomUI();
     const bits = await inflate(`data/land.bin?v=${D.version}`), n = D.grid.nx * D.grid.ny; landMask = new Uint8Array(n);
     for (let i = 0; i < n; i++) landMask[i] = (bits[i >> 3] >> (7 - (i & 7))) & 1;
     state.frame = Math.min(state.frame, D.frames.length - 1);

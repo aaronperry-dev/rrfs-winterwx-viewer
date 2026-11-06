@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import logging
 import multiprocessing as mp
@@ -22,7 +23,7 @@ import numpy as np
 
 from . import encode, grib, pipeline
 from .catalog import BY_KEY, GROUPS, PRODUCTS, STORE
-from .config import FILE_2D, MEMBERS, frames
+from .config import EDGE_M, FILE_2D, MEMBERS, MIN_SEP_M, frames
 from .s3 import S3Source
 
 log = logging.getLogger("rrfs_viewer")
@@ -216,6 +217,8 @@ def main(argv=None) -> int:
     layers = boundaries.load(basemap.PROJ)
     overlay_bytes = basemap.render_overlay(layers, out / "overlay.png")
     (out / "data" / "land.bin").write_bytes(encode.pack_mask(basemap.land_mask(layers, rg.lon, rg.lat)))
+    lines = basemap.overlay_lines(layers)                   # the same boundaries as vectors: the page draws these instead of the PNG once zoomed in
+    (out / "data" / "lines.bin").write_bytes(gzip.compress(json.dumps(lines, separators=(",", ":")).encode(), 9, mtime=0))
 
     manifest = {
         "generated": iso(now), "version": int(now.timestamp()), "demo": args.demo, "code": code,
@@ -224,7 +227,9 @@ def main(argv=None) -> int:
         "grid": {"nx": nx, "ny": ny}, "overlay": "overlay.png", "overlay_px": list(basemap.OVERLAY_PX),
         "sources": {s: {"label": SOURCE_LABELS[s], "ok": bool(results.get(s, ({}, {}))[0])} for s in ["refs", *MEMBERS]},
         "members": list(MEMBERS), "groups": list(GROUPS),
-        "stations": basemap.station_layout(rg.x, rg.y),
+        "stations": basemap.station_layout(rg.x, rg.y), "stations_all": basemap.station_all(rg.x, rg.y), "lines": "data/lines.bin",
+        "station_px": {"sep": round(MIN_SEP_M / ((basemap.EXTENT[1] - basemap.EXTENT[0]) / basemap.OVERLAY_PX[0]), 3),
+                       "edge": round(EDGE_M / ((basemap.EXTENT[1] - basemap.EXTENT[0]) / basemap.OVERLAY_PX[0]), 3)},
         "products": [{
             "key": p.key, "label": p.label, "title": p.map_title, "group": p.group, "unit": p.unit, "kind": p.kind,
             "desc": p.desc, "decimals": p.decimals, "dtype": p.dtype, "lo": p.lo, "step": p.step, "refs": p.refs,
