@@ -229,7 +229,7 @@
         <div class="sublabel">Show one member alone</div><div class="btns five" id="seg-single" role="group" aria-label="Single member"></div></div></div>
       <div class="panel"><h2>Other Views</h2><div class="body"><div class="btns" id="seg-layout" role="group" aria-label="Layout"></div></div></div>
       <div class="panel" id="p-gis"><h2>Map Layers</h2><div class="body"><div class="rows" id="seg-gis" role="group" aria-label="Map layers"></div>
-        <p class="note">Map view only; these appear in the PNG when switched on. Natural Earth 1:10m, so roads are generalised and the city list is short.</p></div></div>
+        <p class="note">Map view only (the county lines also show on the small maps); everything switched on appears in the PNG. Roads and cities: Natural Earth 1:10m, so roads are generalised. Towns: GeoNames. Peaks: USGS / Wikipedia.</p></div></div>
       <div class="panel"><h2>Export</h2><div class="body"><div class="btns one"><button type="button" id="btn-png" disabled title="Save the current map as a PNG with title, subtitle, init time and valid time">⬇ Download PNG</button></div>
         <p class="note">Map view only. The image has the title, subtitle, init (run) time and valid time on top.</p></div></div>
       <div class="panel" id="p-summary"><h2 id="sum-title">New England land area</h2><div class="body">
@@ -265,7 +265,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const TZ = "America/New_York";
 const MAP = { x: 25, y: 14, w: 1150, h: 742 };            // map frame inside the 1200 x 836 composition (title lives in the page header)
 const state = { group: null, product: "snow_kuchera", mode: "mean", thr: null, win: 0, lpmm: 180, frame: 0, layout: "map", on: {}, point: null };
-let D, overlay, landMask, playTimer = null, speed = 3;
+let D, overlay, countiesImg, landMask, playTimer = null, speed = 3;
 const view = { z: 1, cx: 0.5, cy: 0.5, cells: false };     // zoom and the centre of the visible part of the frame (0..1 across the frame, y down); cells: nearest 3 km cell instead of interpolation
 const ZMAX = 12;
 const store = new Map();                                    // "product.source" -> Promise<{u: Uint8Array|Uint16Array, p}>
@@ -609,7 +609,7 @@ async function loadLines() {
   try {
     const j = JSON.parse(new TextDecoder().decode(await inflate(`${D.lines}?v=${D.version}`))), paths = {};
     for (const name of j.order) paths[name] = decodePolys(j.lines[name], j.units);
-    LINES = { order: j.order, styles: j.styles, frame: j.frame, paths };
+    LINES = { order: j.order, styles: j.styles, colors: j.colors || {}, counties: j.counties || [], frame: j.frame, paths };
     if (view.z > 1) redraw();
   } catch (e) { LINES = null; }                             // without them the PNG is simply stretched
 }
@@ -638,15 +638,25 @@ function drawOverlay(ctx, x, y, w, h, vw, fast = false) {                 // w /
     if (overlay.complete) ctx.drawImage(overlay, u0 * overlay.naturalWidth, v0 * overlay.naturalHeight, overlay.naturalWidth / z, overlay.naturalHeight / z, x, y, w, h);
     return;
   }
-  drawLayer(ctx, "lines", x, y, w, h, vw, "", fast, c => strokeLines(c, 0, 0, w, h, vw));
+  drawLayer(ctx, "lines", x, y, w, h, vw, "", fast, c => strokeLines(c, 0, 0, w, h, vw, false));
   ctx.fillStyle = "#000"; ctx.fillRect(x, y, 2 * sc, h); ctx.fillRect(x + w - sc, y, sc, h); ctx.fillRect(x, y, w, sc); ctx.fillRect(x, y + h - sc, w, sc);   // the map frame, as in the PNG
 }
-function strokeLines(ctx, x, y, w, h, vw) {
+function drawCounties(ctx, x, y, w, h, vw, fast = false) {   // the light-gray county lines: their own layer (Map Layers toggle), under the roads and the other boundaries
+  if (!gisOn.k) return;
+  if (vw.z === 1) { if (countiesImg && countiesImg.complete) ctx.drawImage(countiesImg, x, y, w, h); return; }
+  if (!LINES) {
+    if (countiesImg && countiesImg.complete) { const { u0, v0 } = viewOrigin(vw), z = vw.z; ctx.drawImage(countiesImg, u0 * countiesImg.naturalWidth, v0 * countiesImg.naturalHeight, countiesImg.naturalWidth / z, countiesImg.naturalHeight / z, x, y, w, h); }
+    return;
+  }
+  drawLayer(ctx, "counties", x, y, w, h, vw, "", fast, c => strokeLines(c, 0, 0, w, h, vw, true));
+}
+function strokeLines(ctx, x, y, w, h, vw, counties) {   // counties = true: only the county layers; false: all the others
   const { u0, v0 } = viewOrigin(vw), z = vw.z, sc = w / MAP.w, sx = w * z, sy = h * z, ox = x - u0 * sx, oy = y - v0 * sy, u1 = u0 + 1 / z, v1 = v0 + 1 / z;
   ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
-  ctx.lineJoin = "round"; ctx.lineCap = "butt"; ctx.strokeStyle = "#000";
+  ctx.lineJoin = "round"; ctx.lineCap = "butt";
   for (const name of LINES.order) {
-    const [lw, alpha] = LINES.styles[name]; ctx.lineWidth = lw * sc; ctx.globalAlpha = alpha;
+    if (LINES.counties.includes(name) !== counties) continue;
+    const [lw, alpha] = LINES.styles[name]; ctx.lineWidth = lw * sc; ctx.globalAlpha = alpha; ctx.strokeStyle = LINES.colors[name] || "#000";
     for (const { a, bb } of LINES.paths[name]) {
       if (bb[1] < u0 || bb[0] > u1 || bb[3] < v0 || bb[2] > v1) continue;
       ctx.beginPath(); ctx.moveTo(ox + a[0] * sx, oy + a[1] * sy);
@@ -657,9 +667,10 @@ function strokeLines(ctx, x, y, w, h, vw) {
   ctx.restore();
 }
 // ---- optional GIS layers (Map Layers panel): highways with route labels and cities, from data/gis.bin, loaded the first time one is switched on
-const GIS_KEYS = [["i", "Interstates"], ["u", "US highways"], ["s", "State highways"], ["l", "Route labels"], ["c", "Cities"]];
-const gisOn = { i: false, u: false, s: false, l: true, c: false };
-const gisAny = () => gisOn.i || gisOn.u || gisOn.s || gisOn.c;
+const GIS_KEYS = [["k", "Counties"], ["i", "Interstates"], ["u", "US highways"], ["s", "State highways"], ["l", "Route labels"], ["c", "Cities"], ["t", "Towns"], ["n", "City/town names"], ["p", "Peaks"]];
+const GIS_DEFAULT = { k: true, i: false, u: false, s: false, l: true, c: false, t: false, n: true, p: false };
+const gisOn = { ...GIS_DEFAULT };
+const gisAny = () => gisOn.i || gisOn.u || gisOn.s || gisOn.c || gisOn.t || gisOn.p;          // layers that need data/gis.bin (the counties do not)
 const ROADS = [["state", "s", "#4d5560", 0.85, 2.3], ["us", "u", "#5e35b1", 1.25, 3.0], ["interstate", "i", "#b00020", 1.8, 3.8]];   // [layer, toggle, colour, width px, casing px] at the full-size map
 let GIS = null, gisLoading = false;
 async function loadGis() {
@@ -668,7 +679,7 @@ async function loadGis() {
   try {
     const j = JSON.parse(new TextDecoder().decode(await inflate(`${D.gis}?v=${D.version}`))), roads = {};
     for (const k of Object.keys(j.roads)) roads[k] = decodePolys(j.roads[k], j.units);
-    GIS = { roads, labels: j.labels, cities: j.cities };
+    GIS = { roads, labels: j.labels, cities: j.cities, towns: j.towns || [], peaks: j.peaks || [] };
     redraw();
   } catch (e) { GIS = null; }
   gisLoading = false;
@@ -700,28 +711,64 @@ function strokeRoads(ctx, x, y, w, h, vw) {
 function drawGisLabels(ctx, x, y, w, h, vw, stationList) {   // cities, then route labels; both avoid the station values and each other
   if (!GIS || !gisAny()) return;
   const { u0, v0 } = viewOrigin(vw), z = vw.z, k = w / MAP.w, sc = k * gisScale(vw), pos = (fx, fy) => [x + (fx - u0) * z * w, y + (fy - v0) * z * h];
-  const taken = [], free = b => b[0] >= x + 2 && b[2] <= x + w - 2 && b[1] >= y + 2 && b[3] <= y + h - 2 && !taken.some(t => b[0] < t[2] && b[2] > t[0] && b[1] < t[3] && b[3] > t[1]);
-  for (const s of stationList) { const [px, py] = pos(s.fx, s.fy); taken.push([px - 17 * k, py - 8 * k, px + 17 * k, py + 8 * k]); }
+  const taken = [], stn = [], hit = (b, list) => list.some(t => b[0] < t[2] && b[2] > t[0] && b[1] < t[3] && b[3] > t[1]);
+  const free = b => b[0] >= x + 2 && b[2] <= x + w - 2 && b[1] >= y + 2 && b[3] <= y + h - 2 && !hit(b, taken) && !hit(b, stn);      // text and dots keep clear of the station values and each other
+  for (const s of stationList) { const [px, py] = pos(s.fx, s.fy); stn.push([px - 17 * k, py - 8 * k, px + 17 * k, py + 8 * k]); }
   ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip(); ctx.textBaseline = "middle"; ctx.lineJoin = "round";
+  const fit = (px, py, r, lines) => {                       // a text block (lines of [text, size, weight, colour]) beside a marker: right, left, above or below; null when none is free
+    let tw = 0, th = 0; const gap = r + 2 * sc, hs = [];
+    for (const [t, fs, wt] of lines) { ctx.font = `${wt} ${fs}px system-ui, sans-serif`; tw = Math.max(tw, ctx.measureText(t).width); hs.push(fs * 1.12); th += fs * 1.12; }
+    for (const [bx, by, al] of [[px + gap, py - th / 2, "left"], [px - gap - tw, py - th / 2, "right"], [px - tw / 2, py - gap - th, "center"], [px - tw / 2, py + gap, "center"]]) {
+      const b = [bx - 1, by, bx + tw + 1, by + th];
+      if (!free(b)) continue;
+      return { box: b, draw() {
+        let yy = by; ctx.textAlign = al;
+        lines.forEach(([t, fs, wt, col], i) => {
+          ctx.font = `${wt} ${fs}px system-ui, sans-serif`; const tx = al === "left" ? bx : al === "right" ? bx + tw : bx + tw / 2, ty = yy + hs[i] * 0.52;
+          ctx.lineWidth = Math.max(2.4, fs * 0.3); ctx.strokeStyle = "#fff"; ctx.strokeText(t, tx, ty); ctx.fillStyle = col; ctx.fillText(t, tx, ty); yy += hs[i];
+        });
+      } };
+    }
+    return null;
+  };
   if (gisOn.c) {
-    const fs = 12.5 * sc; ctx.font = `600 ${fs}px system-ui, sans-serif`;
+    const fs = 12.5 * sc;
     for (const [name, fx, fy, cap] of GIS.cities) {
       const [px, py] = pos(fx, fy); if (px < x - 20 || px > x + w + 20 || py < y - 20 || py > y + h + 20) continue;
-      const r = (cap ? 6.2 : 3.6) * sc, tw = ctx.measureText(name).width, th = fs * 1.1, g = r + 2 * sc;
-      const spots = [[px + g, py - th * 0.15, "left"], [px - g, py - th * 0.15, "right"], [px - tw / 2, py - g - th * 0.5, "left"], [px - tw / 2, py + g + th * 0.5, "left"]];
-      let placed = null;
-      for (const [tx, ty, al] of spots) {
-        const bx = al === "left" ? tx : tx - tw, b = [bx - 1, ty - th / 2, bx + tw + 1, ty + th / 2];
-        if (free(b)) { placed = [tx, ty, al, b]; break; }
-      }
-      const mk = [px - r, py - r, px + r, py + r];
-      if (placed) taken.push(placed[3]); taken.push(mk);
+      const r = (cap ? 6.2 : 3.6) * sc, f = gisOn.n ? fit(px, py, r, [[name, fs, 600, "#111"]]) : null;
+      if (f) taken.push(f.box); taken.push([px - r, py - r, px + r, py + r]);
       ctx.fillStyle = "#111"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.6 * sc;
       if (cap) {                                              // state capitals: a star
         ctx.beginPath(); for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, q = i % 2 ? r * 0.45 : r; ctx[i ? "lineTo" : "moveTo"](px + q * Math.cos(a), py + q * Math.sin(a)); } ctx.closePath();
       } else { ctx.beginPath(); ctx.arc(px, py, r, 0, 7); }
       ctx.stroke(); ctx.fill();
-      if (placed) { ctx.textAlign = placed[2]; ctx.lineWidth = 3.4 * sc; ctx.strokeStyle = "#fff"; ctx.strokeText(name, placed[0], placed[1]); ctx.fillStyle = "#111"; ctx.fillText(name, placed[0], placed[1]); }
+      if (f) f.draw();
+    }
+  }
+  if (gisOn.p) {                                            // mountain peaks: a triangle, the name and the summit elevation below it
+    for (const [name, ft, fx, fy, mz] of GIS.peaks) {
+      if (mz > z + 1e-6) continue;
+      const [px, py] = pos(fx, fy); if (px < x || px > x + w || py < y || py > y + h) continue;
+      const r = 5 * sc, mk = [px - r, py - r, px + r, py + r]; if (mz > 1 && hit(mk, taken)) continue;      // the top tier always shows (even under a station value); lesser summits wait for room
+      const f = fit(px, py, r, [[name, 11.5 * sc, 700, "#4e3512"], [`${ft.toLocaleString("en-US")} ft`, 10.5 * sc, 600, "#6f5430"]]);      // the triangle always shows (a summit is a place in its own right); the name only where it fits
+      taken.push(mk); if (f) taken.push(f.box);
+      ctx.beginPath(); ctx.moveTo(px, py - r * 1.05); ctx.lineTo(px + r, py + r * 0.8); ctx.lineTo(px - r, py + r * 0.8); ctx.closePath();
+      ctx.fillStyle = "#7b4f1d"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.4 * sc; ctx.stroke(); ctx.fill();
+      if (f) f.draw();
+    }
+  }
+  if (gisOn.t) {                                            // towns (GeoNames), biggest first; each appears from its own zoom
+    const r = 2.5 * sc; let n = 0;
+    for (const [name, fx, fy, mz] of GIS.towns) {
+      if (mz > z + 1e-6) continue;
+      const [px, py] = pos(fx, fy); if (px < x || px > x + w || py < y || py > y + h) continue;
+      const mk = [px - r, py - r, px + r, py + r]; if (!free(mk)) continue;
+      taken.push(mk);
+      const f = gisOn.n ? fit(px, py, r, [[name, 11 * sc, 600, "#2b2f33"]]) : null;
+      if (f) taken.push(f.box);
+      ctx.beginPath(); ctx.arc(px, py, r, 0, 7); ctx.fillStyle = "#3a4047"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.1 * sc; ctx.stroke(); ctx.fill();
+      if (f) f.draw();
+      if (++n >= 450) break;
     }
   }
   if (gisOn.l) {
@@ -743,8 +790,10 @@ function drawGisLabels(ctx, x, y, w, h, vw, stationList) {   // cities, then rou
   ctx.restore();
 }
 function buildGisPanel() {
-  const draw = () => seg($("#seg-gis"), GIS_KEYS.map(([k, label]) => ({ value: k, label, on: gisOn[k], disabled: k === "l" && !(gisOn.i || gisOn.u || gisOn.s),
-    title: k === "l" ? "Route numbers on the highways (more appear as you zoom in)" : undefined })),
+  const TITLES = { k: "County lines (light gray)", l: "Route numbers on the highways (more appear as you zoom in)", t: "Smaller towns and villages (more appear as you zoom in)",
+    n: "Names beside the city and town dots", p: "Mountain peaks with their summit elevation" };
+  const draw = () => seg($("#seg-gis"), GIS_KEYS.map(([k, label]) => ({ value: k, label, on: gisOn[k], title: TITLES[k],
+    disabled: (k === "l" && !(gisOn.i || gisOn.u || gisOn.s)) || (k === "n" && !(gisOn.c || gisOn.t)) })),
     null, k => { gisOn[k] = !gisOn[k]; if (gisAny()) loadGis(); draw(); redraw(); }, true);
   draw(); gisPanelRefresh = draw;
 }
@@ -765,7 +814,8 @@ function drawMain(ctx, v, mode, markers, vw = view, ds = 1) {
   const W = 1200, H = 836, { u0, v0 } = viewOrigin(vw), z = vw.z;
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
   paintField(ctx, MAP.x, MAP.y, MAP.w, MAP.h, v.values, v.style, vw, ds);
-  drawRoads(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);           // optional layers: highways under the boundary lines, cities and route labels over them
+  drawCounties(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);        // optional layers: county lines and highways under the boundary lines; cities, towns, peaks and route labels over them
+  drawRoads(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);
   drawOverlay(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);
   const stationList = zoomStations(vw);
   drawGisLabels(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, stationList);
@@ -787,7 +837,8 @@ function drawMain(ctx, v, mode, markers, vw = view, ds = 1) {
     }
   }
   drawLegend(ctx, 48, MAP.y + MAP.h + 22, 735, 28, v.style, 12.5);
-  if (gisAny()) { ctx.font = "11.5px system-ui, sans-serif"; ctx.textAlign = "right"; ctx.textBaseline = "alphabetic"; ctx.fillStyle = "#59636e"; ctx.fillText("Roads and cities: Natural Earth (generalised)", W - 25, MAP.y + MAP.h + 22); }
+  const credit = [(gisOn.i || gisOn.u || gisOn.s || gisOn.c) && "Roads, cities: Natural Earth (generalised)", gisOn.t && "Towns: GeoNames (CC BY 4.0)", gisOn.p && "Peaks: USGS / Wikipedia"].filter(Boolean).join(" · ");
+  if (credit) { ctx.font = "11.5px system-ui, sans-serif"; ctx.textAlign = "right"; ctx.textBaseline = "alphabetic"; ctx.fillStyle = "#59636e"; ctx.fillText(credit, W - 25, MAP.y + MAP.h + 22); }
   bold(ctx, W - 25, MAP.y + MAP.h + 42, "aaronperry-dev.github.io", " (Aaron Perry)", 13, true);
 }
 
@@ -876,7 +927,7 @@ async function renderStamps(token, p) {
     viewField(m, state.frame, { tok: token }).then(v => {
       if (token !== renderToken) return; const c = cv.getContext("2d"); c.fillStyle = "#fff"; c.fillRect(0, 0, 575, 371);
       if (v.error) { c.fillStyle = "#59636e"; c.font = "15px system-ui"; c.textAlign = "center"; c.fillText(m === "refs" ? "not in the REFS mean file" : "no data", 287, 190); return; }
-      paintField(c, 0, 0, 575, 371, v.values, v.style); drawOverlay(c, 0, 0, 575, 371, view);
+      paintField(c, 0, 0, 575, 371, v.values, v.style); drawCounties(c, 0, 0, 575, 371, view); drawOverlay(c, 0, 0, 575, 371, view);
       if (v.style !== p) {                                  // spread / probability use their own scale: label + mini colour bar
         const c2 = cv.getContext("2d"), t = m === "prob" ? `P(${p.thr_dir === "le" ? "≤" : "≥"}${v.thr} ${p.unit})` : `σ (${p.unit})`;
         c2.font = "700 15px system-ui"; const tw = c2.measureText(t).width + 16;
@@ -1056,11 +1107,12 @@ function readHash() {
   Object.assign(view, { z: 1, cx: 0.5, cy: 0.5, cells: false });
   if (z > 1 && cx >= 0 && cx <= 1 && cy >= 0 && cy <= 1) { Object.assign(view, { z, cx, cy, cells: c === 1 }); clampView(); }
   else if (c === 1) view.cells = true;
-  if (gl !== undefined) { for (const [k] of GIS_KEYS) gisOn[k] = gl.includes(k); if (gisAny()) loadGis(); gisPanelRefresh(); }   // 7th part: the letters of the layers that are on
+  if (gl !== undefined) { for (const [k] of GIS_KEYS) gisOn[k] = gl.includes(k); if (gisAny()) loadGis(); gisPanelRefresh(); }   // 7th part: the letters of the layers that are on ("-" = none); absent = the defaults
 }
 const writeHash = () => {
   const vw = view.z > 1 || view.cells ? `${view.z.toFixed(2)},${view.cx.toFixed(4)},${view.cy.toFixed(4)}${view.cells ? ",1" : ""}` : "";
-  const gl = gisAny() ? GIS_KEYS.filter(([k]) => gisOn[k]).map(([k]) => k).join("") : "";
+  const letters = GIS_KEYS.filter(([k]) => gisOn[k]).map(([k]) => k).join(""), dflt = GIS_KEYS.filter(([k]) => GIS_DEFAULT[k]).map(([k]) => k).join("");
+  const gl = letters === dflt ? "" : letters || "-";            // only a change from the defaults goes into the link
   try { history.replaceState(null, "", `#${state.product}/${state.mode}/${state.frame}/${state.win}/${state.layout}` + (vw || gl ? `/${vw}` : "") + (gl ? `/${gl}` : "")); }
   catch (e) { /* Safari throws past 100 URL changes in 30 s: not worth losing a repaint over */ }
 };
@@ -1191,6 +1243,7 @@ window.addEventListener("hashchange", () => { readHash(); render(); });
     state.group = prod().group;
     readHash();
     overlay = new Image(); overlay.src = `${D.overlay}?v=${D.version}`; await overlay.decode().catch(() => {});
+    if (D.counties) { countiesImg = new Image(); countiesImg.src = `${D.counties}?v=${D.version}`; await countiesImg.decode().catch(() => {}); }      // the light-gray county lines, a layer of their own
     loadLines();                                            // the vector boundaries for zoomed views (not awaited: only needed once the user zooms)
     if (D.gis) buildGisPanel(); else $("#p-gis").hidden = true;
     updateZoomUI();

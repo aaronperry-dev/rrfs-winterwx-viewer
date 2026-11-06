@@ -56,7 +56,9 @@ check_frame_inside_bbox()
 
 # Line styles of the overlay: (width in points at DPI, alpha).  One table drives both the PNG below and the vector lines the page
 # draws when zoomed in, so the two look alike.  Drawn in this order.
-LINE_STYLES = {"counties": (0.45, 0.85), "lakes": (1.0, 1.0), "states": (1.8, 1.0), "coast": (1.2, 1.0)}
+LINE_STYLES = {"counties": (0.45, 0.9), "lakes": (1.0, 1.0), "states": (1.8, 1.0), "coast": (1.2, 1.0)}
+LINE_COLORS = {"counties": "#b4b4b4"}          # light gray; every other layer is black
+COUNTY_LAYERS = ("counties",)                  # drawn as their own overlay (a toggle on the page) under the roads; the rest is the main overlay
 FRAME_LW_PT = 1.6
 LINE_UNITS = 32768                 # vector coordinates are integers in 1/32768 of the frame (0..1 across the map); 0.035 px at 1x
 LINE_MARGIN = 0.06                 # lines are kept this far beyond each frame edge so a zoomed view never shows a clip edge
@@ -90,7 +92,8 @@ def frame_polyline(c: np.ndarray) -> list[int] | None:
 def overlay_lines(layers: bnd.Boundaries) -> dict:
     """The overlay's lines as integer polylines in frame units, for the page to draw at any zoom.
 
-    ``{"units": 32768, "styles": {layer: [width_px, alpha]}, "order": [...], "lines": {layer: [[x0, y0, dx1, dy1, ...], ...]}}`` -
+    ``{"units": 32768, "styles": {layer: [width_px, alpha]}, "colors": {layer: "#rrggbb"}, "counties": [layers of the counties overlay], "order": [...],
+    "lines": {layer: [[x0, y0, dx1, dy1, ...], ...]}}`` -
     each polyline is its first vertex followed by the vertex-to-vertex steps; x runs left to right and y top to bottom, both 0..1 across the frame.
     """
     x0, x1, y0, y1 = EXTENT
@@ -108,25 +111,28 @@ def overlay_lines(layers: bnd.Boundaries) -> dict:
                     polys.append(p)
         out[name] = polys
     return {"units": LINE_UNITS, "order": list(LINE_STYLES), "frame": round(FRAME_LW_PT * DPI / 72.0, 4),
-            "styles": {k: [round(lw * DPI / 72.0, 4), a] for k, (lw, a) in LINE_STYLES.items()}, "lines": out}
+            "styles": {k: [round(lw * DPI / 72.0, 4), a] for k, (lw, a) in LINE_STYLES.items()},
+            "colors": {k: LINE_COLORS.get(k, "#000000") for k in LINE_STYLES}, "counties": list(COUNTY_LAYERS), "lines": out}
 
 
-def render_overlay(layers: bnd.Boundaries, out: Path) -> int:
-    """Transparent boundary overlay exactly the size of the map frame (1150 x 742 px)."""
+def render_overlay(layers: bnd.Boundaries, out: Path, names: tuple | None = None, frame: bool = True) -> int:
+    """Transparent boundary overlay exactly the size of the map frame (1150 x 742 px): the ``names`` layers (default: all but the counties) and the black frame."""
+    names = tuple(n for n in LINE_STYLES if n not in COUNTY_LAYERS) if names is None else names
     fig = plt.figure(figsize=(MAP_W_IN, MAP_H_IN), dpi=DPI)
     fig.patch.set_alpha(0)
     ax = fig.add_axes([0, 0, 1, 1], projection=PROJ)
     ax.patch.set_alpha(0)
     ax.set_extent(list(EXTENT), crs=PROJ)
     ax.spines["geo"].set_linewidth(FRAME_LW_PT)
-    ax.spines["geo"].set_edgecolor("black")
+    ax.spines["geo"].set_edgecolor("black" if frame else "none")
 
     def add(geoms, **kw):
         if geoms:
             ax.add_feature(ShapelyFeature(geoms, PROJ, facecolor="none", **kw))
 
     for z, (name, (lw, alpha)) in zip((2, 3, 4, 4), LINE_STYLES.items()):
-        add(getattr(layers, name), edgecolor="black", linewidth=lw, alpha=alpha, zorder=z)
+        if name in names:
+            add(getattr(layers, name), edgecolor=LINE_COLORS.get(name, "black"), linewidth=lw, alpha=alpha, zorder=z)
     fig.canvas.draw()
     rgba = np.asarray(fig.canvas.buffer_rgba()).copy()
     plt.close(fig)

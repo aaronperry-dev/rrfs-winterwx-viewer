@@ -1,7 +1,9 @@
-"""Optional GIS layers for the map - highways with route labels and cities - as vectors in frame units.
+"""Optional GIS layers for the map - highways with route labels, cities, towns and mountain peaks - as vectors in frame units.
 
-Source: Natural Earth 1:10m ``roads_north_america`` and ``populated_places_simple`` (public domain), the same download path as the
-boundaries.  The page draws these on request (toggles in the "Map Layers" panel), at any zoom, and in the PNG export.  The roads are
+Sources: Natural Earth 1:10m ``roads_north_america`` and ``populated_places_simple`` (public domain), the same download path as the
+boundaries; ``data/places.csv`` (towns: GeoNames populated places of 1,000 people or more in New England, CC BY 4.0, cleaned of
+neighbourhoods and census pieces); ``data/peaks.csv`` (prominent summits: name, state, position, elevation in feet, importance tier).
+The page draws these on request (toggles in the "Map Layers" panel), at any zoom, and in the PNG export.  The roads are
 generalised (about 1:10 million), so at high zoom they follow the real road only roughly; the city list is short (28 places).
 
 ``data/gis.bin`` is gzip JSON::
@@ -9,13 +11,17 @@ generalised (about 1:10 million), so at high zoom they follow the real road only
     {"units": 32768,
      "roads":  {"interstate": [[x0, y0, dx1, dy1, ...], ...], "us": [...], "state": [...]},   # as the boundary lines in lines.bin
      "labels": [[text, class, fx, fy, min_zoom], ...],       # class 0 interstate, 1 US route, 2 state route; sorted by (min_zoom, longest route first)
-     "cities": [[name, fx, fy, is_capital], ...]}            # capitals first, then by population
+     "cities": [[name, fx, fy, is_capital], ...],            # capitals first, then by population
+     "towns":  [[name, fx, fy, min_zoom], ...],              # by population, largest first; min_zoom is lower the bigger the town
+     "peaks":  [[name, feet, fx, fy, min_zoom], ...]}        # highest first within a tier
 
 ``fx``/``fy`` are fractions of the map frame (0..1, y downward).
 """
 from __future__ import annotations
 
+import csv
 import logging
+from pathlib import Path
 
 import numpy as np
 import shapely
@@ -37,6 +43,10 @@ NE_NAMES = {"Maine", "New Hampshire", "Vermont", "Massachusetts", "Connecticut",
 LABEL_SPACING_M = 70_000.0          # further labels of one route are this far apart along it
 MIN_PIECE_M = 8_000.0               # shorter pieces of a route get no label
 LABEL_ZOOM = {"interstate": (1.0, 1.7, 2.6, 3.6, 4.8), "us": (1.5, 2.2, 3.1, 4.1, 5.2), "state": (2.4, 3.2, 4.2, 5.2, 6.2)}   # min zoom of a route's 1st, 2nd... label
+DATA_DIR = Path(__file__).parent / "data"
+TOWN_ZOOM = ((25_000, 1.6), (10_000, 2.4), (5_000, 3.2), (2_500, 4.2), (0, 5.6))      # (population at least, min zoom of its dot and name)
+ZMAX_TOWN = max(z for _, z in TOWN_ZOOM)                                              # must stay below the page's maximum zoom (12)
+PEAK_ZOOM = {1: 1.0, 2: 2.2, 3: 3.6}                                                  # importance tier -> min zoom
 LABEL_EDGE = 0.02                   # labels keep this far (frame fraction) from the frame edge
 
 
@@ -127,6 +137,42 @@ def load_cities(places_shp: str | None = None) -> list:
     return [r[2] for r in rows]
 
 
+def _frac(lon: float, lat: float):
+    """Position in the frame as fractions (x right, y down), or None outside it."""
+    x0, x1, y0, y1 = basemap.EXTENT
+    px, py = basemap.PROJ.transform_point(lon, lat, basemap.PC)
+    if not (x0 <= px <= x1 and y0 <= py <= y1):
+        return None
+    return round(float((px - x0) / (x1 - x0)), 5), round(float((y1 - py) / (y1 - y0)), 5)
+
+
+def load_towns(cities: list, path: Path | None = None) -> list:
+    """Towns from ``places.csv`` that are in the frame and not one of the (separately listed) cities, largest first."""
+    same = [(c[0].lower(), c[1], c[2]) for c in cities]
+    out = []
+    with open(path or DATA_DIR / "places.csv", newline="") as f:
+        rows = sorted(csv.DictReader(f), key=lambda r: -int(r["pop"]))
+    for r in rows:
+        pos = _frac(float(r["lon"]), float(r["lat"]))
+        if pos is None or any(n == r["name"].lower() and abs(fx - pos[0]) < 0.012 and abs(fy - pos[1]) < 0.012 for n, fx, fy in same):      # (a town of the same name elsewhere stays)
+            continue
+        pop = int(r["pop"])
+        out.append([r["name"], pos[0], pos[1], next(z for lo, z in TOWN_ZOOM if pop >= lo)])
+    return out
+
+
+def load_peaks(path: Path | None = None) -> list:
+    out = []
+    with open(path or DATA_DIR / "peaks.csv", newline="") as f:
+        for r in csv.DictReader(f):
+            pos = _frac(float(r["lon"]), float(r["lat"]))
+            if pos is not None:
+                out.append([int(r["tier"]), -int(r["feet"]), [r["name"], int(r["feet"]), pos[0], pos[1], PEAK_ZOOM[int(r["tier"])]]])
+    out.sort(key=lambda t: t[:2])
+    return [t[2] for t in out]
+
+
 def build(roads_shp: str | None = None, places_shp: str | None = None) -> dict:
     roads, labels = road_layers(load_roads(roads_shp))
-    return {"units": basemap.LINE_UNITS, "roads": roads, "labels": labels, "cities": load_cities(places_shp)}
+    cities = load_cities(places_shp)
+    return {"units": basemap.LINE_UNITS, "roads": roads, "labels": labels, "cities": cities, "towns": load_towns(cities), "peaks": load_peaks()}

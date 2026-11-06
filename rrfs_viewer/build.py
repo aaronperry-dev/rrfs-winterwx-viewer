@@ -216,6 +216,7 @@ def main(argv=None) -> int:
     from . import basemap, boundaries
     layers = boundaries.load(basemap.PROJ)
     overlay_bytes = basemap.render_overlay(layers, out / "overlay.png")
+    counties_bytes = basemap.render_overlay(layers, out / "counties.png", names=basemap.COUNTY_LAYERS, frame=False)      # light-gray county lines: their own layer, toggled on the page
     (out / "data" / "land.bin").write_bytes(encode.pack_mask(basemap.land_mask(layers, rg.lon, rg.lat)))
     lines = basemap.overlay_lines(layers)                   # the same boundaries as vectors: the page draws these instead of the PNG once zoomed in
     (out / "data" / "lines.bin").write_bytes(gzip.compress(json.dumps(lines, separators=(",", ":")).encode(), 9, mtime=0))
@@ -232,7 +233,7 @@ def main(argv=None) -> int:
         "generated": iso(now), "version": int(now.timestamp()), "demo": args.demo, "code": code,
         "cycle": iso(cycle), "max_fhr": args.max_fhr, "frames": list(F),
         "valid": [iso(cycle + timedelta(hours=h)) for h in F],
-        "grid": {"nx": nx, "ny": ny}, "overlay": "overlay.png", "overlay_px": list(basemap.OVERLAY_PX),
+        "grid": {"nx": nx, "ny": ny}, "overlay": "overlay.png", "counties": "counties.png", "overlay_px": list(basemap.OVERLAY_PX),
         "sources": {s: {"label": SOURCE_LABELS[s], "ok": bool(results.get(s, ({}, {}))[0])} for s in ["refs", *MEMBERS]},
         "members": list(MEMBERS), "groups": list(GROUPS),
         "stations": basemap.station_layout(rg.x, rg.y), "stations_all": basemap.station_all(rg.x, rg.y), "lines": "data/lines.bin", "gis": gis_file,
@@ -246,7 +247,7 @@ def main(argv=None) -> int:
             "pmm": p.pmm, "has1h": p.has1h, "step1h": (p.step1h or p.step) if p.has1h else None,
             "available_1h": avail.get(p.key + "_1h", {}) if p.has1h else {},
         } for p in PRODUCTS],
-        "stats": {"data_bytes": total, "overlay_bytes": overlay_bytes,
+        "stats": {"data_bytes": total, "overlay_bytes": overlay_bytes, "counties_bytes": counties_bytes,
                   "downloaded_bytes": {s: results[s][1]["bytes"] for s in results},
                   "s3_requests": {s: results[s][1]["requests"] for s in results},
                   "refs_accumulation": results.get("refs", ({}, {}))[1].get("mode"),

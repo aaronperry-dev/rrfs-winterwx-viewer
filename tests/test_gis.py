@@ -1,4 +1,5 @@
-"""Highway / city layers (needs the Natural Earth files; skipped offline) and the SLR colour ramp."""
+"""Highway / city / town / peak layers (needs the Natural Earth files; skipped offline) and the SLR colour ramp."""
+import csv
 import gzip
 import json
 
@@ -45,9 +46,49 @@ def test_each_new_england_state_has_cities_and_a_capital(g):
     assert all(0 <= c[1] <= 1 and 0 <= c[2] <= 1 for c in g["cities"])
 
 
+def test_towns_are_new_england_places_smaller_than_the_cities_and_zoom_tiered(g):
+    towns, cities = g["towns"], g["cities"]
+    assert 800 < len(towns) < 1200
+    assert all(0 <= t[1] <= 1 and 0 <= t[2] <= 1 for t in towns)
+    assert not any(t[0] == c[0] and abs(t[1] - c[1]) < 0.012 and abs(t[2] - c[2]) < 0.012 for t in towns for c in cities)      # no town sits on top of a city of its name
+    assert sum(t[0] == "Newport" for t in towns) == 3                                                                    # the NH, VT and ME Newports stay (the RI one is a city)
+    names = {t[0] for t in towns}
+    assert {"West Hartford", "Amherst", "Keene", "Brattleboro", "Stowe", "Kennebunk"} <= names           # smaller places in every state, incl. the "West Hartford" kind
+    assert not names & {"Dorchester", "South Boston", "Jamaica Plain", "North Stamford"}                              # neighbourhoods / census pieces are cleaned out
+    zooms = [t[3] for t in towns]
+    assert zooms == sorted(zooms) and zooms[0] == 1.6 and zooms[-1] == 5.6                                          # biggest first, fewest-zoom first
+    assert gis.ZMAX_TOWN <= 12
+
+
+def test_peaks_have_name_elevation_position_and_tier_zoom(g):
+    peaks = g["peaks"]
+    by = {p[0]: p for p in peaks}
+    assert len(peaks) >= 40 and by["Mount Washington"][1] == 6288 and by["Katahdin"][1] == 5269 and by["Mount Mansfield"][1] == 4395
+    assert all(0 <= p[2] <= 1 and 0 <= p[3] <= 1 and p[4] in gis.PEAK_ZOOM.values() for p in peaks)
+    assert [p[4] for p in peaks] == sorted(p[4] for p in peaks)                      # most important first
+    assert by["Mount Washington"][4] == 1.0 and by["Jerimoth Hill"][4] == max(gis.PEAK_ZOOM.values())
+    assert by["Mount Washington"][2] < by["Katahdin"][2] and by["Katahdin"][3] < by["Mount Washington"][3]            # Katahdin is north-east of Washington (y runs down)
+
+
+def test_peak_and_place_files_sit_inside_their_states():
+    import cartopy.io.shapereader as sr
+    from shapely.geometry import Point
+    from rrfs_viewer import boundaries as bnd
+    try:
+        recs = [r for r in sr.Reader(bnd.natural_earth_path("cultural", "admin_1_states_provinces_lakes")).records() if r.attributes.get("adm0_a3") == "USA"]
+    except Exception as exc:
+        pytest.skip(f"Natural Earth data not available: {exc}")
+    st = {r.attributes["postal"]: r.geometry for r in recs if r.attributes["postal"] in {"ME", "NH", "VT", "MA", "CT", "RI", "NY"}}
+    for path in (gis.DATA_DIR / "peaks.csv", gis.DATA_DIR / "places.csv"):
+        for r in csv.DictReader(open(path)):
+            pt = Point(float(r["lon"]), float(r["lat"]))
+            near = min(st, key=lambda k: st[k].distance(pt))            # (the generalised coast and borders can put a point a couple of km off its state, but never nearer another one)
+            assert near == r["state"] or st[r["state"]].distance(pt) < 0.03, (r["name"], r["state"], near)
+
+
 def test_file_is_json_serialisable_and_modest(g):
     blob = gzip.compress(json.dumps(g, separators=(",", ":")).encode(), 9)
-    assert 50_000 < len(blob) < 900_000
+    assert 50_000 < len(blob) < 900_000 and len(g["towns"]) and len(g["peaks"])
 
 
 def test_slr_ramp_is_colorbrewer_rdylbu_reversed():
