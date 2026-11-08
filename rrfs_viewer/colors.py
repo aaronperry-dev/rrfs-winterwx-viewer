@@ -153,8 +153,10 @@ _SLR_COLORS = ["#a50026", "#d73027", "#f46d43", "#fdae61", "#fee090", "#ffffbf",
 SLR = Style(list(_SLR_LEVELS), [*_SLR_COLORS, _SLR_COLORS[-1]], list(_SLR_LEVELS), True)
 SPREAD = ramp_style([(0.5, "#eeeaf7"), (2, "#b9aee3"), (4, "#7d56c4"), (8, "#c4306f"), (14, "#6e0d2c")],
                     [0.5, 1, 2, 3, 4, 6, 8, 12])
-DGZ = ramp_style([(5, "#eaf0fc"), (25, "#9cc0ee"), (50, "#4a82d8"), (100, "#4a2fa8"), (200, "#a02a9e")],
-                 [5, 10, 25, 50, 75, 100, 150, 200])
+# DGZ depth in thousands of feet: the College of DuPage NEXLAB ramp, 0-20 kft.  Light cyan (a sliver of growth zone) -> cyan -> blue -> purple -> magenta -> pink/red
+# -> salmon.  Bins are 0.5 kft wide up to 3 kft (where the thin-layer / deep-layer judgement is made), then 1-2 kft wide; nothing is drawn below 0.5 kft.
+DGZ = ramp_style([(0.5, "#d4f4f6"), (2, "#62d4ea"), (4, "#2b8fe4"), (7, "#4b44d4"), (10, "#9a2fc6"), (13, "#d535a6"), (16, "#ef5870"), (20, "#f6a592")],
+                 [0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 18, 20], ticks=[1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 18, 20])
 RHI = ramp_style([(60, "#c8a46e"), (80, "#e8e2c8"), (100, "#7cc0e8"), (110, "#2b56c0")],
                  [70, 80, 90, 95, 100, 105, 110], under="#b58a52")
 WARM_NOSE = ramp_style([(-12, "#2a4fb0"), (-3, "#9fc4ee"), (0, "#ffffff"), (2, "#ffc27a"), (5, "#ef6a3b"), (8, "#9b1c2f")],

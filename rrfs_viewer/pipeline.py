@@ -439,8 +439,10 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
             out["warmnose"][k] = winter.warm_nose_c(Tk, T_LEVELS, ps)
             rh = np.stack([g(("RH", p)) if p in RH_LEVELS and g(("RH", p)) is not None else np.full((ny, nx), np.nan, np.float32)
                            for p in T_LEVELS])
-            d, s_, r_ = winter.dgz_metrics(Tk - 273.15, rh, T_LEVELS, ps)
+            d, s_, r_ = winter.dgz_metrics(Tk - 273.15, rh, T_LEVELS, ps, units="kft")
             out["dgz_depth"][k], out["dgz_sat"][k], out["dgz_rhi"][k] = d, s_, r_
+            if g("uvv") is not None:
+                out["dgz_lift"][k] = winter.dgz_with_lift(s_, np.clip(g("uvv"), 0, None))
             cobb_t = [g(("T", p)) for p in COBB_RH_LEVELS]
             cobb_rh = [g(("RH", p)) for p in COBB_RH_LEVELS]
             if all(a is not None for a in cobb_t + cobb_rh):

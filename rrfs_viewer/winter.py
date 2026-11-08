@@ -296,20 +296,26 @@ def rh_ice(rh_w, t_c):
 
 
 DGZ_WARM_C, DGZ_COLD_C = -12.0, -18.0
+M_PER_KFT = 304.8
+DGZ_LIFT_MS = 0.10             # upward motion (m/s) that counts as "lift present" in dgz_with_lift
 
 
-def dgz_metrics(t_c, rh_w, levels, ps_hpa):
+def dgz_metrics(t_c, rh_w, levels, ps_hpa, units: str = "hpa"):
     """Dendritic growth zone from the level temperatures (``t_c``: (L, ny, nx) degC, ``levels`` descending hPa).
 
     Linear interpolation of temperature between adjacent levels gives, per layer, the fraction lying between -12 and -18 degC.
     Returns three (ny, nx) arrays:
 
-    * ``depth``  - DGZ depth, hPa
-    * ``sat``    - DGZ depth that is saturated with respect to ice (layer-mean RHi >= 100 %), hPa
+    * ``depth``  - DGZ depth
+    * ``sat``    - DGZ depth that is saturated with respect to ice (layer-mean RHi >= 100 %)
     * ``rhi``    - pressure-weighted mean RH w.r.t. ice inside the DGZ, % (NaN where there is no DGZ)
 
-    ``rh_w`` is (L, ny, nx) with NaN where RH was not fetched; unsaturated/unknown layers do not count towards ``sat``.
+    ``units="hpa"`` measures depths in hPa; ``units="kft"`` in thousands of feet of geometric height, the unit a forecaster reads off a sounding
+    (hypsometric thickness of each layer from its mean temperature, dry air).  ``rh_w`` is (L, ny, nx) with NaN where RH was not fetched;
+    unsaturated/unknown layers do not count towards ``sat``.
     """
+    if units not in ("hpa", "kft"):
+        raise ValueError(units)
     p = np.asarray(levels, np.float32)
     above = p.reshape(-1, 1, 1) <= ps_hpa[None]
     T = np.where(above, t_c, np.nan)
@@ -326,17 +332,33 @@ def dgz_metrics(t_c, rh_w, levels, ps_hpa):
         flat = np.abs(d) < 1e-6
         f = np.where(flat, ((ta <= DGZ_WARM_C) & (ta >= DGZ_COLD_C)).astype(np.float32), f)
         f = np.where(np.isnan(ta) | np.isnan(tb), 0.0, f).astype(np.float32)
-        depth += f * dp
+        if units == "kft":                                                    # geometric thickness of the layer, from its own mean temperature
+            with np.errstate(all="ignore"):
+                dz = RD_OVER_G * (0.5 * (ta + tb) + 273.15) * np.log(float(p[i]) / float(p[i + 1])) / M_PER_KFT
+            size = np.where(f > 0, dz, 0.0)
+        else:
+            size = dp
+        depth += f * size
         ra, rb = rh_ice(rh_w[i], ta), rh_ice(rh_w[i + 1], tb)
         cnt = np.isfinite(ra).astype(np.float32) + np.isfinite(rb)
         known = cnt > 0
         rl = np.where(known, (np.nan_to_num(ra) + np.nan_to_num(rb)) / np.maximum(cnt, 1), 0.0)
-        sat += np.where(known & (rl >= 100.0), f * dp, 0.0)
+        sat += np.where(known & (rl >= 100.0), f * size, 0.0)
         rhsum += f * dp * rl
         wsum += np.where(known, f * dp, 0.0)
     with np.errstate(all="ignore"):
         mean_rhi = np.where(wsum > 5.0, rhsum / wsum, np.nan).astype(np.float32)
     return depth, sat, mean_rhi
+
+
+def dgz_with_lift(sat_depth, uvv_ms, threshold: float = DGZ_LIFT_MS):
+    """Ice-saturated DGZ depth where the column also has ascent: the three ingredients of dendrite growth together.
+
+    ``uvv_ms`` is the hourly-maximum upward motion anywhere in the column (RRFS publishes no pressure-level omega), so this is a generous proxy:
+    it says ascent exists somewhere above the point, not that it sits inside the DGZ.  NaN where the depth or the motion is unknown.
+    """
+    s, w = np.asarray(sat_depth, np.float32), np.asarray(uvv_ms, np.float32)
+    return np.where(np.isfinite(s) & np.isfinite(w), np.where(w >= threshold, s, 0.0), np.nan).astype(np.float32)
 
 
 # --------------------------------------------------------------------------- wind chill, blizzard
