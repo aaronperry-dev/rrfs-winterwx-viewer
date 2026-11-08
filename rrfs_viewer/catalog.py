@@ -38,6 +38,7 @@ class Product:
     sam: bool = False           # offers SAM / SAM-LPM (experimental spatially aligned means): liquid and snowfall amounts only
     pmm: bool = False           # offers PMM / LPMM: set below for the precipitation-amount products (liquid, snow and ice accumulations)
     single: str = ""            # a product that has ONE source that is not the REFS mean or an RRFS member ("HRRR"): it is stored in the single-source slot and shown under this name
+    lines: tuple = ()           # significance lines the page draws over the map (physical-unit views only): ((value, "label"), ...)
 
     @property
     def map_title(self) -> str:
@@ -264,12 +265,18 @@ _ADDED: tuple[Product, ...] = (
        (1000, 1010, 1020, 1030), "ge", "Mean Sea-Level Pressure"),
     _P("thk_1000_850", "1000-850 hPa thickness", G_LOW, "dam", "inst", C.THK_1000_850, "u8", 100.0, 0.25, 1, False,
        "Thickness between 1000 and 850 hPa in decameters (heights from the model, else the hypsometric equation). Below about 130 dam the lowest 1.5 km is cold "
-       "enough for snow; above about 132 dam it is rain or mixed (the usual low-level rain-snow rule of thumb for the Northeast). The 850-700 hPa layer is the next map.",
+       "enough for snow; above about 132 dam it is rain or mixed (the usual low-level rain-snow rule of thumb for the Northeast). The 850-700 hPa layer is the next map. The dashed line on the map is 130 dam (shown in the mean, member, percentile and REFS views, not in probability or spread views).",
        (126, 130, 134), "le", "1000-850 mb Thickness (dam)"),
     _P("thk_850_700", "850-700 hPa thickness", G_LOW, "dam", "inst", C.THK_850_700, "u8", 135.0, 0.15, 1, False,
        "Thickness between 850 and 700 hPa in decameters. About 154 dam (1540 m) is the traditional marginal line for snow aloft; the snow-ratio maps use the same "
-       "layer. Read it with the 1000-850 thickness: a cold 1000-850 layer under a warm 850-700 layer is a warm nose (sleet, freezing rain).",
+       "layer. Read it with the 1000-850 thickness: a cold 1000-850 layer under a warm 850-700 layer is a warm nose (sleet, freezing rain). The dashed line on the map is 154 dam (same views as the 1000-850 line).",
        (151, 154, 157), "le", "850-700 mb Thickness (dam)"),
+    _P("thk_1000_500", "1000-500 hPa thickness", G_LOW, "dam", "inst", C.THK_1000_500, "u8", 480.0, 0.45, 1, False,
+       "Thickness between 1000 and 500 hPa in decameters (heights from the model, else the hypsometric equation): the classic whole-troposphere thickness chart. "
+       "About 540 dam (5400 m) is the traditional rain-snow line, with snow mostly to the north and rain or mixed to the south; in New England coastal storms the "
+       "line is a guide, not a rule, because it says nothing about a shallow warm layer near the ground: read it with the 1000-850 and 850-700 hPa maps. "
+       "The dashed line on the map is 540 dam (same views as the other thickness lines). Where the ground is above 1000 hPa the value uses the model's extrapolated 1000 hPa height, as on any standard thickness chart.",
+       (534, 540, 546), "le", "1000-500 mb Thickness (dam)"),
     _P("t925", "925 hPa temperature", G_LOW, "°C", "inst", C.temp_c_style(), "u8", -40.0, 0.3, 1, False,
        "Temperature at 925 hPa (about 2500 ft). Where the terrain is higher than that level the map is left blank (the model's value there would be a below-ground extrapolation). "
        "925 hPa 0 °C is the classic low-level rain-snow guide for the coast; with 850 hPa it brackets the warm layer that decides snow versus sleet or freezing rain.",
@@ -403,7 +410,10 @@ PRODUCTS = PRODUCTS + _ADDED
 # restore.  Ratios, temperatures, winds, p-type probabilities and the like keep the plain mean.  (The 1-hour variants below inherit the flag.)
 PRODUCTS = tuple(replace(p, pmm=(p.kind == "cum" and p.unit == "in")) for p in PRODUCTS)
 PRODUCTS = tuple(replace(p, sam=(p.pmm and p.group in (G_PRECIP, G_SNOW))) for p in PRODUCTS)
-PRODUCTS = tuple(replace(p, pmm=False, sam=False) if p.single else p for p in PRODUCTS)          # single-source (HRRR) products have no members to match
+PRODUCTS = tuple(replace(p, pmm=False, sam=False) if p.single else p for p in PRODUCTS)
+_LINES = {"thk_1000_850": ((130.0, "130 dam: rain/snow line"),), "thk_850_700": ((154.0, "154 dam: snow line aloft"),),
+          "thk_1000_500": ((540.0, "540 dam: traditional rain/snow line"),)}
+PRODUCTS = tuple(replace(p, lines=_LINES[p.key]) if p.key in _LINES else p for p in PRODUCTS)          # single-source (HRRR) products have no members to match
 # Stored series: every product, plus the 1-hour variant of those that have one (the browser derives 3/6/12/24-h windows from totals).
 ONE_HOUR = tuple(replace(p, key=p.key + "_1h", label=p.label + " (1 h)", has1h=False, step1h=0.0, kind="inst",
                          step=p.step1h or p.step) for p in PRODUCTS if p.has1h)

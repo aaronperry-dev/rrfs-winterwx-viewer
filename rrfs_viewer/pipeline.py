@@ -253,6 +253,7 @@ def _plan_member(F, k, acc_p: Acc, acc_s: Acc):
     for p in Z_LEVELS:
         R[("Z", p)] = Req(FILE_PRS, fr, "HGT", f"{p} mb", None)
     # group-A additions: terrain (snow level above ground, profile heights), sea-level pressure, winds on four levels
+    R["z500"] = Req(FILE_PRS, fr, "HGT", "500 mb", None)                   # 1000-500 hPa thickness (kept out of Z_LEVELS so the existing thickness methods are untouched)
     R["terrain"] = Req(FILE_2D, fr, "HGT", "surface", None)
     R["mslp"] = Req(FILE_2D, fr, "MSLET", "mean sea level", None)
     for p in diag.WIND_LEVELS:
@@ -490,11 +491,16 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
                     d1000_850 = Z[850] - Z[1000]
                 else:
                     d1000_850 = winter.layer_thickness_m(Tk_, T_LEVELS, 1000, 850)
+                z500 = g("z500")
+                if z500 is not None and Z[1000] is not None:
+                    d1000_500 = z500 - Z[1000]
+                else:
+                    d1000_500 = winter.layer_thickness_m(Tk_, T_LEVELS, 1000, 500)
                 prods, _nodes = diag.frame_products(
                     t_levels=T_LEVELS, Tk=Tk_, RH=RH_, t2k=t2k, rh2=g("rh2"), ps_pa=ps_pa, terrain_m=g("terrain"), mslp_pa=g("mslp"),
                     winds={p: (g(("U", p)), g(("V", p))) for p in diag.WIND_LEVELS}, lon=rg.lon, lat=rg.lat,
                     dgz_sat=out["dgz_sat"][k] if np.isfinite(out["dgz_sat"][k]).any() else None,
-                    dz_1000_850=d1000_850, dz_850_700=dz_850_700)
+                    dz_1000_850=d1000_850, dz_850_700=dz_850_700, dz_1000_500=d1000_500)
                 for key, a in prods.items():
                     out[key][k] = a
             except Exception:

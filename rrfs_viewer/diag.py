@@ -24,7 +24,7 @@ def _kelvin_to_f(t_k):
     return (np.asarray(t_k, np.float64) - 273.15) * 1.8 + 32.0
 
 
-def frame_products(*, t_levels, Tk, RH, t2k, rh2, ps_pa, terrain_m, mslp_pa, winds, lon, lat, dgz_sat=None, dz_1000_850=None, dz_850_700=None):
+def frame_products(*, t_levels, Tk, RH, t2k, rh2, ps_pa, terrain_m, mslp_pa, winds, lon, lat, dgz_sat=None, dz_1000_850=None, dz_850_700=None, dz_1000_500=None):
     """Per-frame group-A products and the profile nodes.
 
     ``Tk``: (n, ny, nx) temperature on ``t_levels``; ``RH``: the same for humidity (NaN where a level was not fetched); ``rh2``: 2 m RH (or None);
@@ -57,6 +57,8 @@ def frame_products(*, t_levels, Tk, RH, t2k, rh2, ps_pa, terrain_m, mslp_pa, win
         out["thk_1000_850"] = np.where(below(850), np.nan, dz_1000_850 / 10.0) if ps is not None else dz_1000_850 / 10.0
     if dz_850_700 is not None:
         out["thk_850_700"] = dz_850_700 / 10.0
+    if dz_1000_500 is not None:
+        out["thk_1000_500"] = dz_1000_500 / 10.0
     for p, key in ((925, "t925"), (850, "t850")):
         if p in idx and Tk is not None:
             t = Tk[idx[p]] - 273.15
