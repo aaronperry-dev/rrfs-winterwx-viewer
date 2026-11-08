@@ -34,6 +34,7 @@ class Product:
     title: str = ""             # map title (defaults to label)
     has1h: bool = False         # also stored as a separate "1-hour accumulation ending at the valid time" field (key + "_1h")
     step1h: float = 0.0         # quantisation step of that 1-hour field (0 = same as ``step``)
+    cat: bool = False           # categorical code field (reflectivity masked by precipitation type): never interpolated, the page decodes it
     pmm: bool = False           # offers PMM / LPMM: set below for the precipitation-amount products (liquid, snow and ice accumulations)
 
     @property
@@ -42,14 +43,29 @@ class Product:
 
 
 _P = Product
-G_PRECIP, G_SNOW, G_SLR, G_MIX, G_DGZ, G_WIND, G_TEMP = ("Precipitation", "Snowfall", "Snow ratio (SLR)", "Ice & p-type", "Snow growth (DGZ)",
-                                                          "Wind & blizzard", "Temperature")
+G_PRECIP, G_RADAR, G_SNOW, G_SLR, G_MIX, G_DGZ, G_WIND, G_TEMP = ("Precipitation", "Reflectivity", "Snowfall", "Snow ratio (SLR)", "Ice & p-type",
+                                                                  "Snow growth (DGZ)", "Wind & blizzard", "Temperature")
 
 PRODUCTS: tuple[Product, ...] = (
     # ------------------------------------------------------------------ precipitation
     _P("qpf", "QPF", G_PRECIP, "in", "cum", C.QPF, "u16", 0.0, 0.005, 2, True,
        "Liquid-equivalent precipitation, all types. Choose a 1, 3, 6, 12 or 24 hour window or the run total.",
        (0.1, 0.25, 0.5, 1, 2), "ge", "Liquid Precipitation (QPF)", has1h=True),
+    # ------------------------------------------------------------------ radar reflectivity (simulated)
+    _P("refc", "Composite reflectivity", G_RADAR, "dBZ", "inst", C.REFL, "u8", -20.0, 0.4, 0, True,
+       "Simulated composite reflectivity: the strongest echo in the column. Members publish it; the REFS file carries its probability-matched "
+       "mean (PMM), the official ensemble picture, which keeps realistic peak values that a plain average would smear out. The member mean "
+       "here is taken in linear Z, not in dBZ.",
+       (20, 30, 40, 50), "ge", "Composite Reflectivity"),
+    _P("refd", "Base reflectivity (1 km)", G_RADAR, "dBZ", "inst", C.REFL, "u8", -20.0, 0.4, 0, True,
+       "Simulated reflectivity 1 km above ground, the model's stand-in for a radar's lowest-tilt base reflectivity. The RRFS member files do not "
+       "publish it, so only the official REFS probability-matched mean (PMM) is shown, with no individual members, percentiles or probabilities.",
+       (), "ge", "Base Reflectivity (1 km AGL)"),
+    _P("refl_ptype", "Reflectivity by precip type", G_RADAR, "dBZ", "inst", C.REFL_PTYPE, "u8", 0.0, 1.0, 0, True,
+       "Composite reflectivity coloured by the model's precipitation type: green-red rain, blue snow, violet sleet, pink freezing rain (darker = stronger echo). "
+       "Each member uses its own type flags. The member view picks the type most members agree on (wintry types win ties) and the "
+       "linear-Z mean echo; the maximum view shows the strongest member and its type. The REFS view pairs the PMM echo with the REFS mean type.",
+       (), "ge", "Reflectivity by Precipitation Type", cat=True),
     # ------------------------------------------------------------------ snowfall: model + five ratio methods + their mean
     _P("snow_model", "Model snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, True,
        "RRFS physical snow accumulation (variable snow-liquid ratio; snow + sleet). The model's own answer, not a post-processed ratio.",

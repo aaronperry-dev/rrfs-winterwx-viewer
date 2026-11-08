@@ -151,6 +151,12 @@ class Storm:
         return self._cum_snow_m[h]
 
 
+def _dbz(rate) -> np.ndarray:
+    """Reflectivity (dBZ) of a rain rate in mm/h by Z = 200 R^1.6; -10 (the model's kind of no-echo fill, below 0) where it is dry."""
+    r = np.asarray(rate, np.float32)
+    return np.where(r > 0.03, 10.0 * np.log10(200.0 * np.maximum(r, 0.03) ** 1.6), -10.0).astype(np.float32)
+
+
 def _info(kind: str, h: int) -> str:
     return {"inst": f"{h} hour fcst", "acc1": f"{h - 1}-{h} hour acc fcst", "acc0": f"0-{h} hour acc fcst",
             "max": f"{h - 1}-{h} hour max fcst"}[kind]
@@ -159,7 +165,7 @@ def _info(kind: str, h: int) -> str:
 class FakeS3:
     """Implements the boto3 calls the pipeline uses: head_object and get_object (with ``Range``)."""
     _KEY = re.compile(
-        r"^(?:refs\.(?P<d1>\d{8})/(?P<c1>\d{2})/ensprod/refs\.t(?P=c1)z\.mean\.f(?P<h1>\d{2})\.conus\.grib2"
+        r"^(?:refs\.(?P<d1>\d{8})/(?P<c1>\d{2})/ensprod/refs\.t(?P=c1)z\.(?P<t1>mean|pmmn)\.f(?P<h1>\d{2})\.conus\.grib2"
         r"|rrfs\.(?P<d3>\d{8})/(?P<c3>\d{2})/rrfs\.t(?P=c3)z\.prslev\.3km\.f(?P<h3>\d{3})\.conus\.grib2"
         r"|rrfsens\.(?P<d2>\d{8})/(?P<c2>\d{2})/(?P<m>m00[1-5])/rrfs\.t(?P=c2)z\.(?P=m)\.(?P<k>2dfld|prslev)nomads\.3km\.f(?P<h2>\d{3})\.conus\.grib2)"
         r"(?P<idx>\.idx)?$")
@@ -201,6 +207,12 @@ class FakeS3:
             up = np.asarray(x["uvv"], np.float32)
             return [("DZDT", f"{p} mb", _info("inst", h), (up * np.exp(-(((p - 600.0) / 220.0) ** 2))).astype(np.float32))
                     for p in LIFT_LEV if ("DZDT", h) not in self.missing]
+        if m["h1"] and m["t1"] == "pmmn":                 # ---- REFS probability-matched mean: composite and 1 km reflectivity (invented from the members' rates)
+            dbz = np.stack([_dbz(self._storm(i, cyc).hour(h)["rate"]) for i in range(1, 6)])
+            pmm = np.sort(dbz, axis=0)[-2]                # a high-ish pick of the members: PMM keeps the peaks a plain mean would smear out
+            msgs = [("REFC", "entire atmosphere", _info("inst", h), pmm),
+                    ("REFD", "1000 m above ground", _info("inst", h), np.where(pmm > 0, pmm - 4.0, pmm).astype(np.float32))]
+            return [t for t in msgs if (t[0], h) not in self.missing]
         if m["h1"]:                                       # ---- REFS mean (members' mean; flags -> fractions)
             S = [self._storm(i, cyc) for i in range(1, 6)]
             H = [s.hour(h) for s in S]
@@ -225,7 +237,7 @@ class FakeS3:
         x = s.hour(h)
         if m["k"] == "2dfld":
             f32 = lambda a: np.asarray(a, np.float32)
-            msgs = [("REFC", "entire atmosphere (single layer)", _info("inst", h), f32(10 + 40 * (x["rate"] > 0.5))),
+            msgs = [("REFC", "entire atmosphere (considered as a single layer)", _info("inst", h), _dbz(x["rate"])),
                     ("VIS", "surface", _info("inst", h), x["vis"]),
                     ("GUST", "surface", _info("inst", h), x["gust"]),
                     ("MAXUVV", "100-1000 mb", _info("max", h), x["uvv"]),

@@ -24,7 +24,7 @@ import numpy as np
 
 from . import grib, winter
 from .catalog import STORE
-from .config import COBB_UPPER, FILE_2D, FILE_PRS, LIFT_LEVELS, MEMBERS, RH_LEVELS, T_LEVELS, frames
+from .config import COBB_UPPER, FILE_2D, FILE_PMMN, FILE_PRS, LIFT_LEVELS, MEMBERS, RH_LEVELS, T_LEVELS, frames
 from .s3 import S3Source
 
 log = logging.getLogger(__name__)
@@ -163,6 +163,7 @@ COBB_RH_LEVELS = tuple(sorted(set(RH_LEVELS) | set(COBB_UPPER), reverse=True))
 # climatology (not a forecast) are shown but left out so they do not set the spread.
 SPREAD_METHODS = SNOW_METHODS + ("snow_cobb", "snow_nbmthick")
 Z_LEVELS = (1000, 850, 700)
+REFC_LEVEL = "entire atmosphere (considered as a single layer)"          # as the real member 2dfld files spell it (tests/data)
 
 
 def _method_mean(arrs: list[np.ndarray | None], min_n: int = 1) -> np.ndarray | None:
@@ -208,6 +209,7 @@ def _plan_member(F, k, acc_p: Acc, acc_s: Acc):
     R["vis"] = Req(FILE_2D, fr, "VIS", "surface", None)
     R["ps"] = Req(FILE_2D, fr, "PRES", "surface", None)
     R["uvv"] = Req(FILE_2D, fr, "MAXUVV", "100-1000 mb", None)
+    R["refc"] = Req(FILE_2D, fr, "REFC", REFC_LEVEL, None)
     for p in T_LEVELS:
         R[("T", p)] = Req(FILE_PRS, fr, "TMP", f"{p} mb", None)
     for p in COBB_RH_LEVELS:
@@ -384,6 +386,9 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
             out["vis"][k] = vis
         if g("uvv") is not None:
             out["uvv"][k] = np.clip(g("uvv"), 0, None)
+        refl = None if g("refc") is None else winter.clean_dbz(g("refc"))
+        if refl is not None:
+            out["refc"][k] = refl
 
         slr = {m: None for m in snow}
         slr["snow_12"] = out["slr_12"][k] = np.full((ny, nx), 12.0, np.float32)
@@ -550,6 +555,8 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
                 cond = winter.blizzard_now(vis, gust, wind, sn + ip)
                 out["blizzard_now"][k] = 100.0 * cond
                 out["blizzard_dur"][k] = clock.update(cond)
+        if refl is not None and all(a is not None for a in fl):                 # reflectivity coloured by this member's precipitation type
+            out["refl_ptype"][k] = winter.refl_ptype_code(refl, winter.ptype_class_flags(*fl))
         if progress:
             progress(member, fr)
     pool.shutdown()
@@ -560,7 +567,7 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
 
 # ============================================================================== REFS mean
 REFS_KEYS = ("qpf", "qpf_1h", "snow_model", "snow_model_1h", "snow_12", "snow_12_1h", "psnow", "psleet", "pfrzr", "prain",
-             "wind10", "vis", "t2", "windchill")
+             "wind10", "vis", "t2", "windchill", "refc", "refd", "refl_ptype")
 
 
 def process_refs(src: S3Source, cycle: datetime, rg: grib.Regrid, max_fhr: int, progress=None):
@@ -586,9 +593,17 @@ def process_refs(src: S3Source, cycle: datetime, rg: grib.Regrid, max_fhr: int, 
                 "rn": f2(fr, "CRAIN", "surface")}
         tot = {v: runs[v].plan(fr) for v in runs}
         one = {v: accs[v].inc1(fr) for v in runs}
-        allreq = list(reqs.values()) + [r for p, _ in tot.values() for r in p] + [r for p in one.values() if p for r in p[0]]
+        refl_reqs = {"refc": Req(FILE_PMMN, fr, "REFC", "~entire atmosphere", None),          # the probability-matched mean file: its level wording is matched loosely
+                     "refd": Req(FILE_PMMN, fr, "REFD", "~1000 m above ground", None)}
+        allreq = list(reqs.values()) + list(refl_reqs.values()) + [r for p, _ in tot.values() for r in p] + [r for p in one.values() if p for r in p[0]]
         A = f.decode(f.bulk(allreq))
         g = lambda key: A.get(reqs[key])
+        for key, r in refl_reqs.items():
+            if A.get(r) is not None:
+                out[key][k] = winter.clean_dbz(A[r])
+        if A.get(refl_reqs["refc"]) is not None and all(g(n) is not None for n in ("sn", "ip", "zr", "rn")):
+            cls = winter.ptype_class_fractions(g("rn"), g("sn"), g("ip"), g("zr"))
+            out["refl_ptype"][k] = winter.refl_ptype_code(out["refc"][k], cls)
         T = {v: tot[v][1](A) for v in runs}
         I = {v: evaluate(one[v], A) for v in runs}
         for key, v, mul in (("qpf", "APCP", KG_TO_IN), ("snow_12", "WEASD", KG_TO_IN * 12.0), ("snow_model", "ASNOW", IN_PER_M)):

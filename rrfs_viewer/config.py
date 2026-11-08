@@ -25,14 +25,15 @@ class FileKind:
         d, cc = f"{cycle:%Y%m%d}", f"{cycle:%H}"
         if source == "det":                          # deterministic RRFS, full pressure-level file (has DZDT every 25 hPa)
             return f"rrfs.{d}/{cc}/rrfs.t{cc}z.prslev.3km.f{fhr:03d}.conus.grib2"
-        if source == "refs":                         # official REFS ensemble mean (CONUS 3 km)
-            return f"refs.{d}/{cc}/ensprod/refs.t{cc}z.mean.f{fhr:02d}.conus.grib2"
+        if source == "refs":                         # official REFS ensemble mean (CONUS 3 km), or its probability-matched mean (the file with REFC / REFD)
+            return f"refs.{d}/{cc}/ensprod/refs.t{cc}z.{'pmmn' if self.key == 'pmmn' else 'mean'}.f{fhr:02d}.conus.grib2"
         suffix = {"2dfld": "2dfldnomads", "prslev": "prslevnomads"}[self.key]
         return f"rrfsens.{d}/{cc}/{source}/rrfs.t{cc}z.{source}.{suffix}.3km.f{fhr:03d}.conus.grib2"
 
 
 FILE_2D = FileKind("2dfld")
 FILE_PRS = FileKind("prslev")
+FILE_PMMN = FileKind("pmmn")                                            # REFS probability-matched mean: carries composite (REFC) and 1 km (REFD) reflectivity
 LIFT_LEVELS = tuple(range(925, 299, -25))                               # deterministic DZDT levels (hPa) = winter.COBB_GRID
 
 # --------------------------------------------------------------------------- vertical levels fetched from the member prslev files

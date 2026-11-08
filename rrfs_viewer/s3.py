@@ -57,8 +57,9 @@ def parse_idx(text: str) -> list[IdxEntry]:
 def find_entry(entries: list[IdxEntry], var: str, level: str, info: str | None = None) -> IdxEntry | None:
     """First record with this variable and level; ``info`` is a regex that must match the start of the time descriptor."""
     rx = re.compile(info) if info else None
+    lv = re.compile(level[1:]) if level.startswith("~") else None      # "~regex": the level descriptor only has to start like this (for fields whose wording is not certain)
     for e in entries:
-        if e.var == var and e.level == level and (rx is None or rx.match(e.info)):
+        if e.var == var and (lv.match(e.level) if lv else e.level == level) and (rx is None or rx.match(e.info)):
             return e
     return None
 

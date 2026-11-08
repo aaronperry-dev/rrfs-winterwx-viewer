@@ -384,3 +384,36 @@ def precip_fractions(csnow, cicep, cfrzr):
     ip = z(cicep) & ~zr
     sn = z(csnow) & ~zr & ~ip
     return sn.astype(np.float32), ip.astype(np.float32), zr.astype(np.float32)
+
+
+# ---------------------------------------------------------------------------- radar reflectivity masked by precipitation type
+REFL_FLOOR, REFL_TOP = -20.0, 81.0                  # stored range of reflectivity (dBZ): anything below 0 is "no echo"
+
+
+def clean_dbz(dbz: np.ndarray) -> np.ndarray:
+    """Model reflectivity limited to the stored range; negative values (the model's no-echo fill) become the floor, which also compresses well."""
+    d = np.asarray(dbz, np.float32)
+    return np.where(np.isfinite(d), np.clip(np.where(d < 0, REFL_FLOOR, d), REFL_FLOOR, REFL_TOP), np.nan).astype(np.float32)
+
+
+def refl_ptype_code(dbz: np.ndarray, cls: np.ndarray) -> np.ndarray:
+    """One number per cell for the page: ``class * 16 + bin``, bin = floor(dBZ / 5) from 1 (5 dBZ) to 15 (75+), 0 = no echo.
+
+    ``cls``: 0 rain, 1 snow, 2 sleet, 3 freezing rain.  NaN where either input is missing.
+    """
+    b = np.clip(np.floor(np.nan_to_num(dbz, nan=0.0) / 5.0), 0, 15)
+    code = np.where(b > 0, np.asarray(cls, np.float32) * 16.0 + b, 0.0)
+    return np.where(np.isfinite(dbz) & np.isfinite(cls), code, np.nan).astype(np.float32)
+
+
+def ptype_class_flags(csnow, cicep, cfrzr) -> np.ndarray:
+    """Member precipitation type from the categorical flags (freezing rain > sleet > snow, otherwise rain): 0 rain, 1 snow, 2 sleet, 3 freezing rain."""
+    sn, ip, zr = precip_fractions(csnow, cicep, cfrzr)
+    return (zr * 3.0 + (1 - zr) * (ip * 2.0 + (1 - ip) * sn)).astype(np.float32)
+
+
+def ptype_class_fractions(crain, csnow, cicep, cfrzr) -> np.ndarray:
+    """Type with the largest weight in a mean (REFS) file; a tie goes to the more wintry type.  Where the weights are all 0 or missing: rain."""
+    st = np.stack([np.nan_to_num(np.asarray(a, np.float32), nan=0.0) for a in (crain, csnow, cicep, cfrzr)])
+    cls = 3 - np.argmax(st[::-1], axis=0)
+    return np.where(st.max(axis=0) > 0, cls, 0).astype(np.float32)

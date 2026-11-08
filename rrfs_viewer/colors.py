@@ -164,6 +164,32 @@ BLIZ_HOURS = ramp_style([(3, "#ffb3c1"), (6, "#ff5f7e"), (12, "#c4163f"), (24, "
                         [3, 6, 9, 12, 18, 24, 36])
 
 
+# Radar reflectivity (dBZ): the familiar NWS-style ramp in 5 dBZ steps from 5 to 75; below 5 dBZ nothing is drawn.
+_REFL_LEVELS = list(range(5, 80, 5))
+_REFL_COLORS = ["#8fd8f4", "#4aa8e8", "#1d6fd1", "#7ee06a", "#2ea838", "#0c7a26", "#fff25a", "#f5c320", "#f59a1c",
+                "#e8461a", "#c4141a", "#8e0a14", "#e040c8", "#9a30c8", "#f4eaff"]
+REFL = Style(list(_REFL_LEVELS), [None, *_REFL_COLORS], [10, 20, 30, 40, 50, 60, 70], True)
+
+# Reflectivity masked by precipitation type: one colour ramp per type, one colour per 5 dBZ bin.  A value is class * 16 + bin, where bin = floor(dBZ / 5)
+# (1 = 5-10 dBZ ... 15 = 75+ dBZ; 0 = no echo) and class is 0 rain, 1 snow, 2 sleet, 3 freezing rain.  Class edges are every integer, so a code is its own colour index.
+PTYPE_CLASSES = (("Rain", [(5, "#bfe8b3"), (25, "#34a853"), (40, "#f2e22e"), (50, "#f2891a"), (60, "#d1201f"), (70, "#8a0b3a"), (75, "#ff7ee8")]),
+                 ("Snow", [(5, "#d6efff"), (25, "#5db5f2"), (45, "#2262c9"), (75, "#0a2477")]),
+                 ("Sleet", [(5, "#e8dcff"), (25, "#a77ee6"), (50, "#6a2db8"), (75, "#34106e")]),
+                 ("Freezing rain", [(5, "#ffd3e6"), (25, "#f06aa8"), (50, "#c2185b"), (75, "#6e0a35")]))
+
+
+def _ptype_style() -> Style:
+    cols: list[str | None] = [None]                                  # code 0: no echo
+    for _, anchors in PTYPE_CLASSES:
+        r = Ramp(anchors)
+        cols += [to_hex(c) for c in r(np.arange(1, 16) * 5.0 + 2.5)] + [None]          # bins 1..15, then bin 0 of the next class (never occurs)
+    cols = cols[:64]
+    return Style([float(i) for i in range(1, 64)], cols, [], True)
+
+
+REFL_PTYPE = _ptype_style()
+
+
 def _from_edges(levels, color_list, under, over, ticks=None, equal_width=True) -> Style:
     return Style(list(levels), [under] + list(color_list) + [over], list(ticks if ticks is not None else levels), equal_width)
 
