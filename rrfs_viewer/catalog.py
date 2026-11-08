@@ -35,6 +35,7 @@ class Product:
     has1h: bool = False         # also stored as a separate "1-hour accumulation ending at the valid time" field (key + "_1h")
     step1h: float = 0.0         # quantisation step of that 1-hour field (0 = same as ``step``)
     cat: bool = False           # categorical code field (reflectivity masked by precipitation type): never interpolated, the page decodes it
+    sam: bool = False           # offers SAM / SAM-LPM (experimental spatially aligned means): liquid and snowfall amounts only
     pmm: bool = False           # offers PMM / LPMM: set below for the precipitation-amount products (liquid, snow and ice accumulations)
 
     @property
@@ -232,6 +233,7 @@ PRODUCTS: tuple[Product, ...] = (
 # Probability-matched means only make sense for intermittent, skewed precipitation amounts, where averaging members smears out the maxima they
 # restore.  Ratios, temperatures, winds, p-type probabilities and the like keep the plain mean.  (The 1-hour variants below inherit the flag.)
 PRODUCTS = tuple(replace(p, pmm=(p.kind == "cum" and p.unit == "in")) for p in PRODUCTS)
+PRODUCTS = tuple(replace(p, sam=(p.pmm and p.group in (G_PRECIP, G_SNOW))) for p in PRODUCTS)
 # Stored series: every product, plus the 1-hour variant of those that have one (the browser derives 3/6/12/24-h windows from totals).
 ONE_HOUR = tuple(replace(p, key=p.key + "_1h", label=p.label + " (1 h)", has1h=False, step1h=0.0, kind="inst",
                          step=p.step1h or p.step) for p in PRODUCTS if p.has1h)
