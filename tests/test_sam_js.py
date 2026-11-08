@@ -40,8 +40,7 @@ console.log(JSON.stringify(out));
 def extract():
     s = HTML.read_text()
     a = s.index("const SAM = {")
-    b = s.index("function work(m)")
-    b = s.index("\n", b)
+    b = s.index("// ---- worker pool")
     pmm0 = s.index("function lowerBound")
     pmm1 = a
     reduce0 = s.index("function percentile(")
@@ -157,3 +156,42 @@ def test_sam_conserves_total_sharpens_displaced_and_does_nothing_in_place(tmp_pa
     assert o["displaced"]["peakSam"] > 1.3 * o["displaced"]["peakMean"]        # members that disagree on position: the aligned mean keeps the peak
     assert o["inplace"]["maxDiff"] < 0.02 * o["inplace"]["peakMean"]           # members already in place: SAM is the mean
     assert o["bimodal"]["peakSam"] < 1.1 * o["bimodal"]["peakMean"]            # two clusters beyond the search range: no invented structure
+
+
+WINTER = r"""
+const NX = 455, NY = 293;
+function blob(cx, cy, sx, sy, a) { const o = new Float32Array(NX * NY); for (let y = 0; y < NY; y++) for (let x = 0; x < NX; x++) o[y * NX + x] = a * Math.exp(-((x - cx) ** 2 / (2 * sx * sx) + (y - cy) ** 2 / (2 * sy * sy))); return o; }
+function centroid(a) { let s = 0, sx = 0, sy = 0; for (let y = 0; y < NY; y++) for (let x = 0; x < NX; x++) { const v = a[y * NX + x]; s += v; sx += v * x; sy += v * y; } return [sx / s, sy / s]; }
+const dist = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]) * 3, mx = a => { let m = -Infinity; for (const v of a) if (v > m) m = v; return m; };
+const res = {}, spec = [[-20, -15, 1], [18, 20, 1.3], [-10, 25, 0.8], [25, -18, 1.15], [0, 5, 0.9]];
+const qpf = spec.map(([dx, dy, a]) => blob(160 + dx, 100 + dy, 14, 10, 0.5 * a)), pm = pmmField(qpf, 0, NX, NY);
+// snowfall of each member: its QPF times a ratio that fades out across a fixed rain/snow transition zone (x = 190..250)
+const snow = qpf.map(q => q.map((v, i) => 12 * v * Math.max(0, Math.min(1, (250 - (i % NX)) / 60))));
+const sh = qpf.map(q => samShift(q, pm, NX, NY));
+res.shiftLen = sh.map(x => x.length);
+const aln = snow.map((s, k) => samWarp(s, sh[k], NX, NY)), same = qpf.map((q, k) => samWarp(q, sh[k], NX, NY)), al2 = qpf.map(q => samAlign(q, pm, NX, NY));
+let d = 0; for (let k = 0; k < 5; k++) for (let i = 0; i < same[k].length; i++) d = Math.max(d, Math.abs(same[k][i] - al2[k][i])); res.warpEqualsAlign = d;
+let md = 0; snow.forEach((s, k) => { const a = Float32Array.from(s).sort(), b = Float32Array.from(aln[k]).sort(); for (let i = 0; i < a.length; i++) md = Math.max(md, Math.abs(a[i] - b[i])); }); res.snowDistDiff = md;
+res.snowMoved = snow.map((s, k) => [dist(centroid(s), centroid(pm)), dist(centroid(aln[k]), centroid(pm))]);
+res.spreadDisplaced = (() => { const v = samSpread(sh, NX, NY); return [v[100 * NX + 160], mx(v)]; })();
+const still = qpf.map(() => blob(160, 100, 14, 10, 0.5)), pm0 = pmmField(still, 0, NX, NY);
+res.spreadInPlace = mx(samSpread(still.map(q => samShift(q, pm0, NX, NY)), NX, NY));
+res.blockFloor = [samBlock(new Float32Array(16).fill(0.005), 4, 4, 4, 0.01)[0], samBlock(new Float32Array(16).fill(0.02), 4, 4, 4, 0.01)[0]];
+console.log(JSON.stringify(res));
+"""
+
+
+def test_winter_additions_shifts_from_qpf_apply_to_snowfall_and_spread_is_a_distance(tmp_path):
+    f = tmp_path / "w.js"
+    f.write_text(extract() + "\n" + WINTER)
+    r = subprocess.run(["node", str(f)], capture_output=True, text=True, timeout=240)
+    assert r.returncode == 0, r.stderr
+    o = json.loads(r.stdout.strip().splitlines()[-1])
+    assert set(o["shiftLen"]) == {2 * 114 * 74}
+    assert o["warpEqualsAlign"] == 0
+    assert o["snowDistDiff"] < 2e-3                                              # the snowfall keeps its own distribution
+    for before, after in o["snowMoved"]:                                         # shifts found on QPF line the snowfall up as well
+        assert after < 0.5 * before or after < 15
+    assert o["spreadDisplaced"][0] > 30 and o["spreadDisplaced"][1] < 400        # km
+    assert o["spreadInPlace"] < 5
+    assert o["blockFloor"][0] == 0 and abs(o["blockFloor"][1] - 0.1) < 1e-6      # amounts below the floor are ignored, above it sqrt(excess)
