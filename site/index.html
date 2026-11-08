@@ -326,6 +326,7 @@ const store = new Map();                                    // "product.source" 
 const prod = () => D.products.find(p => p.key === state.product);
 const hasMembers = p => D.members.some(m => p.available[m]);          // 1 km reflectivity is published only as the REFS probability-matched mean: no members
 const isDbz = p => p.unit === "dBZ" && !p.cat;
+const isSam = m => m === "sam" || m === "samlpm";
 const PTYPE_NAMES = ["Rain", "Snow", "Sleet", "Freezing rain"];
 const CAT_MODES = { refs: ["RRFS PMM echo + REFS mean type", "REFS (PMM)"], mean: ["Member consensus (most common type, mean echo)", "Consensus"], max: ["Strongest member (its echo and type)", "Strongest"] };
 function modeInfo(m, p = prod()) {                          // [long label, short label]
@@ -336,7 +337,7 @@ function modeInfo(m, p = prod()) {                          // [long label, shor
 }
 const modesFor = p => (!hasMembers(p) ? MODES.filter(x => x[0] === "refs")
   : p.cat ? MODES.filter(x => CAT_MODES[x[0]])
-  : MODES.filter(x => (p.pmm || (x[0] !== "pmm" && x[0] !== "lpmm")) && !(isDbz(p) && x[0] === "spread"))).map(x => [x[0], ...modeInfo(x[0], p)]);   // PMM / LPMM only for precipitation amounts; no spread of dBZ
+  : MODES.filter(x => (p.pmm || (x[0] !== "pmm" && x[0] !== "lpmm")) && (p.sam || !isSam(x[0])) && !(isDbz(p) && x[0] === "spread"))).map(x => [x[0], ...modeInfo(x[0], p)]);   // PMM / LPMM only for precipitation amounts, SAM / SAM-LPM only for liquid and snowfall amounts; no spread of dBZ
 const layoutOk = (p, l) => l === "map" || (hasMembers(p) && !(l === "pctl" && p.cat));
 const fmtDate = (iso, tz, long) => new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric",
     ...(long ? { year: "numeric" } : {}), hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(iso));
@@ -346,7 +347,8 @@ const fnum = (v, d) => { const s = v.toFixed(d); return /^-0(\.0*)?$/.test(s) ? 
 const tick = v => (Math.abs(v) < 1e-9 ? "0" : String(+v.toPrecision(6)));
 const MODES = [["refs", "RRFS Mean (REFS)", "RRFS Mean (REFS)"], ["min", "Minimum", "Min"], ["p05", "5th percentile", "P5"],
   ["p10", "10th percentile", "P10"], ["p25", "25th percentile", "P25"], ["p50", "Median (50th percentile)", "P50"],
-  ["mean", "Member mean", "Mean"], ["pmm", "Probability-matched mean (PMM)", "PMM"], ["lpmm", "Localized probability-matched mean (LPMM)", "LPMM"], ["p75", "75th percentile", "P75"], ["p90", "90th percentile", "P90"],
+  ["mean", "Member mean", "Mean"], ["pmm", "Probability-matched mean (PMM)", "PMM"], ["lpmm", "Localized probability-matched mean (LPMM)", "LPMM"],
+  ["sam", "Spatially aligned mean (SAM)", "SAM"], ["samlpm", "Spatially aligned mean with localized probability matching (SAM–LPM)", "SAM–LPM"], ["p75", "75th percentile", "P75"], ["p90", "90th percentile", "P90"],
   ["p95", "95th percentile", "P95"], ["max", "Maximum", "Max"], ["spread", "Spread (σ)", "Spread (σ)"], ["prob", "Probability", "Probability"]];
 const PCT_MODES = { p05: 0.05, p10: 0.10, p25: 0.25, p50: 0.50, p75: 0.75, p90: 0.90, p95: 0.95 };
 const modeLabel = (m, p) => m.startsWith("m0") ? m : modeInfo(m, p)[0];
@@ -502,19 +504,121 @@ function pmmField(arrs, domKm, nx, ny, r0, r1) {            // domKm = 0: one gl
   return out;
 }
 
+// Spatially aligned mean (SAM) after Lee, Brewster, Snook, Spencer & Park (2024, Wea. Forecasting 39, 1545-1558).
+// Each member is moved toward the probability-matched mean (member-to-mean alignment, O(members)) by a smooth displacement field found in two passes
+// (large patches first, then smaller ones) on a 4x coarser, square-root transformed copy; the member is then resampled and its own value distribution restored.
+// Pure functions of their arguments (no page state) so that the same source runs in the Web Workers.
+// Choices the paper does not fix are ours: 4x coarsening (12 km), sqrt of the amount, SOAR strength alpha, and the 600 km / 225 km patch cascade scaled to this small domain.
+const SAM = { B: 4, passes: [{ km: 600, range: 8 }, { km: 225, range: 5 }], alpha: 0.1, eps: 0.05, cellKm: 3 };
+function samBlock(a, nx, ny, B) {                                      // block mean of sqrt(amount); missing = 0
+  const cx = Math.ceil(nx / B), cy = Math.ceil(ny / B), out = new Float32Array(cx * cy);
+  for (let j = 0; j < cy; j++) for (let i = 0; i < cx; i++) {
+    let s = 0, c = 0;
+    for (let y = j * B; y < Math.min(ny, j * B + B); y++) for (let x = i * B; x < Math.min(nx, i * B + B); x++) { const v = a[y * nx + x]; c++; if (v === v && v > 0) s += Math.sqrt(v); }
+    out[j * cx + i] = s / c;
+  }
+  return out;
+}
+function samBilin(a, cx, cy, x, y) {                                   // bilinear sample, edge values repeated outside the grid
+  x = x < 0 ? 0 : x > cx - 1 ? cx - 1 : x; y = y < 0 ? 0 : y > cy - 1 ? cy - 1 : y;
+  const x0 = Math.floor(x), y0 = Math.floor(y), x1 = Math.min(cx - 1, x0 + 1), y1 = Math.min(cy - 1, y0 + 1), fx = x - x0, fy = y - y0;
+  return (a[y0 * cx + x0] * (1 - fx) + a[y0 * cx + x1] * fx) * (1 - fy) + (a[y1 * cx + x0] * (1 - fx) + a[y1 * cx + x1] * fx) * fy;
+}
+function samWarpCoarse(a, sx, sy, cx, cy) {                            // b(x) = a(x + s(x))
+  const out = new Float32Array(cx * cy);
+  for (let y = 0; y < cy; y++) for (let x = 0; x < cx; x++) { const i = y * cx + x; out[i] = samBilin(a, cx, cy, x + sx[i], y + sy[i]); }
+  return out;
+}
+function samSoar(r) { return Math.exp(r) / (1 + r); }                  // second-order auto-regressive (SOAR) penalty on the shift length
+function samPass(src, tgt, cx, cy, P, R, lambda, eps) {                // -> displacement field (cells) that moves src onto tgt
+  const sx = new Float32Array(cx * cy), sy = new Float32Array(cx * cy), den = new Float32Array(cx * cy), W = 2 * R + 1;
+  const step = Math.max(1, Math.floor(P / 2)), half = P / 2, pen = new Float64Array(W * W), PW = cx + 2 * R, sp = new Float32Array(PW * (cy + 2 * R));
+  for (let y = 0; y < cy + 2 * R; y++) { const yy = Math.min(cy - 1, Math.max(0, y - R)); for (let x = 0; x < PW; x++) sp[y * PW + x] = src[yy * cx + Math.min(cx - 1, Math.max(0, x - R))]; }   // edge-padded copy: no clamping in the search loop
+  for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) pen[(dy + R) * W + dx + R] = samSoar(Math.hypot(dx, dy) / lambda);
+  for (let yc = 0; yc < cy + step; yc += step) for (let xc = 0; xc < cx + step; xc += step) {
+    const x0 = Math.max(0, Math.round(xc - half)), x1 = Math.min(cx, Math.round(xc + half)), y0 = Math.max(0, Math.round(yc - half)), y1 = Math.min(cy, Math.round(yc + half));
+    if (x1 <= x0 || y1 <= y0) continue;
+    let tmax = 0;
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (tgt[y * cx + x] > tmax) tmax = tgt[y * cx + x];
+    let bx = 0, by = 0;
+    if (tmax >= eps) {                                                 // nothing to align to over a dry patch: no shift
+      const ssdAt = (dx, dy, lim) => { let ssd = 0; for (let y = y0; y < y1 && ssd < lim; y++) { let si = (y + dy + R) * PW + x0 + dx + R, ti = y * cx + x0; for (let x = x0; x < x1; x++, si++, ti++) { const d = sp[si] - tgt[ti]; ssd += d * d; } } return ssd; };
+      let best = Infinity, bdx = 0, bdy = 0;
+      for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {   // the search stops summing a candidate as soon as it cannot beat the best so far
+        const k = (dy + R) * W + dx + R, c = ssdAt(dx, dy, best / pen[k]) * pen[k]; if (c < best) { best = c; bdx = dx; bdy = dy; }
+      }
+      const J = (dx, dy) => ssdAt(dx, dy, Infinity) * pen[(dy + R) * W + dx + R];
+      const sub = (m, c, p) => { const d = m - 2 * c + p; return d > 1e-12 ? Math.max(-0.5, Math.min(0.5, 0.5 * (m - p) / d)) : 0; };   // parabola through three exact costs: sub-cell shift
+      bx = bdx; by = bdy;
+      if (Math.abs(bdx) < R) bx += sub(J(bdx - 1, bdy), best, J(bdx + 1, bdy));
+      if (Math.abs(bdy) < R) by += sub(J(bdx, bdy - 1), best, J(bdx, bdy + 1));
+    }
+    for (let y = Math.max(0, Math.ceil(yc - step)); y <= Math.min(cy - 1, Math.floor(yc + step)); y++) {
+      const wy = 1 - Math.abs(y - yc) / step; if (wy <= 0) continue;
+      for (let x = Math.max(0, Math.ceil(xc - step)); x <= Math.min(cx - 1, Math.floor(xc + step)); x++) {
+        const w = wy * (1 - Math.abs(x - xc) / step); if (w <= 0) continue;
+        const i = y * cx + x; den[i] += w; sx[i] += w * bx; sy[i] += w * by;      // overlapping patches are averaged; dry ones count as zero shift
+      }
+    }
+  }
+  for (let i = 0; i < cx * cy; i++) { const d = Math.max(den[i], 1e-6); sx[i] /= d; sy[i] /= d; }
+  return { sx, sy };
+}
+function samField(arr, tgt, nx, ny) {                                  // displacement of one member toward the target, in coarse cells
+  const o = SAM, B = o.B, cx = Math.ceil(nx / B), cy = Math.ceil(ny / B), t = samBlock(tgt, nx, ny, B), c = samRestore(samBlock(arr, nx, ny, B), t);   // member given the target's value distribution first, so that an amplitude bias does not drive the shifts
+  let cur = c, tx = new Float32Array(cx * cy), ty = new Float32Array(cx * cy);
+  for (const ps of o.passes) {
+    const P = Math.round(ps.km / (o.cellKm * B)), lambda = o.alpha * Math.SQRT2 * P, f = samPass(cur, t, cx, cy, P, ps.range, lambda, o.eps);
+    const nxs = new Float32Array(cx * cy), nys = new Float32Array(cx * cy);
+    for (let y = 0; y < cy; y++) for (let x = 0; x < cx; x++) {            // total(x) = s2(x) + s1(x + s2(x))
+      const i = y * cx + x, ax = x + f.sx[i], ay = y + f.sy[i];
+      nxs[i] = f.sx[i] + samBilin(tx, cx, cy, ax, ay); nys[i] = f.sy[i] + samBilin(ty, cx, cy, ax, ay);
+    }
+    tx = nxs; ty = nys; cur = samWarpCoarse(c, tx, ty, cx, cy);
+  }
+  return { sx: tx, sy: ty, cx, cy };
+}
+function samResample(a, nx, ny, d, B) {                                // move the full-resolution member by the (up-sampled) displacement field
+  const out = new Float32Array(nx * ny);
+  for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+    const u = (x + 0.5) / B - 0.5, v = (y + 0.5) / B - 0.5, px = x + B * samBilin(d.sx, d.cx, d.cy, u, v), py = y + B * samBilin(d.sy, d.cx, d.cy, u, v);
+    const qx = Math.min(nx - 1, Math.max(0, px)), qy = Math.min(ny - 1, Math.max(0, py)), x0 = Math.floor(qx), y0 = Math.floor(qy), x1 = Math.min(nx - 1, x0 + 1), y1 = Math.min(ny - 1, y0 + 1), fx = qx - x0, fy = qy - y0;
+    let s = 0, w = 0;
+    const add = (v2, k) => { if (v2 === v2) { s += v2 * k; w += k; } };
+    add(a[y0 * nx + x0], (1 - fx) * (1 - fy)); add(a[y0 * nx + x1], fx * (1 - fy)); add(a[y1 * nx + x0], (1 - fx) * fy); add(a[y1 * nx + x1], fx * fy);
+    out[y * nx + x] = w > 0 ? s / w : NaN;
+  }
+  return out;
+}
+function samRestore(moved, orig) {                                     // reassign the moved member's values from its own original distribution, rank for rank
+  const n = moved.length, so = new Float32Array(n), sm = new Float32Array(n); let no = 0, nm = 0;
+  for (let i = 0; i < n; i++) { if (orig[i] === orig[i]) so[no++] = orig[i]; if (moved[i] === moved[i]) sm[nm++] = moved[i]; }
+  const a = so.subarray(0, no).sort(), b = sm.subarray(0, nm).sort(), out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const v = moved[i]; if (v !== v || !no) { out[i] = NaN; continue; }
+    let lo = 0, hi = nm; while (lo < hi) { const m = (lo + hi) >> 1; if (b[m] < v) lo = m + 1; else hi = m; }
+    let l2 = lo, h2 = nm; while (l2 < h2) { const m = (l2 + h2) >> 1; if (b[m] <= v) l2 = m + 1; else h2 = m; }
+    const r = (lo + l2 - 1) / 2;
+    out[i] = a[Math.min(no - 1, Math.floor((r + 0.5) * no / nm))];
+  }
+  return out;
+}
+function samAlign(arr, tgt, nx, ny) { return samRestore(samResample(arr, nx, ny, samField(arr, tgt, nx, ny), SAM.B), arr); }
+function work(m) { return m.op === "align" ? samAlign(m.arr, m.tgt, m.nx, m.ny) : pmmField(m.arrs, m.km, m.nx, m.ny, m.r0, m.r1); }   // one job for a worker (or, without workers, for the page)
+
 // ---- worker pool: heavy fields are computed off the main thread, in parallel, and cached; neighbouring forecast hours are computed ahead of time
 const pool = { ok: null, workers: [], idle: [], queue: [] };
 let prefetchGen = 0, lastDir = 1;
 function initPool() {
   if (pool.ok !== null) return pool.ok;
   try {
-    const src = `"use strict";const PCT_MODES=${JSON.stringify(PCT_MODES)};\n` + [percentile, reduce, lowerBound, upperBound, pmmRegion, pmmPatch, pmmField].map(f => f.toString()).join("\n") +
-      `\nonmessage=e=>{const m=e.data,out=pmmField(m.arrs,m.km,m.nx,m.ny,m.r0,m.r1);postMessage({out},[out.buffer]);};`;
+    const src = `"use strict";const PCT_MODES=${JSON.stringify(PCT_MODES)},SAM=${JSON.stringify(SAM)};\n` + [percentile, reduce, lowerBound, upperBound, pmmRegion, pmmPatch, pmmField, samBlock, samBilin, samWarpCoarse, samSoar, samPass, samField, samResample, samRestore, samAlign, work].map(f => f.toString()).join("\n") +
+      `\nonmessage=e=>{const out=work(e.data);postMessage({out},[out.buffer]);};`;
     const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" })), n = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
     for (let i = 0; i < n; i++) {
       const w = new Worker(url);
       w.onmessage = e => { const j = w.job; w.job = null; pool.idle.push(w); j.resolve(e.data.out); pump(); };
-      w.onerror = ev => { ev.preventDefault(); const j = w.job; w.job = null; pool.ok = false; if (j) { const m = j.msg; j.resolve(pmmField(m.arrs, m.km, m.nx, m.ny, m.r0, m.r1)); } };   // workers unavailable: compute in the page instead
+      w.onerror = ev => { ev.preventDefault(); const j = w.job; w.job = null; pool.ok = false; if (j) j.resolve(work(j.msg)); };   // workers unavailable: compute in the page instead
       pool.workers.push(w); pool.idle.push(w);
     }
     pool.ok = true;
@@ -548,13 +652,30 @@ function runMatched(arrs, km, nx, ny, opt, jobsOut) {
     return out;
   });
 }
-const matchCache = new Map();                               // key -> { promise, jobs }; the newest 24 fields are kept
+const matchCache = new Map();                               // key -> { promise, jobs }; the newest 40 fields are kept
 function matched(key, arrs, km, opt) {
   let e = matchCache.get(key);
   if (e) { if (opt.tok !== undefined) for (const j of e.jobs) { j.prio = 0; j.tok = opt.tok; j.gen = undefined; } return e.promise; }   // join a read-ahead already queued
   e = { jobs: [] };
   e.promise = runMatched(arrs, km, D.grid.nx, D.grid.ny, opt, e.jobs).then(v => { if (!v && matchCache.get(key) === e) matchCache.delete(key); return v; });
-  matchCache.set(key, e); if (matchCache.size > 24) matchCache.delete(matchCache.keys().next().value);
+  matchCache.set(key, e); if (matchCache.size > 40) matchCache.delete(matchCache.keys().next().value);
+  return e.promise;
+}
+const alignedPmm = (p, win, fi, mem) => [p.key, win, fi, "pmm", 0, mem.join()].join("|");        // the PMM the members are aligned to is the cached global PMM
+function aligned(key, tgtKey, arrs, opt) {                  // -> the members moved onto the PMM pattern, each with its own value distribution restored (one worker job per member)
+  let e = matchCache.get(key);
+  if (e) { if (opt.tok !== undefined) { e.opt = { tok: opt.tok }; for (const j of e.jobs) { j.prio = 0; j.tok = opt.tok; j.gen = undefined; } } return e.promise; }
+  e = { jobs: [], opt: { tok: opt.tok, gen: opt.gen } };
+  const nx = D.grid.nx, ny = D.grid.ny;
+  e.promise = matched(tgtKey, arrs, 0, opt).then(tgt => {
+    if (!tgt) return null;
+    if (!initPool() || !pool.workers.length) return arrs.map(a => samAlign(a, tgt, nx, ny));
+    const parts = arrs.map(a => new Promise(resolve => {
+      const job = { prio: e.opt.tok !== undefined ? 0 : 1, tok: e.opt.tok, gen: e.opt.gen, resolve, msg: { op: "align", arr: a, tgt, nx, ny } };
+      e.jobs.push(job); pool.queue.push(job); }));
+    pump();
+    return Promise.all(parts).then(res => (res.some(r => !r) ? null : res));
+  }).then(v => { if (!v && matchCache.get(key) === e) matchCache.delete(key); return v; });
   return e.promise;
 }
 function meanDbz(arrs) {                                    // the mean of reflectivity is taken in linear Z (mm^6/m^3) and converted back: averaging dBZ itself understates strong echoes
@@ -606,6 +727,11 @@ async function viewField(mode, fi = state.frame, opt = {}) {           // -> { v
   if (mode === "pmm" || mode === "lpmm") {
     const km = mode === "lpmm" ? state.lpmm : 0, key = [p.key, win, fi, mode, km, mem.join()].join("|");
     values = await matched(key, arrs, km, opt);
+    if (!values) return { error: "Interrupted - try again." };
+  } else if (isSam(mode)) {
+    const mk = mem.join(), al = await aligned([p.key, win, fi, "sam", mk].join("|"), alignedPmm(p, win, fi, mem), arrs, opt);
+    if (!al) return { error: "Interrupted - try again." };
+    values = mode === "sam" ? reduce(al, "mean") : await matched([p.key, win, fi, "samlpm", state.lpmm, mk].join("|"), al, state.lpmm, opt);
     if (!values) return { error: "Interrupted - try again." };
   } else if (p.cat) values = reduceCat(arrs, mode);
   else if (mode === "mean" && isDbz(p)) values = meanDbz(arrs);
@@ -1055,7 +1181,7 @@ $("#btn-png").addEventListener("click", exportPNG);
 let renderToken = 0, loadTimer = null;
 async function render() {
   const token = ++renderToken, p = prod(); prefetchGen++;
-  if (!p.pmm && (state.mode === "pmm" || state.mode === "lpmm")) state.mode = "mean";      // e.g. switching from snowfall to temperature while a PMM view is up
+  if ((!p.pmm && (state.mode === "pmm" || state.mode === "lpmm")) || (!p.sam && isSam(state.mode))) state.mode = "mean";      // e.g. switching from snowfall to temperature (or freezing rain) while a PMM / SAM view is up
   if (!hasMembers(p) && p.available.refs && state.mode !== "refs") { state.mode = "refs"; state.forcedRefs = true; }    // 1 km reflectivity: only the REFS PMM exists
   else if (state.forcedRefs && hasMembers(p)) { state.mode = "mean"; state.forcedRefs = false; }                        // ... and leaving it goes back to the member view
   if (!layoutOk(p, state.layout)) state.layout = "map";
@@ -1082,6 +1208,11 @@ async function render() {
   if (mode === "pmm" || mode === "lpmm") { const n = activeMembers().length; notes.push(mode === "pmm"
     ? `PMM keeps the member-mean pattern but takes its amounts from the pooled member values over the whole map, restoring the amplitude the plain mean smooths away. With ${n} member${n === 1 ? "" : "s"} the pooled distribution is coarse.`
     : `LPMM does the same within local patches (${Math.round(state.lpmm / 3)} km) using a ${state.lpmm} km neighbourhood, so distant regimes do not set the amounts. With ${n} member${n === 1 ? "" : "s"} the pooled distribution is coarse.`); }
+  if (isSam(mode)) { const n = activeMembers().length; notes.push((mode === "sam"
+    ? "SAM (experimental): each member is first shifted toward the probability-matched mean by a smooth displacement field (Lee et al. 2024), keeping its own amounts, and the shifted members are then averaged. Features that the members place in slightly different spots therefore add up instead of smearing out."
+    : `SAM–LPM (experimental): the spatially aligned members are combined with localized probability matching (${Math.round(state.lpmm / 3)} km patches, ${state.lpmm} km neighbourhood), restoring the amplitude the aligned mean smooths.`)
+    + " Alignment hides location spread, so it shows where the members agree after shifting, not how likely a spot is to get the amount: use Probability for that. Shown values do not conserve the model's total precipitation, and the method was verified on warm-season rainfall only, not on snowfall."
+    + (n < 3 ? " With fewer than 3 members there is little to align." : "")); }
   if (mode in PCT_MODES) { const n = activeMembers().length; notes.push(`Percentiles are interpolated across the ${n} member${n === 1 ? "" : "s"} switched on, so with so few members P5/P10 sit close to the minimum and P90/P95 close to the maximum.`); }
   if (notes.length) { notice.hidden = false; notice.textContent = notes.join(" "); }
   mapHeader(mode);
@@ -1103,8 +1234,8 @@ async function render() {
 let current = null;
 
 async function renderStamps(token, p) {
-  const defs = p.cat ? [["refs", "REFS (PMM echo + mean type)"], ["mean", "Consensus"], ["max", "Strongest member"], ...D.members.map(m => [m, m])] : state.layout === "pctl" ? MODES.filter(x => !["refs", "spread", "prob", "pmm", "lpmm"].includes(x[0])).map(x => [x[0], x[1].replace("Median (50th percentile)", "Median (P50)").replace(" percentile", "")])
-    : [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ...(p.pmm ? [["pmm", "PMM"], ["lpmm", "LPMM"]] : []), ["spread", "Spread (σ)"], ["prob", "Probability"], ...D.members.map(m => [m, m])];
+  const defs = p.cat ? [["refs", "REFS (PMM echo + mean type)"], ["mean", "Consensus"], ["max", "Strongest member"], ...D.members.map(m => [m, m])] : state.layout === "pctl" ? MODES.filter(x => !["refs", "spread", "prob", "pmm", "lpmm", "sam", "samlpm"].includes(x[0])).map(x => [x[0], x[1].replace("Median (50th percentile)", "Median (P50)").replace(" percentile", "")])
+    : [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ...(p.pmm ? [["pmm", "PMM"], ["lpmm", "LPMM"]] : []), ...(p.sam ? [["sam", "SAM"], ["samlpm", "SAM–LPM"]] : []), ["spread", "Spread (σ)"], ["prob", "Probability"], ...D.members.map(m => [m, m])];
   const grid = $("#stamps"); grid.replaceChildren(); grid.className = state.layout === "pctl" ? "pctl" : "";
   const first = await viewField("mean", state.frame, { tok: token }); if (token !== renderToken) return;
   const lg = $("#slegend").getContext("2d"); lg.fillStyle = "#fff"; lg.fillRect(0, 0, 1200, 96);
@@ -1371,7 +1502,7 @@ function controls() {
   seg($("#seg-mode"), modesFor(p).map(([k, , l]) => ({ value: k, label: l, title: modeLabel(k), disabled: k === "refs" && !p.available.refs })),
       state.mode.startsWith("m0") ? null : state.mode, m => set({ mode: m }));
   $("#g-thr").hidden = state.mode !== "prob";
-  $("#g-lpmm").hidden = state.mode !== "lpmm";
+  $("#g-lpmm").hidden = state.mode !== "lpmm" && state.mode !== "samlpm";
   seg($("#seg-lpmm"), [120, 180, 240].map(k => ({ value: k, label: `${k} km` })), state.lpmm, k => set({ lpmm: k }));
   seg($("#seg-thr"), thrList(p).map(t => ({ value: t, label: `${p.thr_dir === "le" ? "≤" : "≥"} ${t} ${p.unit}` })), thrOf(p), t => set({ thr: t }));
   seg($("#seg-members"), D.members.map(m => ({ value: m, label: m, on: state.on[m], disabled: !p.available[m] })), null, m => set({ on: { ...state.on, [m]: !state.on[m] } }), true);
@@ -1408,7 +1539,7 @@ function updateTimeline() {
 }
 function header(mode) {                                     // the text block of the page header and of the exported PNG
   const p = prod(), f = state.frame, w = p.kind === "cum" && state.win ? `${state.win}-hr ` : "", n = activeMembers().length;
-  const sub = mode === "prob" ? `Probability ${p.thr_dir === "le" ? "≤" : "≥"} ${thrOf(p)} ${p.unit}` : `${modeLabel(mode)}${mode === "lpmm" ? ` · ${state.lpmm} km domain` : ""} (${p.unit})`;
+  const sub = mode === "prob" ? `Probability ${p.thr_dir === "le" ? "≤" : "≥"} ${thrOf(p)} ${p.unit}` : `${modeLabel(mode)}${mode === "lpmm" || mode === "samlpm" ? ` · ${state.lpmm} km domain` : ""} (${p.unit})`;
   const fromMembers = mode !== "refs" && !mode.startsWith("m0");
   const exportSub = ["RRFS ensemble", sub, p.kind === "cum" && !state.win && "run total",
     fromMembers && (n === D.members.length ? `${n} members` : `${n} of ${D.members.length} members: ${activeMembers().join(", ")}`), D.demo && "SYNTHETIC DEMO DATA"].filter(Boolean).join(" · ");
@@ -1483,7 +1614,7 @@ const writeUrl = () => {
 };
 function set(patch) { if (patch.frame !== undefined && patch.frame !== state.frame) lastDir = Math.sign(patch.frame - state.frame); Object.assign(state, patch); render(); }
 function prefetch() {                                       // heavy views: compute the neighbouring hours in the background so stepping and playing are instant
-  if (state.layout !== "map" || (state.mode !== "pmm" && state.mode !== "lpmm")) return;
+  if (state.layout !== "map" || (state.mode !== "pmm" && state.mode !== "lpmm" && !isSam(state.mode))) return;
   const gen = prefetchGen, nf = D.frames.length, d = lastDir || 1;
   for (const f of [state.frame + d, state.frame + 2 * d, state.frame - d, state.frame + 3 * d]) if (f >= 0 && f < nf) viewField(state.mode, f, { gen }).catch(() => {});
 }
