@@ -52,7 +52,7 @@ def test_member_products_complete_and_physical(member, rg):
     ny, nx = rg.shape
     for k, a in out.items():
         assert a.shape == (2, ny, nx), k
-        if "cobblift" in k or k == "refd":        # cobblift needs the deterministic run's DZDT; 1 km reflectivity is published in the REFS PMM file only
+        if "cobblift" in k or k in ("refd", "dgz_omega"):        # cobblift and the in-DGZ ascent need the deterministic run's DZDT; 1 km reflectivity is published in the REFS PMM file only
             continue
         assert np.isfinite(a).any(), f"{k} is empty"
     assert info["missing"] == {}
