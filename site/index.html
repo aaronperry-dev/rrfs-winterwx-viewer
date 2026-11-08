@@ -561,23 +561,31 @@ function meanDbz(arrs) {                                    // the mean of refle
   for (let i = 0; i < n; i++) { let c = 0, z = 0; for (let k = 0; k < arrs.length; k++) { const v = arrs[k][i]; if (v === v) { c++; z += Math.pow(10, v / 10); } } out[i] = c ? 10 * Math.log10(z / c) : NaN; }
   return out;
 }
-function reduceCat(arrs, mode) {                            // codes are class * 16 + bin (bin = floor(dBZ / 5), 0 = no echo); see colors.py
-  const n = arrs[0].length, out = new Float32Array(n);
+// Type codes are class * 64 + q: q = 0 no echo, otherwise the echo is (q - 1) * 1.25 dBZ.  The page works with two fields: the echo in dBZ (interpolated like every other map)
+// and the class of each cell (a label, chosen by vote among the cells an output pixel is made from), attached to the echo array as `.cls`.
+function decodeCat(codes) {
+  const n = codes.length, d = new Float32Array(n), cl = new Uint8Array(n);
+  for (let i = 0; i < n; i++) { const c = codes[i]; if (c !== c) { d[i] = NaN; continue; } const q = c & 63; d[i] = q ? (q - 1) * 1.25 : -20; cl[i] = c >> 6; }
+  d.cls = cl; return d;
+}
+function reduceCat(arrs, mode) {                            // "mean": linear-Z mean echo and the type most members with an echo show; "max": the strongest member's echo and type
+  const n = arrs[0].length, out = new Float32Array(n), cls = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
-    let c = 0, z = 0, bestKey = -1, best = 0; const votes = [0, 0, 0, 0];
+    let c = 0, z = 0, bestKey = -Infinity, bestD = -20, bestCl = 0; const votes = [0, 0, 0, 0];
     for (let k = 0; k < arrs.length; k++) {
       const v = arrs[k][i]; if (v !== v) continue;
-      c++; const b = v & 15, cl = v >> 4; if (!b) continue;
-      z += Math.pow(10, (b * 5 + 2.5) / 10); votes[cl]++;
-      const key = b * 4 + cl; if (key > bestKey) { bestKey = key; best = v; }                 // strongest echo; a tie goes to the more wintry type
+      const q = v & 63, cl = v >> 6, d = q ? (q - 1) * 1.25 : -20;
+      c++; z += Math.pow(10, d / 10);
+      if (!q) continue;
+      votes[cl]++; const key = d + cl * 1e-3; if (key > bestKey) { bestKey = key; bestD = d; bestCl = cl; }       // a tie in echo goes to the more wintry type
     }
     if (!c) { out[i] = NaN; continue; }
-    if (mode === "max") { out[i] = best; continue; }
-    const bin = z > 0 ? Math.min(15, Math.max(0, Math.floor(10 * Math.log10(z / c) / 5))) : 0;
-    let cl = 0; for (let t = 1; t < 4; t++) if (votes[t] >= votes[cl]) cl = t;                // most common type among the members with an echo; a tie goes to the more wintry one
-    out[i] = bin ? cl * 16 + bin : 0;
+    if (mode === "max") { out[i] = bestD; cls[i] = bestCl; continue; }
+    out[i] = 10 * Math.log10(z / c);
+    let cl = 0; for (let t = 1; t < 4; t++) if (votes[t] >= votes[cl]) cl = t;                // most common type; a tie goes to the more wintry one
+    cls[i] = cl;
   }
-  return out;
+  out.cls = cls; return out;
 }
 async function viewField(mode, fi = state.frame, opt = {}) {           // -> { values, style, unit, dec } or { error }
   const p = prod(), win = p.kind === "cum" ? state.win : 0, plain = { style: p, unit: p.unit, dec: p.decimals };
@@ -585,7 +593,7 @@ async function viewField(mode, fi = state.frame, opt = {}) {           // -> { v
   if (mode === "refs" || mode.startsWith("m0")) {
     const values = await srcField(p, mode, fi, win);
     if (!values) return { error: mode === "refs" ? "The official REFS mean file does not carry this field - use the member mean." : `${mode} has no data for this field.` };
-    return finite(values) ? { values, ...plain } : { error: none };
+    return finite(values) ? { values: p.cat ? decodeCat(values) : values, ...plain } : { error: none };
   }
   const mem = activeMembers();
   if (!mem.length) return { error: "All members are switched off - turn at least one on." };
@@ -662,16 +670,40 @@ function paintField(ctx, x0, y0, W, H, values, style, vw = view, ds = 1) {    //
   const W0 = W, H0 = H; if (ds > 1) { W = Math.ceil(W / ds); H = Math.ceil(H / ds); }
   // Values are interpolated (bilinear) first and only then put into colour classes, so no colour is ever invented and the class edges follow the
   // interpolated field; vw.cells shows the nearest 3 km cell instead.  Bilinear never leaves the range of the four surrounding cells.
-  const t0 = performance.now(), { nx } = D.grid, g = geometry(W, H, vw), lv = style.levels, nl = lv.length, cells = vw.cells || style.cat;      // a type code is a label, not a quantity: nearest cell only
-  let lut = lutCache.get(style);                            // one packed 32-bit colour per level interval
-  if (!lut) { lut = style.colors.map(c => { if (!c) return 0; const [r, gr, b] = hex(c); return (LITTLE ? (255 << 24 | b << 16 | gr << 8 | r) : (r << 24 | gr << 16 | b << 8 | 255)) >>> 0; }); lutCache.set(style, lut); }
+  const t0 = performance.now(), { nx } = D.grid, g = geometry(W, H, vw), lv = style.levels, nl = lv.length, cells = vw.cells;
+  const cl = values.cls;                                    // reflectivity by precipitation type: the echo is interpolated like any field, the class is chosen by vote
+  const pack = c => { if (!c) return 0; const [r, gr, b] = hex(c); return (LITTLE ? (255 << 24 | b << 16 | gr << 8 | r) : (r << 24 | gr << 16 | b << 8 | 255)) >>> 0; };
+  let luts = null;
+  if (cl) { luts = lutCache.get(style.classes); if (!luts) lutCache.set(style.classes, luts = style.classes.map(cols => [0, ...cols.map(pack)])); }
+  let lut = cl ? null : lutCache.get(style);                // one packed 32-bit colour per level interval
+  if (!cl && !lut) { lut = style.colors.map(c => { if (!c) return 0; const [r, gr, b] = hex(c); return (LITTLE ? (255 << 24 | b << 16 | gr << 8 | r) : (r << 24 | gr << 16 | b << 8 | 255)) >>> 0; }); lutCache.set(style, lut); }
   let img = imgBuf.get(W + "x" + H); if (!img) imgBuf.set(W + "x" + H, img = new ImageData(W, H));
-  const px = new Uint32Array(img.data.buffer).fill(0);
+  const px = new Uint32Array(img.data.buffer).fill(0), tv = new Float32Array(4);
   for (let j = 0; j < H; j++) {
     const r0 = g.yi[j] * nx, fy = g.yf[j], row = j * W;
     for (let i = 0; i < W; i++) {
       const k = r0 + g.xi[i], fx = g.xf[i], a = values[k], b = values[k + 1], c = values[k + nx], d = values[k + nx + 1];
       let v;
+      if (cl) {                                             // echo: as below.  class: the vote of the cells that carry an echo, weighted like the interpolation
+        const ok = a === a && b === b && c === c && d === d;
+        let wa = 0, wb = 0, wc = 0, wd = 0;
+        if (cells || !ok) {                                 // the nearest valid cell
+          let q = fx < .5 ? (fy < .5 ? 0 : 2) : (fy < .5 ? 1 : 3);
+          if (!(q === 0 ? a === a : q === 1 ? b === b : q === 2 ? c === c : d === d)) q = a === a ? 0 : b === b ? 1 : c === c ? 2 : d === d ? 3 : -1;
+          if (q < 0) continue;
+          if (q === 0) wa = 1; else if (q === 1) wb = 1; else if (q === 2) wc = 1; else wd = 1;
+          v = q === 0 ? a : q === 1 ? b : q === 2 ? c : d;
+        } else { wa = (1 - fx) * (1 - fy); wb = fx * (1 - fy); wc = (1 - fx) * fy; wd = fx * fy; v = a * wa + b * wb + c * wc + d * wd; }
+        let lo = 0, hi = nl;
+        while (lo < hi) { const m = (lo + hi) >> 1; if (lv[m] <= v) lo = m + 1; else hi = m; }
+        if (!lo) continue;                                  // under 5 dBZ: nothing drawn
+        const v0 = wa * (a >= 0) , v1 = wb * (b >= 0), v2 = wc * (c >= 0), v3 = wd * (d >= 0);
+        let best = 0, bw = -1; tv[0] = tv[1] = tv[2] = tv[3] = 0;
+        tv[cl[k]] += v0; tv[cl[k + 1]] += v1; tv[cl[k + nx]] += v2; tv[cl[k + nx + 1]] += v3;
+        for (let q = 0; q < 4; q++) if (tv[q] >= bw) { bw = tv[q]; best = q; }          // a tie goes to the more wintry type
+        px[row + i] = luts[best][lo];
+        continue;
+      }
       if (cells) { v = fx < .5 ? (fy < .5 ? a : c) : (fy < .5 ? b : d); if (v !== v) continue; }
       else if (a === a && b === b && c === c && d === d) v = (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
       else {                                                // next to missing data: the nearest valid corner, else any valid one
@@ -702,17 +734,17 @@ function bold(ctx, x, y, b, r, size, right) {
   ctx.font = `400 ${size}px system-ui, sans-serif`; ctx.fillText(r, x0 + bw, y);
 }
 function drawLegend(ctx, x, y, w, h, style, fs) {
-  if (style.cat) {                                          // four ramps side by side, one per precipitation type, 5 dBZ per block
-    const gap = Math.min(14, w * 0.02), cw = (w - gap * 3) / 4, bw = cw / 15;
+  if (style.cat) {                                          // four ramps side by side, one per precipitation type, 2.5 dBZ per block from 5 to 75
+    const gap = Math.min(14, w * 0.02), cw = (w - gap * 3) / 4, nb = style.levels.length - 1, bw = cw / nb, e0 = style.levels[0], span = style.levels[nb] - e0;
     for (let c = 0; c < 4; c++) {
       const x0 = x + c * (cw + gap);
-      for (let b = 1; b <= 15; b++) { ctx.fillStyle = style.colors[c * 16 + b]; ctx.fillRect(x0 + (b - 1) * bw, y, Math.ceil(bw) + 0.5, h); }
+      for (let b = 0; b < nb; b++) { ctx.fillStyle = style.classes[c][b]; ctx.fillRect(x0 + b * bw, y, Math.ceil(bw) + 0.5, h); }
       ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.strokeRect(x0, y, cw, h);
       if (h < 16) continue;                                 // the little legends of the member panels: colours only
       ctx.textBaseline = "middle"; ctx.textAlign = "left"; ctx.font = `700 ${fs}px system-ui, sans-serif`;
       ctx.lineWidth = 3; ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.strokeText(PTYPE_NAMES[c], x0 + 4, y + h / 2 + 1); ctx.fillStyle = "#000"; ctx.fillText(PTYPE_NAMES[c], x0 + 4, y + h / 2 + 1);
       ctx.lineWidth = 1; ctx.strokeStyle = "#000"; ctx.font = `${fs - 1}px system-ui, sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "top";
-      for (const t of [20, 40, 60]) { const tx = x0 + (t / 5 - 1) * bw; ctx.beginPath(); ctx.moveTo(tx, y + h); ctx.lineTo(tx, y + h + 4); ctx.stroke(); ctx.fillText(t, tx, y + h + 5); }
+      for (const t of [20, 40, 60]) { const tx = x0 + (t - e0) / span * cw; ctx.beginPath(); ctx.moveTo(tx, y + h); ctx.lineTo(tx, y + h + 4); ctx.stroke(); ctx.fillText(t, tx, y + h + 5); }
     }
     return;
   }
@@ -971,7 +1003,7 @@ function drawMain(ctx, v, mode, markers, vw = view, ds = 1) {
   for (const s of stationList) {
     const val = v.values[s.r * nx + s.c]; if (val !== val) continue;
     if (v.style.colors[0] === null && val < lv[0]) continue;
-    const t = v.style.cat ? `${["R", "S", "IP", "ZR"][val >> 4]} ${(val & 15) * 5}` : fnum(val, v.dec), x = MAP.x + (s.fx - u0) * z * MAP.w, y = MAP.y + (s.fy - v0) * z * MAP.h;
+    const t = v.style.cat ? `${["R", "S", "IP", "ZR"][v.values.cls[s.r * nx + s.c]]} ${Math.round(val)}` : fnum(val, v.dec), x = MAP.x + (s.fx - u0) * z * MAP.w, y = MAP.y + (s.fy - v0) * z * MAP.h;
     ctx.strokeText(t, x, y); ctx.fillText(t, x, y);
   }
   if (markers && state.point) {
@@ -1481,7 +1513,6 @@ document.addEventListener("keydown", e => {
   else if (k === "s" || k === "S") exportPNG();
   else if (k === " " && e.target.tagName !== "BUTTON") { e.preventDefault(); play(!playTimer); }
 });
-const catText = v => { const b = v & 15; return b ? `${PTYPE_NAMES[v >> 4]} · ${b * 5}${b === 15 ? "+" : "-" + (b * 5 + 5)} dBZ` : "No echo"; };
 function cellAt(ev) {
   const cv = $("#map"), rc = cv.getBoundingClientRect(), k = 1200 / rc.width;
   const px = ((ev.clientX - rc.left) * k - MAP.x) / MAP.w, py = ((ev.clientY - rc.top) * k - MAP.y) / MAP.h;
@@ -1494,7 +1525,7 @@ $("#map").addEventListener("mousemove", ev => {
   const cell = current && cellAt(ev);
   if (!cell) { tip.hidden = true; return; }
   const v = current.v.values[cell.r * D.grid.nx + cell.c];
-  tip.hidden = v !== v; if (v === v) { tip.textContent = current.v.style.cat ? catText(v) : `${fnum(v, current.v.dec)} ${current.v.unit}`; tip.style.left = ev.clientX + 14 + "px"; tip.style.top = ev.clientY + 12 + "px"; }
+  tip.hidden = v !== v; if (v === v) { tip.textContent = current.v.style.cat ? (v < 5 ? "No echo" : `${PTYPE_NAMES[current.v.values.cls[cell.r * D.grid.nx + cell.c]]} · ${Math.round(v)} dBZ`) : `${fnum(v, current.v.dec)} ${current.v.unit}`; tip.style.left = ev.clientX + 14 + "px"; tip.style.top = ev.clientY + 12 + "px"; }
 });
 $("#map").addEventListener("mouseleave", () => { $("#tip").hidden = true; });
 $("#map").addEventListener("click", ev => { if (dragged) { dragged = false; return; } const cell = cellAt(ev); if (cell) { state.point = cell; plumeLoc = "map"; if (current) { drawMain($("#map").getContext("2d"), current.v, current.mode, true); } plumes(); writeUrl(); } });
