@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RRFS Winter Weather Ensemble Viewer · New England</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%231f6feb%27/%3E%3Cpath d=%27M16 6v20M7.3 11l17.4 10M7.3 21l17.4-10%27 fill=%27none%27 stroke=%27white%27 stroke-width=%272.4%27 stroke-linecap=%27round%27/%3E%3C/svg%3E">
-<meta name="description" content="RRFS ensemble winter-weather dashboard for New England: QPF, snowfall by four ratio methods, ice and precipitation type, dendritic growth zone, blizzard criteria, wind chill - REFS mean, member mean, spread and probabilities.">
+<meta name="description" content="RRFS ensemble winter-weather dashboard for New England: QPF, radar reflectivity (composite, 1 km, by precipitation type), snowfall by four ratio methods, ice and precipitation type, dendritic growth zone, blizzard criteria, wind chill - REFS mean, member mean, spread and probabilities.">
 <style>
   :root {
     color-scheme: light dark;
@@ -323,7 +323,20 @@ const store = new Map();                                    // "product.source" 
 
 // ---------------------------------------------------------------- helpers
 const prod = () => D.products.find(p => p.key === state.product);
-const modesFor = p => MODES.filter(x => p.pmm || (x[0] !== "pmm" && x[0] !== "lpmm"));        // PMM / LPMM only for precipitation amounts
+const hasMembers = p => D.members.some(m => p.available[m]);          // 1 km reflectivity is published only as the REFS probability-matched mean: no members
+const isDbz = p => p.unit === "dBZ" && !p.cat;
+const PTYPE_NAMES = ["Rain", "Snow", "Sleet", "Freezing rain"];
+const CAT_MODES = { refs: ["RRFS PMM echo + REFS mean type", "REFS (PMM)"], mean: ["Member consensus (most common type, mean echo)", "Consensus"], max: ["Strongest member (its echo and type)", "Strongest"] };
+function modeInfo(m, p = prod()) {                          // [long label, short label]
+  if (p && p.cat && CAT_MODES[m]) return CAT_MODES[m];
+  if (p && isDbz(p) && m === "refs") return ["RRFS probability-matched mean (REFS PMM)", "REFS (PMM)"];
+  if (p && isDbz(p) && m === "mean") return ["Member mean (linear Z)", "Mean"];
+  const b = MODES.find(x => x[0] === m); return [b[1], b[2]];
+}
+const modesFor = p => (!hasMembers(p) ? MODES.filter(x => x[0] === "refs")
+  : p.cat ? MODES.filter(x => CAT_MODES[x[0]])
+  : MODES.filter(x => (p.pmm || (x[0] !== "pmm" && x[0] !== "lpmm")) && !(isDbz(p) && x[0] === "spread"))).map(x => [x[0], ...modeInfo(x[0], p)]);   // PMM / LPMM only for precipitation amounts; no spread of dBZ
+const layoutOk = (p, l) => l === "map" || (hasMembers(p) && !(l === "pctl" && p.cat));
 const fmtDate = (iso, tz, long) => new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric",
     ...(long ? { year: "numeric" } : {}), hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(iso));
 const zfmt = iso => { const t = new Date(iso); const p = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(t);
@@ -335,7 +348,7 @@ const MODES = [["refs", "RRFS Mean (REFS)", "RRFS Mean (REFS)"], ["min", "Minimu
   ["mean", "Member mean", "Mean"], ["pmm", "Probability-matched mean (PMM)", "PMM"], ["lpmm", "Localized probability-matched mean (LPMM)", "LPMM"], ["p75", "75th percentile", "P75"], ["p90", "90th percentile", "P90"],
   ["p95", "95th percentile", "P95"], ["max", "Maximum", "Max"], ["spread", "Spread (σ)", "Spread (σ)"], ["prob", "Probability", "Probability"]];
 const PCT_MODES = { p05: 0.05, p10: 0.10, p25: 0.25, p50: 0.50, p75: 0.75, p90: 0.90, p95: 0.95 };
-const modeLabel = m => m.startsWith("m0") ? m : MODES.find(x => x[0] === m)[1];
+const modeLabel = (m, p) => m.startsWith("m0") ? m : modeInfo(m, p)[0];
 
 function seg(el, items, current, onPick, multi) {
   el.replaceChildren(...items.map(it => {
@@ -543,6 +556,29 @@ function matched(key, arrs, km, opt) {
   matchCache.set(key, e); if (matchCache.size > 24) matchCache.delete(matchCache.keys().next().value);
   return e.promise;
 }
+function meanDbz(arrs) {                                    // the mean of reflectivity is taken in linear Z (mm^6/m^3) and converted back: averaging dBZ itself understates strong echoes
+  const n = arrs[0].length, out = new Float32Array(n);
+  for (let i = 0; i < n; i++) { let c = 0, z = 0; for (let k = 0; k < arrs.length; k++) { const v = arrs[k][i]; if (v === v) { c++; z += Math.pow(10, v / 10); } } out[i] = c ? 10 * Math.log10(z / c) : NaN; }
+  return out;
+}
+function reduceCat(arrs, mode) {                            // codes are class * 16 + bin (bin = floor(dBZ / 5), 0 = no echo); see colors.py
+  const n = arrs[0].length, out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let c = 0, z = 0, bestKey = -1, best = 0; const votes = [0, 0, 0, 0];
+    for (let k = 0; k < arrs.length; k++) {
+      const v = arrs[k][i]; if (v !== v) continue;
+      c++; const b = v & 15, cl = v >> 4; if (!b) continue;
+      z += Math.pow(10, (b * 5 + 2.5) / 10); votes[cl]++;
+      const key = b * 4 + cl; if (key > bestKey) { bestKey = key; best = v; }                 // strongest echo; a tie goes to the more wintry type
+    }
+    if (!c) { out[i] = NaN; continue; }
+    if (mode === "max") { out[i] = best; continue; }
+    const bin = z > 0 ? Math.min(15, Math.max(0, Math.floor(10 * Math.log10(z / c) / 5))) : 0;
+    let cl = 0; for (let t = 1; t < 4; t++) if (votes[t] >= votes[cl]) cl = t;                // most common type among the members with an echo; a tie goes to the more wintry one
+    out[i] = bin ? cl * 16 + bin : 0;
+  }
+  return out;
+}
 async function viewField(mode, fi = state.frame, opt = {}) {           // -> { values, style, unit, dec } or { error }
   const p = prod(), win = p.kind === "cum" ? state.win : 0, plain = { style: p, unit: p.unit, dec: p.decimals };
   const none = "No data for this field at this time (the source file does not provide it).";
@@ -562,7 +598,9 @@ async function viewField(mode, fi = state.frame, opt = {}) {           // -> { v
     const km = mode === "lpmm" ? state.lpmm : 0, key = [p.key, win, fi, mode, km, mem.join()].join("|");
     values = await matched(key, arrs, km, opt);
     if (!values) return { error: "Interrupted - try again." };
-  } else values = reduce(arrs, mode, thr, p.thr_dir);
+  } else if (p.cat) values = reduceCat(arrs, mode);
+  else if (mode === "mean" && isDbz(p)) values = meanDbz(arrs);
+  else values = reduce(arrs, mode, thr, p.thr_dir);
   if (!finite(values)) return { error: none };
   if (mode === "prob") return { values, style: PROB, unit: "%", dec: 0, thr, used, lacking };
   if (mode === "spread") return { values, style: spreadStyle(p), unit: p.unit, dec: Math.max(p.decimals, 1), used, lacking };
@@ -624,7 +662,7 @@ function paintField(ctx, x0, y0, W, H, values, style, vw = view, ds = 1) {    //
   const W0 = W, H0 = H; if (ds > 1) { W = Math.ceil(W / ds); H = Math.ceil(H / ds); }
   // Values are interpolated (bilinear) first and only then put into colour classes, so no colour is ever invented and the class edges follow the
   // interpolated field; vw.cells shows the nearest 3 km cell instead.  Bilinear never leaves the range of the four surrounding cells.
-  const t0 = performance.now(), { nx } = D.grid, g = geometry(W, H, vw), lv = style.levels, nl = lv.length, cells = vw.cells;
+  const t0 = performance.now(), { nx } = D.grid, g = geometry(W, H, vw), lv = style.levels, nl = lv.length, cells = vw.cells || style.cat;      // a type code is a label, not a quantity: nearest cell only
   let lut = lutCache.get(style);                            // one packed 32-bit colour per level interval
   if (!lut) { lut = style.colors.map(c => { if (!c) return 0; const [r, gr, b] = hex(c); return (LITTLE ? (255 << 24 | b << 16 | gr << 8 | r) : (r << 24 | gr << 16 | b << 8 | 255)) >>> 0; }); lutCache.set(style, lut); }
   let img = imgBuf.get(W + "x" + H); if (!img) imgBuf.set(W + "x" + H, img = new ImageData(W, H));
@@ -664,6 +702,20 @@ function bold(ctx, x, y, b, r, size, right) {
   ctx.font = `400 ${size}px system-ui, sans-serif`; ctx.fillText(r, x0 + bw, y);
 }
 function drawLegend(ctx, x, y, w, h, style, fs) {
+  if (style.cat) {                                          // four ramps side by side, one per precipitation type, 5 dBZ per block
+    const gap = Math.min(14, w * 0.02), cw = (w - gap * 3) / 4, bw = cw / 15;
+    for (let c = 0; c < 4; c++) {
+      const x0 = x + c * (cw + gap);
+      for (let b = 1; b <= 15; b++) { ctx.fillStyle = style.colors[c * 16 + b]; ctx.fillRect(x0 + (b - 1) * bw, y, Math.ceil(bw) + 0.5, h); }
+      ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.strokeRect(x0, y, cw, h);
+      if (h < 16) continue;                                 // the little legends of the member panels: colours only
+      ctx.textBaseline = "middle"; ctx.textAlign = "left"; ctx.font = `700 ${fs}px system-ui, sans-serif`;
+      ctx.lineWidth = 3; ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.strokeText(PTYPE_NAMES[c], x0 + 4, y + h / 2 + 1); ctx.fillStyle = "#000"; ctx.fillText(PTYPE_NAMES[c], x0 + 4, y + h / 2 + 1);
+      ctx.lineWidth = 1; ctx.strokeStyle = "#000"; ctx.font = `${fs - 1}px system-ui, sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "top";
+      for (const t of [20, 40, 60]) { const tx = x0 + (t / 5 - 1) * bw; ctx.beginPath(); ctx.moveTo(tx, y + h); ctx.lineTo(tx, y + h + 4); ctx.stroke(); ctx.fillText(t, tx, y + h + 5); }
+    }
+    return;
+  }
   const lv = style.levels, n = lv.length - 1, bw = w / n;
   for (let i = 0; i < n; i++) { const c = style.colors[i + 1]; if (c) { ctx.fillStyle = c; ctx.fillRect(x + i * bw, y, Math.ceil(bw) + 0.5, h); } }
   ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.strokeRect(x, y, w, h);
@@ -919,7 +971,7 @@ function drawMain(ctx, v, mode, markers, vw = view, ds = 1) {
   for (const s of stationList) {
     const val = v.values[s.r * nx + s.c]; if (val !== val) continue;
     if (v.style.colors[0] === null && val < lv[0]) continue;
-    const t = fnum(val, v.dec), x = MAP.x + (s.fx - u0) * z * MAP.w, y = MAP.y + (s.fy - v0) * z * MAP.h;
+    const t = v.style.cat ? `${["R", "S", "IP", "ZR"][val >> 4]} ${(val & 15) * 5}` : fnum(val, v.dec), x = MAP.x + (s.fx - u0) * z * MAP.w, y = MAP.y + (s.fy - v0) * z * MAP.h;
     ctx.strokeText(t, x, y); ctx.fillText(t, x, y);
   }
   if (markers && state.point) {
@@ -971,15 +1023,27 @@ let renderToken = 0, loadTimer = null;
 async function render() {
   const token = ++renderToken, p = prod(); prefetchGen++;
   if (!p.pmm && (state.mode === "pmm" || state.mode === "lpmm")) state.mode = "mean";      // e.g. switching from snowfall to temperature while a PMM view is up
+  if (!hasMembers(p) && p.available.refs && state.mode !== "refs") { state.mode = "refs"; state.forcedRefs = true; }    // 1 km reflectivity: only the REFS PMM exists
+  else if (state.forcedRefs && hasMembers(p)) { state.mode = "mean"; state.forcedRefs = false; }                        // ... and leaving it goes back to the member view
+  if (!layoutOk(p, state.layout)) state.layout = "map";
+  if (p.cat && !["refs", "mean", "max"].includes(state.mode) && !state.mode.startsWith("m0")) state.mode = "mean";      // a type map has no percentiles, spread or probabilities
+  if (isDbz(p) && state.mode === "spread") state.mode = "mean";
   writeUrl(); statusLine(); controls();
-  $("#mapwrap").hidden = state.layout !== "map"; $("#stampwrap").hidden = state.layout === "map"; $("#p-summary").hidden = state.layout !== "map"; $("#p-gis").hidden = state.layout !== "map" || !D.gis;
+  $("#mapwrap").hidden = state.layout !== "map"; $("#stampwrap").hidden = state.layout === "map"; $("#p-summary").hidden = state.layout !== "map" || p.unit === "dBZ"; $("#p-gis").hidden = state.layout !== "map" || !D.gis;
   syncExport();
   $("#blurb").textContent = p.desc;
   const msg = $("#msg"), notice = $("#notice");
   notice.hidden = true;
   let mode = state.mode;
   const notes = [];
-  if (mode === "refs" && !p.available.refs) { mode = "mean"; notes.push("The official REFS mean file does not carry this field, so the member mean is shown."); }
+  if (mode === "refs" && !p.available.refs && hasMembers(p)) { mode = "mean"; notes.push(`The official REFS file does not carry this field, so the member ${p.cat ? "consensus" : "mean"} is shown.`); }
+  if (!hasMembers(p) && !p.available.refs) notes.push("This field is not in the current run's files.");
+  else if (p.key === "refd") notes.push("Base reflectivity is the model's 1 km AGL reflectivity. RRFS publishes it only in the REFS probability-matched mean, so there are no members, percentiles or probabilities for it.");
+  else if (p.cat && mode === "refs") notes.push("REFS view: the REFS probability-matched composite echo coloured by the type with the largest weight in the REFS mean (rain, snow, sleet or freezing rain).");
+  else if (p.cat && mode === "mean") notes.push("Consensus: the type most active members show (a tie goes to the more wintry type) with the member-mean echo, in 5 dBZ classes. Light echoes under 5 dBZ are not drawn.");
+  else if (p.cat && mode === "max") notes.push("Strongest member: at each point the member with the highest echo supplies both the echo and its precipitation type (wintry wins a tie).");
+  else if (p.cat && mode.startsWith("m0")) notes.push("This member's own composite echo, coloured by its precipitation-type flags (freezing rain, sleet, snow, otherwise rain).");
+  else if (isDbz(p) && mode === "mean") notes.push("The member mean is taken in linear Z, then converted back to dBZ, so strong cores are not averaged away. The official REFS PMM keeps the most realistic peaks.");
   if (p.kind === "cum" && state.win === 1) notes.push("1-hour accumulation in the hour ending at the valid time; the maps step every 3 hours.");
   else if (p.kind === "cum" && state.win > 1 && state.frame - state.win / D.frame_step < 0) notes.push(`The ${state.win}-hour window starts before the run began, so the run total so far is shown.`);
   if (mode === "pmm" || mode === "lpmm") { const n = activeMembers().length; notes.push(mode === "pmm"
@@ -1006,7 +1070,7 @@ async function render() {
 let current = null;
 
 async function renderStamps(token, p) {
-  const defs = state.layout === "pctl" ? MODES.filter(x => !["refs", "spread", "prob", "pmm", "lpmm"].includes(x[0])).map(x => [x[0], x[1].replace("Median (50th percentile)", "Median (P50)").replace(" percentile", "")])
+  const defs = p.cat ? [["refs", "REFS (PMM echo + mean type)"], ["mean", "Consensus"], ["max", "Strongest member"], ...D.members.map(m => [m, m])] : state.layout === "pctl" ? MODES.filter(x => !["refs", "spread", "prob", "pmm", "lpmm"].includes(x[0])).map(x => [x[0], x[1].replace("Median (50th percentile)", "Median (P50)").replace(" percentile", "")])
     : [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ...(p.pmm ? [["pmm", "PMM"], ["lpmm", "LPMM"]] : []), ["spread", "Spread (σ)"], ["prob", "Probability"], ...D.members.map(m => [m, m])];
   const grid = $("#stamps"); grid.replaceChildren(); grid.className = state.layout === "pctl" ? "pctl" : "";
   const first = await viewField("mean", state.frame, { tok: token }); if (token !== renderToken) return;
@@ -1279,7 +1343,7 @@ function controls() {
   seg($("#seg-thr"), thrList(p).map(t => ({ value: t, label: `${p.thr_dir === "le" ? "≤" : "≥"} ${t} ${p.unit}` })), thrOf(p), t => set({ thr: t }));
   seg($("#seg-members"), D.members.map(m => ({ value: m, label: m, on: state.on[m], disabled: !p.available[m] })), null, m => set({ on: { ...state.on, [m]: !state.on[m] } }), true);
   seg($("#seg-single"), D.members.map(m => ({ value: m, label: m, disabled: !p.available[m] })), state.mode, m => set({ mode: m }));
-  seg($("#seg-layout"), [{ value: "map", label: "Map" }, { value: "stamps", label: "All members" }, { value: "pctl", label: "Percentiles" }], state.layout, l => set({ layout: l }));
+  seg($("#seg-layout"), [{ value: "map", label: "Map" }, { value: "stamps", label: "All members", disabled: !layoutOk(p, "stamps") }, { value: "pctl", label: "Percentiles", disabled: !layoutOk(p, "pctl") || !!p.cat }], state.layout, l => set({ layout: l }));
   updateTimeline();
 }
 const hhmm = iso => { const t = new Date(iso); return String(t.getUTCHours()).padStart(2, "0") + String(t.getUTCMinutes()).padStart(2, "0"); };
@@ -1323,7 +1387,7 @@ function mapHeader(mode) {
   const h = header(mode);
   $("#mh-title").textContent = h.title;
   $("#mh-sub").textContent = state.layout === "pctl" ? "Percentiles across the members switched on"
-    : state.layout === "stamps" ? "REFS mean, member mean, spread, probability and each member" : h.sub;
+    : state.layout === "stamps" ? (prod().cat ? "REFS, member consensus, strongest member and each member" : "REFS mean, member mean, spread, probability and each member") : h.sub;
   $("#mh-run").textContent = `Run:   ${h.init}\nValid: ${h.valid} (${h.fh})`;
 }
 function statusLine() {
@@ -1417,6 +1481,7 @@ document.addEventListener("keydown", e => {
   else if (k === "s" || k === "S") exportPNG();
   else if (k === " " && e.target.tagName !== "BUTTON") { e.preventDefault(); play(!playTimer); }
 });
+const catText = v => { const b = v & 15; return b ? `${PTYPE_NAMES[v >> 4]} · ${b * 5}${b === 15 ? "+" : "-" + (b * 5 + 5)} dBZ` : "No echo"; };
 function cellAt(ev) {
   const cv = $("#map"), rc = cv.getBoundingClientRect(), k = 1200 / rc.width;
   const px = ((ev.clientX - rc.left) * k - MAP.x) / MAP.w, py = ((ev.clientY - rc.top) * k - MAP.y) / MAP.h;
@@ -1429,7 +1494,7 @@ $("#map").addEventListener("mousemove", ev => {
   const cell = current && cellAt(ev);
   if (!cell) { tip.hidden = true; return; }
   const v = current.v.values[cell.r * D.grid.nx + cell.c];
-  tip.hidden = v !== v; if (v === v) { tip.textContent = `${fnum(v, current.v.dec)} ${current.v.unit}`; tip.style.left = ev.clientX + 14 + "px"; tip.style.top = ev.clientY + 12 + "px"; }
+  tip.hidden = v !== v; if (v === v) { tip.textContent = current.v.style.cat ? catText(v) : `${fnum(v, current.v.dec)} ${current.v.unit}`; tip.style.left = ev.clientX + 14 + "px"; tip.style.top = ev.clientY + 12 + "px"; }
 });
 $("#map").addEventListener("mouseleave", () => { $("#tip").hidden = true; });
 $("#map").addEventListener("click", ev => { if (dragged) { dragged = false; return; } const cell = cellAt(ev); if (cell) { state.point = cell; plumeLoc = "map"; if (current) { drawMain($("#map").getContext("2d"), current.v, current.mode, true); } plumes(); writeUrl(); } });
