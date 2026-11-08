@@ -80,6 +80,44 @@ then the map with a right-hand sidebar of checkbox-style options (ensemble view,
 Colour ramps are fixed physical bins (a colour always means the same value in every frame and for every member). QPF and snowfall use the NWS Gray/Portland legends; wind and
 wind-chill legends are the same NWS-style ramps as the RTMA dashboard. The snow-ratio (SLR) maps use the ColorBrewer **RdYlBu** ramp, reversed: warm colours (red) are low ratios (dense, wet snow), cool colours (blue) are high ratios (light, fluffy snow), with pale yellow at 12–14:1 and one colour per bin (below 4, 4–6, 6–8, 8–10, 10–12, 12–14, 14–16, 16–18, 18–20, 20–25, 25–30:1; above 30 keeps the top blue).
 
+## More winter tools: snow level, cold air, forcing, profile p-type, timing, joint impacts
+
+Added after the products above (which are unchanged; a regression test pins their keys, order, storage and flags, and a second test runs the pre-change code and the current code on the same
+synthetic storm and requires identical existing products). All member products, so the mean, percentiles, probabilities and member views work on them.
+Everything below comes from fields the member files already carry (`TMP`, `RH`, `HGT`, `UGRD`, `VGRD` on 25 hPa levels, `PRES`, `HGT:surface`, `MSLET`, 2 m `TMP`/`RH`) except the extra messages
+named here: `HGT:surface` (terrain), `MSLET`, and `UGRD`/`VGRD` at 925, 850, 700 and 500 hPa.
+
+| Group | Product | How it is made |
+|---|---|---|
+| Snow level & wet bulb | **2 m wet-bulb** | Wet bulb (Newton iteration on the psychrometric equation) of the 2 m temperature, humidity and surface pressure |
+| | **Snow level (0 °C wet bulb)** | Height MSL of the first 0 °C wet-bulb crossing going up from the ground, on the surface node + the pressure levels above the ground (heights by the hypsometric equation from the terrain height); the ground itself where the wet bulb is already ≤ 0 °C there; blank if the column to 500 hPa is all above 0 °C. A 25-50 hPa grid does not resolve thin layers |
+| | **Snow level above ground** | The same level minus the terrain, in feet; 0 = snow reaches the ground; capped at 10,000 ft |
+| | **Freezing level** | Same for the dry-bulb 0 °C |
+| Low-level cold air | **Sea-level pressure** | `MSLET` |
+| | **1000-500 hPa thickness** | Model 1000 and 500 hPa heights (else the hypsometric equation), decameters; the 540 dam line is the traditional whole-troposphere rain-snow line (a guide only: it cannot see a shallow warm layer near the ground). Drawn as a dashed, labelled contour like the two below |
+| | **1000-850 / 850-700 hPa thickness** | Model heights (else hypsometric), decameters; 130 dam (1000-850) and 154 dam (850-700) are the traditional rain-snow lines, and each map draws its line as a dashed, labelled contour (mean, member, percentile and REFS views; not probability or spread). The lines come from the catalog's `lines` field, so another product can get one the same way |
+| | **925 / 850 hPa temperature, wind speed** | `TMP`, `UGRD`/`VGRD`; blank where the level is below the ground |
+| | **Low-level inversion** | Largest temperature excess of any node between the ground and 850 hPa over the 2 m temperature (cold-air damming / coastal-front indicator) |
+| Forcing & banding | **700 hPa frontogenesis** | Petterssen 2-D frontogenesis of θ at 700 hPa, K/100 km/3 h, `F = −(1/\|∇θ\|)[θx² ux + θxθy (vx+uy) + θy² vy]`; winds are rotated from east/north to the raster axes (Lambert convergence angle, checked against the projection), fields smoothed with a 12 km Gaussian first because 3 km derivatives are noise |
+| | **Banding potential** | A composite: frontogenesis where it is ≥ 2, 700 hPa RH ≥ 80 % and the moist DGZ is ≥ 1 kft deep; 0 elsewhere. Not a model field |
+| | **Slantwise instability** | −MPV* of the 700-500 hPa layer, PVU, `MPV* = −g[ζa ∂θes/∂p + ∂u/∂p ∂θes/∂y − ∂v/∂p ∂θes/∂x]` (Schultz & Schumacher 1999), shown where RH ≥ 80 % at 700 and 600 hPa. Layer differences of a 3 km model: a flag, not a magnitude |
+| P-type from profiles | **Snow / rain / sleet / freezing rain (profile)** | Bourgouin (2000) energy method as in NCEP's UPP routine `CALWXT_BOURG`: layer energy `Rd Tm ln(p1/p2) ln(Tm/273.15)`; surface warm layer < 2 J/kg aloft ⇒ snow if surface melting energy < 5.6, rain if > 13.2; otherwise ice pellets if refreezing energy > 66 + 0.66 × warm energy, freezing rain (surface < 0 °C) or rain if < 46 + 0.66 × warm energy. UPP breaks its 50/50 transition zones with a random number; here each zone gives half to each type, so a member's value can be 50 |
+| | **Profile vs model p-type** | Overlap of the profile type distribution and the model's own flags where precipitation falls (percent; averaged over members) |
+| Timing | **Snow start, latest significant snow, changeover, hours at ≥ 0.5 and ≥ 1 in/h** | From the stored 3-hourly frames, "so far" at every frame (the last frame is the whole run). Snow = the multi-method mean. 3-hourly resolution. Changeover = the model's snow flags going from ≥ 50 % snow to less. The mean/percentiles of the start / end / changeover times use only the members in which the event happens |
+| Joint impacts | **Heavy wet snow with wind, ice with wind** | Hours (3-h blocks) in the same member with ≥ 1 in of snow in the block, Kuchera ratio < 9:1 and a gust ≥ 35 mph; and ≥ 0.02 in of freezing rain with a gust ≥ 30 mph. Applied member by member, so the probability map is the chance that the conditions come together |
+
+On the page, below the plumes: a **precipitation-type timeline** at the plume location (model flags and the profile type, share of members per 3-hourly frame) and a **forecast table** (the stations of a state): snowfall P10 / P50 / P90 for the plume's snowfall method through 24 h, 48 h or the end of the run, the share of members with ≥ 6 and ≥ 12 in, the type mix and the peak gust.
+
+## HRRR products
+
+A **single deterministic run** (no ensemble) from the `noaa-hrrr-bdp-pds` bucket: `hrrr.YYYYMMDD/conus/hrrr.tCCz.wrfsfcfFF.grib2` and `wrfprsfFF` (+ `.idx`), hourly, to F048 on the 00/06/12/18 UTC cycles
+(the same cycles as RRFS, so the frames line up; later frames are blank). Field and level names were checked against real inventories (`tests/data/hrrr.t00z.wrfsfcf06...idx.txt`, `wrfprsf45`).
+Products: snowfall (`ASNOW`), QPF, freezing rain (`FRZR`), frozen rain (`FROZR`), **snow depth** (`SNOD`) and **snow-depth change** since F000 (the closest thing to a ruler reading; RRFS has no snow depth),
+the model's snow-liquid ratio (`ASNOW` ÷ `WEASD`), composite reflectivity and reflectivity by HRRR's own type flags, percent frozen precipitation (`CPOFP`), 2 m temperature and wet bulb, gust, visibility,
+`MSLMA`, the 0 °C isotherm height, DGZ depth (`LAYTH` 261 K - 256 K) and, from the pressure file, the **moist DGZ with lift**, DGZ ascent and Cobb ratio using HRRR's **own** vertical velocity (`VVEL`, converted
+with `w = −ω/(ρg)`; the RRFS versions have to borrow the deterministic run's lift). HRRR is fetched in its own worker with its own grid mapping (its native Lambert grid to the same display raster); if its
+files are missing the rest of the site builds as before (`--no-hrrr` skips it). It is stored in the single-source slot and shown under the name "HRRR".
+
 ## Snow growth (DGZ): the science and the sources
 
 * **Why −12 to −18 °C.** Crystal shape depends on temperature and on supersaturation with respect to ice: plates near −2 °C, columns and needles near −5 °C, thin plates and
@@ -282,6 +320,19 @@ in demo mode is synthetic and marked as such on the page.
 * Precipitation type is the model's categorical flag (0 or 1) at the valid time; hourly flags are averaged between consecutive hours when
   splitting accumulations by type.
 
+* **The new winter tools (snow level, cold air, forcing, profile p-type, timing, joint impacts) are experimental.** They are computed from the 25-hPa pressure levels the
+  members publish, so the profile is coarse near the ground: the snow level and the Bourgouin energies are only as good as that vertical resolution, and a shallow warm
+  or cold layer between two levels can be missed. Bourgouin uses five sub-layers per layer and splits mixed (transition) layers 50/50, so the sleet/snow split is an approximation.
+* **Frontogenesis and saturated MPV\* are noisy fields.** 700 hPa frontogenesis is a Petterssen form computed on the 3 km grid after Gaussian smoothing (sigma 4 cells),
+  with winds rotated to the grid; the band-potential composite and the CSI map are guidance for where banding is plausible, not a banding forecast, and the vertical
+  derivatives use 25-hPa layers.
+* **Timing products use only members where the event happens.** Snow start/end and changeover statistics (and the p-type timeline and city table) are summaries over the
+  members that produce the event; the chance of the event itself is shown separately. Five members give coarse percentiles (P10/P90 are close to min/max).
+* **City positions are approximate** (a station point snapped to a 3 km cell).
+* **HRRR is a single deterministic run, not part of the member mean.** HRRR products reuse the single-source slot and are not available with the member/REFS modes. Field and
+  level names were checked against real `.idx` files for `wrfsfcf06` and `wrfprsf45`, but the HRRR download has **not been run against live files** from the build
+  environment, so check the first scheduled build's log. `--no-hrrr` turns it off; if it fails, the rest of the build is unaffected.
+
 * **The basemap is a backdrop, not data.** The images have 3 × the overlay's resolution, so past about 3× zoom the terrain is soft (the lines stay sharp); the elevation tiles are about 220 m per pixel, generalised, and shaded with a 3× vertical exaggeration. Lake depth appears only where the elevation tiles contain bathymetry (the Great Lakes); a lake that is flat in them gets one shallow tone, and a narrow lake between steep banks can look a little deeper than it is. Natural Earth's 1:10m lake outlines leave out small ponds, and outlines are generalised by up to a kilometre or so.
 * **The relief over the data darkens or lightens colours by a few per cent.** On steep slopes the shading is visible in a data colour; use *Light* if that bothers you, and remember the legend swatches are never shaded. The station values and the hover readout are always the cell values.
 
@@ -293,6 +344,9 @@ rrfs_viewer/
   s3.py          anonymous boto3, .idx parsing, one byte-range request per message
   grib.py        eccodes decode, native -> display raster mapping
   winter.py      SLR methods, DGZ, warm nose, RHi, wind chill, blizzard
+                 (+ wet-bulb / snow-level / Bourgouin / frontogenesis / MPV* / timing helpers at the end of the file)
+  diag.py        the group-A per-frame and series products built from winter.py (called by pipeline.py)
+  hrrr.py        HRRR source: fetch, derive, and the single-source products
   pipeline.py    per-member and REFS processing -> (frames, ny, nx) products
   catalog.py     the product list: units, quantisation, thresholds, text
   colors.py      colour ramps (OKLab)
