@@ -295,7 +295,7 @@ def main(argv=None) -> int:
         "products": [{
             "key": p.key, "label": p.label, "title": p.map_title, "group": p.group, "unit": p.unit, "kind": p.kind,
             "desc": p.desc, "decimals": p.decimals, "dtype": p.dtype, "lo": p.lo, "step": p.step, "refs": p.refs,
-            "levels": p.style.levels, "colors": p.style.colors, "ticks": p.style.ticks, "equal": p.style.equal_width,
+            "levels": p.style.levels, "colors": p.style.colors, "ticks": p.style.ticks, "equal": p.style.equal_width, "classes": p.style.classes,
             "thr": list(p.thr), "thr_dir": p.thr_dir, "available": avail[p.key],
             "pmm": p.pmm, "cat": p.cat, "has1h": p.has1h, "step1h": (p.step1h or p.step) if p.has1h else None,
             "available_1h": avail.get(p.key + "_1h", {}) if p.has1h else {},

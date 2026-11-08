@@ -25,11 +25,12 @@ import numpy as np
 from . import grib, winter
 from .catalog import STORE
 from .config import COBB_UPPER, FILE_2D, FILE_PMMN, FILE_PRS, LIFT_LEVELS, MEMBERS, RH_LEVELS, T_LEVELS, frames
-from .s3 import S3Source
+from .s3 import S3Source, find_entry
 
 log = logging.getLogger(__name__)
 Req = namedtuple("Req", "kind fhr var level info")
 
+MAX_RANGE = 8_000_000                  # bytes: longest run of adjacent messages merged into one request
 IN_PER_M = 39.3700787
 KG_TO_IN = 1.0 / winter.MM_PER_IN
 
@@ -41,24 +42,53 @@ class Fetcher:
         self.missing: dict[str, int] = {}
         self.hints: dict[str, dict] = {}            # what the file *does* contain, for fields that were not found
 
-    def _one(self, r: Req) -> bytes | None:
+    def _resolve(self, r: Req):
+        """(request, located file, idx entry) - the entry is None when the field is not in the file (the hint says what is)."""
         loc = self.src.locate(r.kind, self.source, self.cycle, r.fhr)
         if loc is None:
             self.hints.setdefault(f"file:f{r.fhr:03d}", {"problem": "no .idx / file"})
-            return None
-        data = self.src.fetch_message(loc, r.var, r.level, r.info)
-        if data is None:
-            same_var = [e for e in loc.entries if e.var == r.var]
+            return r, None, None
+        e = find_entry(loc.entries, r.var, r.level, r.info)
+        if e is None:
+            same_var = [x for x in loc.entries if x.var == r.var]
             self.hints.setdefault(f"{r.var}:{r.level}", {
                 "wanted": r.info, "fhr": r.fhr,
-                "infos_at_level": sorted({e.info for e in same_var if e.level == r.level})[:8],
-                "other_levels": sorted({e.level for e in same_var})[:8]})
-        return data
+                "infos_at_level": sorted({x.info for x in same_var if x.level == r.level})[:8],
+                "other_levels": sorted({x.level for x in same_var})[:8]})
+        return r, loc, e
 
     def bulk(self, reqs: list[Req]) -> dict[Req, bytes | None]:
+        """Fetch the messages: wanted messages that sit back to back in a file (the four precipitation-type flags, runs of pressure levels) go in ONE range
+        request, so there are fewer round trips and not one byte more than before.  Ranges are capped (``MAX_RANGE``) so a long run still downloads in parallel."""
         reqs = list(dict.fromkeys(reqs))
+        out: dict[Req, bytes | None] = {r: None for r in reqs}
         with ThreadPoolExecutor(self.threads) as pool:
-            return dict(zip(reqs, pool.map(self._one, reqs)))
+            groups: dict[str, list] = {}
+            for r, loc, e in pool.map(self._resolve, reqs):                    # .idx files first (cached per file, one small request each)
+                if e is not None:
+                    groups.setdefault(loc.key, []).append((e, r))
+            jobs = []                                                          # (file key, [(entry, request), ...] contiguous)
+            for key, items in groups.items():
+                items.sort(key=lambda t: t[0].start)
+                for e, r in items:
+                    cur = jobs[-1][1] if jobs and jobs[-1][0] == key else None
+                    last = cur[-1][0] if cur else None
+                    if cur and last.end is not None and e.start == last.end + 1 and (e.end is None or e.end - cur[0][0].start < MAX_RANGE):
+                        cur.append((e, r))
+                    else:
+                        jobs.append((key, [(e, r)]))
+            for items, data in pool.map(lambda j: (j[1], self._range(*j)), jobs):
+                base = items[0][0].start
+                for e, r in items:
+                    msg = data[e.start - base: (e.end - base + 1) if e.end is not None else None]
+                    if msg[:4] != b"GRIB":
+                        raise ValueError(f"byte range of {r.var}:{r.level} did not return a GRIB message")
+                    out[r] = msg
+        return out
+
+    def _range(self, key: str, items: list) -> bytes:
+        first, last = items[0][0], items[-1][0]
+        return self.src.get_range(key, first.start, last.end)
 
     def decode(self, blobs: dict[Req, bytes | None]) -> dict[Req, np.ndarray | None]:
         """Decode sequentially (eccodes is not thread-safe) and map onto the display raster."""
@@ -386,7 +416,7 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
             out["vis"][k] = vis
         if g("uvv") is not None:
             out["uvv"][k] = np.clip(g("uvv"), 0, None)
-        refl = None if g("refc") is None else winter.clean_dbz(g("refc"))
+        refl = None if g("refc") is None else winter.clean_dbz(g("refc"), rg.idx >= 0)
         if refl is not None:
             out["refc"][k] = refl
 
@@ -600,7 +630,7 @@ def process_refs(src: S3Source, cycle: datetime, rg: grib.Regrid, max_fhr: int, 
         g = lambda key: A.get(reqs[key])
         for key, r in refl_reqs.items():
             if A.get(r) is not None:
-                out[key][k] = winter.clean_dbz(A[r])
+                out[key][k] = winter.clean_dbz(A[r], rg.idx >= 0)
         if A.get(refl_reqs["refc"]) is not None and all(g(n) is not None for n in ("sn", "ip", "zr", "rn")):
             cls = winter.ptype_class_fractions(g("rn"), g("sn"), g("ip"), g("zr"))
             out["refl_ptype"][k] = winter.refl_ptype_code(out["refc"][k], cls)

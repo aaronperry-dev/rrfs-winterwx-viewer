@@ -102,6 +102,7 @@ class Style:
     colors: list[str | None]            # len(levels) + 1: [below first edge, bin 1 .. bin n-1, above last edge]; None = transparent
     ticks: list[float]
     equal_width: bool = False           # legend with equal-width blocks (uneven levels)
+    classes: list | None = None         # reflectivity by precipitation type: the 15 bin colours of each type (rain, snow, sleet, freezing rain)
 
 
 def _bins(ramp: Ramp, levels, under: str | None, over: str | None) -> list[str | None]:
@@ -164,30 +165,35 @@ BLIZ_HOURS = ramp_style([(3, "#ffb3c1"), (6, "#ff5f7e"), (12, "#c4163f"), (24, "
                         [3, 6, 9, 12, 18, 24, 36])
 
 
-# Radar reflectivity (dBZ): the familiar NWS-style ramp in 5 dBZ steps from 5 to 75; below 5 dBZ nothing is drawn.
-_REFL_LEVELS = list(range(5, 80, 5))
-_REFL_COLORS = ["#8fd8f4", "#4aa8e8", "#1d6fd1", "#7ee06a", "#2ea838", "#0c7a26", "#fff25a", "#f5c320", "#f59a1c",
-                "#e8461a", "#c4141a", "#8e0a14", "#e040c8", "#9a30c8", "#f4eaff"]
-REFL = Style(list(_REFL_LEVELS), [None, *_REFL_COLORS], [10, 20, 30, 40, 50, 60, 70], True)
+# Radar reflectivity (dBZ) and reflectivity by precipitation type: the ramps of the reference map (Tropical Tidbits style), sampled from its colour bars.
+# Rain / plain reflectivity: light gray at the weakest echoes, dark gray, green (20-30 dBZ), yellow (35), orange, red (45-50), maroon (55), magenta (60-67), pink (70+).
+# Snow: pale cyan to deep navy.  Sleet (ice pellets): pale salmon to coral.  Freezing rain: orchid pink to purple.  Bins are 2.5 dBZ wide from 5 to 75 dBZ, so the
+# 5 dBZ colour edges of the old ramp are still edges; nothing under 5 dBZ is drawn.
+_REFL_LEVELS = [5 + 2.5 * i for i in range(29)]
+_RAIN = [(5, "#ebe7e4"), (7.5, "#ded8d5"), (10, "#9ea09f"), (12.5, "#686464"), (15, "#4d7354"), (17.5, "#2dae2b"), (20, "#12e316"), (22.5, "#14e715"),
+         (25, "#29cd2c"), (27.5, "#2eaf28"), (30, "#2e9028"), (32.5, "#91c318"), (35, "#e9ea14"), (37.5, "#eee44e"), (40, "#ebcd75"), (42.5, "#ec9743"),
+         (45, "#ed692a"), (47.5, "#f24630"), (50, "#dd3b41"), (52.5, "#b62f57"), (55, "#ad305f"), (57.5, "#ae305f"), (60, "#b334a0"), (62.5, "#cd59c8"),
+         (65, "#e52bea"), (67.5, "#e82bea"), (70, "#ee8ce2"), (72.5, "#f2b8ec"), (75, "#f8e0f4")]
+_SNOW = [(5, "#daf8f8"), (7.5, "#b1e9f8"), (10, "#a4daf6"), (12, "#99dbfd"), (14, "#82c2f2"), (16, "#6cb6fd"), (25, "#1c80fc"), (27.5, "#0b6bfd"), (30, "#0161ec"),
+         (32, "#0055e2"), (34, "#0049d3"), (36, "#0541c3"), (38.5, "#0537bc"), (40.5, "#052ba8"), (43, "#011f97"), (45, "#091e8b"), (47, "#051972"), (50, "#02166c"), (75, "#02166c")]
+_SLEET = [(5, "#f2e0dc"), (10, "#f3c9c4"), (15, "#f4b8b3"), (20, "#f2a6a2"), (26, "#f2989a"), (30, "#f28e86"), (35, "#f58073"), (40, "#f87270"), (45, "#f2603f"), (47.5, "#ef5a38"),
+          (75, "#ef5a38")]
+_FRZR = [(5, "#f38ae0"), (14, "#f283e7"), (17, "#d460cc"), (20, "#c45cc2"), (26, "#bc5fbc"), (29, "#bc449f"), (32, "#b630a5"), (35, "#b735b3"), (38, "#ac279b"), (41, "#a626a1"),
+         (44, "#9b2091"), (47.5, "#7a2b7a"), (75, "#7a2b7a")]
+REFL = ramp_style(_RAIN, _REFL_LEVELS, over="same", ticks=[10, 20, 30, 40, 50, 60, 70])
 
-# Reflectivity masked by precipitation type: one colour ramp per type, one colour per 5 dBZ bin.  A value is class * 16 + bin, where bin = floor(dBZ / 5)
-# (1 = 5-10 dBZ ... 15 = 75+ dBZ; 0 = no echo) and class is 0 rain, 1 snow, 2 sleet, 3 freezing rain.  Class edges are every integer, so a code is its own colour index.
-PTYPE_CLASSES = (("Rain", [(5, "#bfe8b3"), (25, "#34a853"), (40, "#f2e22e"), (50, "#f2891a"), (60, "#d1201f"), (70, "#8a0b3a"), (75, "#ff7ee8")]),
-                 ("Snow", [(5, "#d6efff"), (25, "#5db5f2"), (45, "#2262c9"), (75, "#0a2477")]),
-                 ("Sleet", [(5, "#e8dcff"), (25, "#a77ee6"), (50, "#6a2db8"), (75, "#34106e")]),
-                 ("Freezing rain", [(5, "#ffd3e6"), (25, "#f06aa8"), (50, "#c2185b"), (75, "#6e0a35")]))
+# One colour list per type (rain, snow, sleet, freezing rain): a colour for each 2.5 dBZ bin and one for 75+.  The page stores one code per cell (class * 64 + q, see
+# winter.refl_ptype_code), interpolates the echo exactly as for the other reflectivity maps and picks the class by vote.  Rain is the plain reflectivity ramp, colour for colour.
+PTYPE_NAMES = ("Rain", "Snow", "Sleet", "Freezing rain")
 
 
-def _ptype_style() -> Style:
-    cols: list[str | None] = [None]                                  # code 0: no echo
-    for _, anchors in PTYPE_CLASSES:
-        r = Ramp(anchors)
-        cols += [to_hex(c) for c in r(np.arange(1, 16) * 5.0 + 2.5)] + [None]          # bins 1..15, then bin 0 of the next class (never occurs)
-    cols = cols[:64]
-    return Style([float(i) for i in range(1, 64)], cols, [], True)
+def _class_colors(anchors) -> list[str]:
+    r = Ramp(anchors)
+    return _bins(r, _REFL_LEVELS, None, to_hex(r(_REFL_LEVELS[-1] + 1e-6)[0]))[1:]
 
 
-REFL_PTYPE = _ptype_style()
+PTYPE_COLORS = [list(REFL.colors[1:])] + [_class_colors(a) for a in (_SNOW, _SLEET, _FRZR)]
+REFL_PTYPE = Style(list(_REFL_LEVELS), list(REFL.colors), list(REFL.ticks), True, PTYPE_COLORS)
 
 
 def _from_edges(levels, color_list, under, over, ticks=None, equal_width=True) -> Style:

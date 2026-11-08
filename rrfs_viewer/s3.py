@@ -113,6 +113,10 @@ class S3Source:
             self._idx[key] = loc
         return loc
 
+    def get_range(self, key: str, start: int, end: int | None) -> bytes:
+        """Bytes start..end (inclusive; None = to the end of the file) of one object, in one request."""
+        return self._get(key, f"bytes={start}-{end}" if end is not None else f"bytes={start}-")
+
     def fetch_message(self, loc: Located, var: str, level: str, info: str | None = None) -> bytes | None:
         """Download exactly one GRIB2 message with an HTTP byte-range request (None if absent from the idx)."""
         e = find_entry(loc.entries, var, level, info)

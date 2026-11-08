@@ -63,8 +63,8 @@ PRODUCTS: tuple[Product, ...] = (
        (), "ge", "Base Reflectivity (1 km AGL)"),
     _P("refl_ptype", "Reflectivity by precip type", G_RADAR, "dBZ", "inst", C.REFL_PTYPE, "u8", 0.0, 1.0, 0, True,
        "Composite reflectivity coloured by the model's precipitation type: green-red rain, blue snow, violet sleet, pink freezing rain (darker = stronger echo). "
-       "Each member uses its own type flags. The member view picks the type most members agree on (wintry types win ties) and the "
-       "linear-Z mean echo; the maximum view shows the strongest member and its type. The REFS view pairs the PMM echo with the REFS mean type.",
+       "Rain uses the same colours as the reflectivity maps. Each member uses its own type flags. The member view picks the type most members agree on "
+       "(wintry types win ties) and the linear-Z mean echo; the maximum view shows the strongest member and its type. The REFS view pairs the PMM echo with the REFS mean type.",
        (), "ge", "Reflectivity by Precipitation Type", cat=True),
     # ------------------------------------------------------------------ snowfall: model + five ratio methods + their mean
     _P("snow_model", "Model snowfall", G_SNOW, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, True,

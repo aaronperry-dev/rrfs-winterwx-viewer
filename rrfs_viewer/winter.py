@@ -390,20 +390,31 @@ def precip_fractions(csnow, cicep, cfrzr):
 REFL_FLOOR, REFL_TOP = -20.0, 81.0                  # stored range of reflectivity (dBZ): anything below 0 is "no echo"
 
 
-def clean_dbz(dbz: np.ndarray) -> np.ndarray:
-    """Model reflectivity limited to the stored range; negative values (the model's no-echo fill) become the floor, which also compresses well."""
+def clean_dbz(dbz: np.ndarray, footprint: np.ndarray | None = None) -> np.ndarray:
+    """Model reflectivity limited to the stored range; negative values (the model's no-echo fill) become the floor, which also compresses well.
+
+    ``footprint``: display cells that lie inside the model domain.  A missing value there (GRIB bitmaps often mask "no echo") is no echo too: left as a hole it
+    would stop the page from interpolating across the edge of every echo and make the field look blocky.  A hole outside the domain stays a hole.
+    """
     d = np.asarray(dbz, np.float32)
+    if footprint is not None:
+        d = np.where(footprint & ~np.isfinite(d), REFL_FLOOR, d)
     return np.where(np.isfinite(d), np.clip(np.where(d < 0, REFL_FLOOR, d), REFL_FLOOR, REFL_TOP), np.nan).astype(np.float32)
 
 
-def refl_ptype_code(dbz: np.ndarray, cls: np.ndarray) -> np.ndarray:
-    """One number per cell for the page: ``class * 16 + bin``, bin = floor(dBZ / 5) from 1 (5 dBZ) to 15 (75+), 0 = no echo.
+PTYPE_STEP = 1.25                                    # dBZ per step of the stored echo in the type code (so a 5 dBZ colour edge is every 4th step)
 
-    ``cls``: 0 rain, 1 snow, 2 sleet, 3 freezing rain.  NaN where either input is missing.
+
+def refl_ptype_code(dbz: np.ndarray, cls: np.ndarray) -> np.ndarray:
+    """One number per cell for the page: ``class * 64 + q``, q = 1 + round(dBZ / 1.25) for dBZ >= 0 (1 = 0 dBZ ... 62 = 76 dBZ), 0 = no echo.
+
+    ``cls``: 0 rain, 1 snow, 2 sleet, 3 freezing rain.  NaN where either input is missing.  The echo keeps 1.25 dBZ resolution so the page can interpolate
+    it like any other field (only the class is a label); the highest code, 254, stays below the "missing" code 255.
     """
-    b = np.clip(np.floor(np.nan_to_num(dbz, nan=0.0) / 5.0), 0, 15)
-    code = np.where(b > 0, np.asarray(cls, np.float32) * 16.0 + b, 0.0)
-    return np.where(np.isfinite(dbz) & np.isfinite(cls), code, np.nan).astype(np.float32)
+    d = np.asarray(dbz, np.float32)
+    q = np.where(np.nan_to_num(d, nan=-1.0) >= 0, np.clip(np.rint(np.nan_to_num(d, nan=0.0) / PTYPE_STEP) + 1, 1, 62), 0)
+    code = np.where(q > 0, np.asarray(cls, np.float32) * 64.0 + q, 0.0)
+    return np.where(np.isfinite(d) & np.isfinite(cls), code, np.nan).astype(np.float32)
 
 
 def ptype_class_flags(csnow, cicep, cfrzr) -> np.ndarray:
