@@ -161,6 +161,20 @@
   .plumes .legend { padding: 0 10px 6px; margin-top: 0; }
   .plumes .legend i.dot { width: 9px; height: 9px; border: 2px solid; border-radius: 50%; margin-right: 5px; }
 
+  /* ---- point extras: precipitation-type timeline and forecast table */
+  .ptx { padding: 0 10px 10px; }
+  .ptx h3 { margin: 12px 0 6px; font-size: 14.5px; font-weight: 800; color: var(--title); }
+  #pt-canvas { display: block; width: 100%; height: auto; border: 1px solid var(--line); background: var(--surface); touch-action: pan-y; cursor: crosshair; }
+  .ptcap { font-size: 12.5px; color: var(--muted); margin-top: 4px; min-height: 1.4em; font-variant-numeric: tabular-nums; }
+  .ptwrap { overflow-x: auto; border: 1px solid var(--line); }
+  #pt-table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+  #pt-table th, #pt-table td { padding: 4px 8px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
+  #pt-table th:first-child, #pt-table td:first-child { text-align: left; position: sticky; left: 0; background: var(--surface); }
+  #pt-table th { background: var(--soft); font-weight: 800; cursor: pointer; user-select: none; }
+  #pt-table th.sorted::after { content: attr(data-dir); margin-left: 3px; }
+  #pt-table tr:hover td { background: color-mix(in srgb, var(--soft) 70%, transparent); }
+  #pt-table .mix i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin: 0 2px 0 6px; vertical-align: -1px; }
+
   /* ---- basemap key */
   .ramp { height: 11px; border: 1px solid var(--line); border-radius: 2px; }
   .rampl { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); margin: 2px 0 0; font-variant-numeric: tabular-nums; }
@@ -297,6 +311,19 @@
       </div>
       <div class="legend" id="pl-legend"></div>
       <p class="note" id="pl-note"></p>
+      <div class="ptx" id="ptx">
+        <h3>Precipitation type at this location</h3>
+        <canvas id="pt-canvas" width="1000" height="440" tabindex="0" aria-label="Precipitation type by forecast hour at the chosen location"></canvas>
+        <div class="ptcap" id="pt-cap"></div>
+        <h3>Forecast table</h3>
+        <div class="plumehead" style="padding:4px 0 6px">
+          <label>Places <select id="pt-set" aria-label="Places in the table"></select></label>
+          <label>Snow through <select id="pt-when" aria-label="Forecast period for the snowfall columns">
+            <option value="24">24 h</option><option value="48">48 h</option><option value="0" selected>the end of the run</option></select></label>
+        </div>
+        <div class="ptwrap"><table id="pt-table" aria-label="Snowfall and precipitation type by place"></table></div>
+        <p class="note" id="pt-note"></p>
+      </div>
     </section>
 
   </div>
@@ -330,6 +357,7 @@ const isSam = m => m === "sam" || m === "samlpm" || m === "pos";            // t
 const PTYPE_NAMES = ["Rain", "Snow", "Sleet", "Freezing rain"];
 const CAT_MODES = { refs: ["RRFS PMM echo + REFS mean type", "REFS (PMM)"], mean: ["Member consensus (most common type, mean echo)", "Consensus"], max: ["Strongest member (its echo and type)", "Strongest"] };
 function modeInfo(m, p = prod()) {                          // [long label, short label]
+  if (p && p.single && m === "refs") return [`${p.single} (single deterministic run)`, p.single];        // HRRR products: one run, stored in the single-source slot
   if (p && p.cat && CAT_MODES[m]) return CAT_MODES[m];
   if (p && isDbz(p) && m === "refs") return ["RRFS probability-matched mean (REFS PMM)", "REFS (PMM)"];
   if (p && isDbz(p) && m === "mean") return ["Member mean (linear Z)", "Mean"];
@@ -1239,6 +1267,7 @@ async function render() {
   const notes = [];
   if (mode === "refs" && !p.available.refs && hasMembers(p)) { mode = "mean"; notes.push(`The official REFS file does not carry this field, so the member ${p.cat ? "consensus" : "mean"} is shown.`); }
   if (!hasMembers(p) && !p.available.refs) notes.push("This field is not in the current run's files.");
+  else if (p.single) notes.push(`${p.single}: one deterministic model run, hourly, to F048 on the 00, 06, 12 and 18 UTC cycles (later hours are blank). There is no ensemble, so there are no members, percentiles or probabilities for it.`);
   else if (p.key === "refd") notes.push("Base reflectivity is the model's 1 km AGL reflectivity. RRFS publishes it only in the REFS probability-matched mean, so there are no members, percentiles or probabilities for it.");
   else if (p.cat && mode === "refs") notes.push("REFS view: the REFS probability-matched composite echo coloured by the type with the largest weight in the REFS mean (rain, snow, sleet or freezing rain).");
   else if (p.cat && mode === "mean") notes.push("Consensus: the type most active members show (a tie goes to the more wintry type) with the member-mean echo, in 5 dBZ classes. Light echoes under 5 dBZ are not drawn.");
@@ -1389,6 +1418,128 @@ function initPlumes() {
   addEventListener("scroll", () => { if (lastPtr !== "mouse") plumeHoverAll(null); }, { passive: true });
   let rz = 0; addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { plumeHoverAll(null); for (const k of ["qpf", "snow"]) paintPlume(k); }, 150); });
   if ("IntersectionObserver" in window) new IntersectionObserver((es, ob) => { if (es.some(e => e.isIntersecting)) { plumeSeen = true; ob.disconnect(); plumes(); } }, { rootMargin: "500px" }).observe($("#plumes"));
+  initPtExtras();
+}
+// ---------------------------------------------------------------- point extras (added): precipitation-type timeline at the plume location, ski-area / station table
+const PT_TYPES = [["prain", "brain", "Rain", "#3fae5b"], ["psleet", "bsleet", "Sleet", "#f59a2c"], ["pfrzr", "bfrzr", "Freezing rain", "#d63fa0"], ["psnow", "bsnow", "Snow", "#2f7fd6"]];
+let ptSet = "ski", ptWhen = 0, ptTok = 0, ptTabTok = 0, ptSort = "p50", ptDir = -1, ptShape = null;
+const ptCache = new Map();                                  // "product|points" -> Promise<{ member: Float32Array(points x (1 + frames)) }>
+function ptSeries(key, pts, tag) {                          // values of one product at some points, every member that has it (index 0 of each point is F000)
+  const p = D.products.find(x => x.key === key);
+  if (!p) return Promise.resolve({});
+  const ck = `${D.cycle}|${key}|${tag}|${pts.map(q => q.r * D.grid.nx + q.c).join(",")}`;
+  if (!ptCache.has(ck)) {
+    const pr = (async () => {
+      const res = {}, nf = D.frames.length;
+      await Promise.all(D.members.filter(m => p.available[m]).map(async m => {
+        try {
+          const d = await load(p, m); if (!d) return;
+          const out = new Float32Array(pts.length * (nf + 1)).fill(NaN);
+          pts.forEach((q, j) => { const idx = q.r * D.grid.nx + q.c; out[j * (nf + 1)] = 0; for (let f = 0; f < nf; f++) out[j * (nf + 1) + 1 + f] = frameField1(d, f, idx); });
+          res[m] = out;
+        } catch (e) { /* this member has no data for the product */ }
+      }));
+      return res;
+    })();
+    pr.catch(() => ptCache.delete(ck));
+    ptCache.set(ck, pr);
+    if (ptCache.size > 60) ptCache.delete(ptCache.keys().next().value);
+  }
+  return ptCache.get(ck);
+}
+const ptActive = ser => D.members.filter(m => state.on[m] && ser[m]);
+const ptMean = (ser, mem, j, f) => { let s = 0, n = 0; for (const m of mem) { const v = ser[m][j * (D.frames.length + 1) + 1 + f]; if (v === v) { s += v; n++; } } return n ? s / n : NaN; };
+const hourLabel = iso => new Intl.DateTimeFormat("en-US", { timeZone: TZ, weekday: "short", hour: "numeric" }).format(new Date(iso));
+async function paintPtype() {
+  const tok = ++ptTok, pt = plumePoint(), cv = $("#pt-canvas");
+  if (!pt || !cv) return;
+  const keys = PT_TYPES.flatMap(t => [t[0], t[1]]);
+  const sers = await Promise.all(keys.map(k => ptSeries(k, [pt], "tl")));
+  if (tok !== ptTok) return;
+  const S = Object.fromEntries(keys.map((k, i) => [k, sers[i]]));
+  const rows = [["Model type flags", 0], ["Profile type (Bourgouin)", 1]].filter(([, c]) => PT_TYPES.some(t => ptActive(S[t[c]]).length));
+  const nf = D.frames.length, C = PCOL(darkMode()), dpr = 1, W = cv.width, H = cv.height, g = cv.getContext("2d");
+  const L = 150, R = 12, T = 26, B = 58, rowH = rows.length ? (H - T - B - 16 * (rows.length - 1)) / rows.length : 0, bw = (W - L - R) / nf;
+  g.clearRect(0, 0, W, H); g.fillStyle = C.bg; g.fillRect(0, 0, W, H);
+  g.font = "600 17px system-ui, sans-serif"; g.textBaseline = "middle";
+  if (!rows.length) { g.fillStyle = C.muted; g.textAlign = "center"; g.fillText("No precipitation-type data at this location.", W / 2, H / 2); ptShape = null; $("#pt-cap").textContent = ""; return; }
+  ptShape = { L, R, T, B, rowH, bw, rows, S, nf, pt };
+  rows.forEach(([name, c], ri) => {
+    const y0 = T + ri * (rowH + 16), mem = ptActive(S[PT_TYPES[0][c]]);
+    g.fillStyle = C.plot; g.fillRect(L, y0, W - L - R, rowH);
+    for (let f = 0; f < nf; f++) {
+      let y = y0 + rowH;
+      for (const t of PT_TYPES) {
+        const v = ptMean(S[t[c]], ptActive(S[t[c]]), 0, f); if (!(v > 0)) continue;
+        const h = rowH * v / 100; g.fillStyle = t[3]; g.fillRect(L + f * bw + 0.5, y - h, bw - 1, h); y -= h;
+      }
+    }
+    g.fillStyle = C.ink; g.textAlign = "right"; g.font = "700 16px system-ui, sans-serif"; g.fillText(name.split(" (")[0], L - 8, y0 + rowH / 2 - 10);
+    g.font = "500 14px system-ui, sans-serif"; g.fillStyle = C.muted; g.fillText(name.includes("(") ? "(" + name.split(" (")[1] : `${mem.length} members`, L - 8, y0 + rowH / 2 + 10);
+    g.textAlign = "right"; g.font = "500 13px system-ui, sans-serif"; g.fillStyle = C.muted;
+    for (const v of [0, 50, 100]) { const y = y0 + rowH - rowH * v / 100; g.fillText(v + "%", L - 4, y); }
+  });
+  g.textAlign = "center"; g.font = "500 13px system-ui, sans-serif"; g.fillStyle = C.muted;                  // time axis: a label every 12 h
+  for (let f = 3; f < nf; f += 4) { g.fillText(hourLabel(D.valid[f]), L + (f + 0.5) * bw, H - B + 22); g.fillRect(L + (f + 0.5) * bw - 0.5, H - B + 2, 1, 8); }
+  let x = L; g.textAlign = "left"; g.font = "600 14px system-ui, sans-serif";
+  for (const t of [...PT_TYPES].reverse()) { g.fillStyle = t[3]; g.fillRect(x, 6, 14, 14); g.fillStyle = C.ink; g.fillText(t[2], x + 19, 13); x += 19 + g.measureText(t[2]).width + 20; }
+  $("#pt-cap").textContent = `${pt.short || pt.label}: share of the active members showing each type at each 3-hourly frame, where precipitation is falling (blank = dry or no data). Tap or hover a bar for the numbers.`;
+}
+function ptHover(ev) {
+  if (!ptShape) return;
+  const cv = $("#pt-canvas"), r = cv.getBoundingClientRect(), x = (ev.clientX - r.left) * cv.width / r.width, y = (ev.clientY - r.top) * cv.height / r.height;
+  const { L, bw, nf, S, pt } = ptShape, f = Math.floor((x - L) / bw);
+  if (f < 0 || f >= nf) { return; }
+  const parts = PT_TYPES.slice().reverse().map(t => { const a = ptMean(S[t[0]], ptActive(S[t[0]]), 0, f), b = ptMean(S[t[1]], ptActive(S[t[1]]), 0, f);
+    return `${t[2]} ${a === a ? Math.round(a) : "-"}%${b === b ? " (profile " + Math.round(b) + "%)" : ""}`; });
+  $("#pt-cap").textContent = `${hourLabel(D.valid[f])} (F${String(D.frames[f]).padStart(3, "0")}) · ${parts.join(" · ")}`;
+}
+const ptQuant = (arr, q) => { const a = arr.filter(v => v === v).sort((x, y) => x - y); if (!a.length) return NaN; const i = q * (a.length - 1), lo = Math.floor(i), hi = Math.ceil(i); return a[lo] + (a[hi] - a[lo]) * (i - lo); };
+const ptPoints = () => ptSet === "ski" ? (D.ski_all || []) : (D.stations_all || []).filter(s => s.st === ptSet).sort((a, b) => shortName(a).localeCompare(shortName(b)));
+async function renderPtTable() {
+  const tab = $("#pt-table"), tok = ++ptTabTok;
+  const pts = ptPoints(), snowP = D.products.find(p => p.key === plumeSnow);
+  if (!snowP || !pts.length) { tab.innerHTML = ""; $("#pt-note").textContent = pts.length ? "" : "No places in this set."; return; }
+  const tag = "tb" + ptSet, nf = D.frames.length, st = nf + 1;
+  const [snow, gust, ...ty] = await Promise.all([ptSeries(plumeSnow, pts, tag), ptSeries("gust", pts, tag), ...PT_TYPES.map(t => ptSeries(t[0], pts, tag))]);
+  const mem = ptActive(snow);
+  const fWhen = ptWhen ? D.frames.indexOf(ptWhen) : -1;
+  const rows = pts.map((q, j) => {
+    const vals = mem.map(m => { const a = snow[m]; if (fWhen >= 0) return a[j * st + 1 + fWhen]; for (let f = nf - 1; f >= 0; f--) { const v = a[j * st + 1 + f]; if (v === v) return v; } return NaN; });
+    const mix = PT_TYPES.map((t, i) => { let n = 0; for (const m of ptActive(ty[i])) for (let f = 0; f < nf; f++) { const v = ty[i][m][j * st + 1 + f]; if (v === v) n += v; } return n; });
+    const wet = mix.reduce((a, b) => a + b, 0);
+    const peaks = ptActive(gust).map(m => { let b = NaN; for (let f = 0; f < nf; f++) { const v = gust[m][j * st + 1 + f]; if (v === v && !(v <= b)) b = v; } return b; }).filter(v => v === v);
+    const fin = vals.filter(v => v === v);
+    return { q, p10: ptQuant(vals, 0.1), p50: ptQuant(vals, 0.5), p90: ptQuant(vals, 0.9), c6: fin.length ? 100 * fin.filter(v => v >= 6).length / fin.length : NaN,
+      c12: fin.length ? 100 * fin.filter(v => v >= 12).length / fin.length : NaN, mix: wet > 0 ? mix.map(v => 100 * v / wet) : null,
+      gust: ptQuant(peaks, 0.5), gustMax: peaks.length ? Math.max(...peaks) : NaN };
+  });
+  if (tok !== ptTabTok) return;
+  rows.sort((a, b) => { const x = a[ptSort], y = b[ptSort]; if (ptSort === "name") return ptDir * shortName(a.q).localeCompare(shortName(b.q)); return ptDir * ((x === x ? x : -1e9) - (y === y ? y : -1e9)); });
+  const cols = [["name", "Place"], ["p10", "P10"], ["p50", "P50"], ["p90", "P90"], ["c6", "≥ 6 in"], ["c12", "≥ 12 in"], ["mix", "Type mix"], ["gust", "Peak gust"]];
+  const f1 = v => v === v ? v.toFixed(1) : "–", f0 = v => v === v ? Math.round(v) + "%" : "–";
+  tab.innerHTML = `<thead><tr>${cols.map(([k, l]) => `<th data-k="${k}" class="${k === ptSort ? "sorted" : ""}" data-dir="${ptDir < 0 ? "▼" : "▲"}">${l}</th>`).join("")}</tr></thead><tbody>${rows.map(r => `<tr>
+    <td>${(r.q.name ? shortName(r.q) : r.q.id)}${r.q.st ? ` <span style="color:var(--muted)">${r.q.st}</span>` : ""}</td><td>${f1(r.p10)}</td><td><b>${f1(r.p50)}</b></td><td>${f1(r.p90)}</td><td>${f0(r.c6)}</td><td>${f0(r.c12)}</td>
+    <td class="mix">${r.mix ? PT_TYPES.slice().reverse().map(t => { const v = r.mix[PT_TYPES.indexOf(t)]; return v >= 1 ? `<i style="background:${t[3]}"></i>${Math.round(v)}` : ""; }).join("") : "dry"}</td>
+    <td>${r.gust === r.gust ? Math.round(r.gust) + (r.gustMax > r.gust + 1 ? ` <span style="color:var(--muted)">(${Math.round(r.gustMax)})</span>` : "") : "–"}</td></tr>`).join("")}</tbody>`;
+  for (const th of tab.querySelectorAll("th")) th.addEventListener("click", () => { const k = th.dataset.k; if (k === "mix") return; ptDir = k === ptSort ? -ptDir : (k === "name" ? 1 : -1); ptSort = k; renderPtTable(); });
+  $("#pt-note").textContent = `Snowfall: ${snowP.label}, ${ptWhen ? ptWhen + " h" : "run total"}, in inches; P10 / P50 / P90 across the ${mem.length} active members (a few members: treat the tails loosely). ≥ 6 in and ≥ 12 in: share of those members. ` +
+    `Type mix: share of the precipitation frames (3-hourly, all members) that are snow / sleet / freezing rain / rain by the model's flags. Peak gust, mph: the median over members of each member's strongest 3-hourly gust (the strongest member in brackets). ` +
+    `Ski areas are base-area positions, nearest 3 km cell: terrain much higher or lower than the model's smoothed terrain (summits, valleys) is not represented.`;
+}
+function ptExtras() { if (!$("#ptx")) return; paintPtype(); renderPtTable(); }
+function initPtExtras() {
+  const set = $("#pt-set"); if (!set) return;
+  const opt = (v, t) => { const o = document.createElement("option"); o.value = v; o.textContent = t; return o; };
+  if ((D.ski_all || []).length) set.append(opt("ski", "Ski areas")); else ptSet = "";
+  for (const [name, list] of plumeGroups()) if (list.length) set.append(opt(list[0].st || name, name));
+  if (!ptSet) ptSet = set.options.length ? set.options[0].value : "";
+  set.value = ptSet;
+  set.addEventListener("change", () => { ptSet = set.value; renderPtTable(); });
+  $("#pt-when").addEventListener("change", ev => { ptWhen = +ev.target.value; renderPtTable(); });
+  const cv = $("#pt-canvas");
+  cv.addEventListener("pointermove", ptHover); cv.addEventListener("pointerdown", ptHover);
+  let rz = 0; addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(paintPtype, 150); });
 }
 async function plumeData(p, idx) {                          // { source: [value at F000 (= 0), then every frame] | null }
   const srcs = [...D.members, "refs"];
@@ -1410,6 +1561,7 @@ async function plumes() {
   }));
   if (tok !== plumeTok) return;
   plumeText();
+  ptExtras();
 }
 function buildPlume(k, p, data, pt) {
   const hrs = [0, ...D.frames], mem = D.members.filter(m => data[m]), act = mem.filter(m => state.on[m]), finite1 = v => v === v && v !== undefined;
