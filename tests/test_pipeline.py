@@ -386,18 +386,21 @@ def test_member_reflectivity_and_type_mask(member):
     ok = np.isfinite(refc)
     assert ok.any() and refc[ok].min() >= -20.0 and refc[ok].max() <= 81.0
     assert not (refc[ok] < 0).any() or (refc[ok][refc[ok] < 0] == -20.0).all()  # the no-echo fill is floored, not left at its own value
-    # the code: class * 16 + floor(dBZ / 5); no echo (< 5 dBZ) is 0
+    # the code: class * 64 + q, q = 1 + round(dBZ / 1.25) for dBZ >= 0, 0 = no echo; the echo is recoverable to within half a step
     c = code[np.isfinite(code)]
-    assert c.min() >= 0 and c.max() <= 63
-    echo, ref_ok = code > 0, np.isfinite(code) & ok
-    assert echo.any() and (code[echo] % 16 == np.clip(np.floor(refc[echo] / 5), 1, 15)).all()
-    assert (code[ref_ok & (refc < 5)] == 0).all()
+    assert c.min() >= 0 and c.max() <= 254                                    # 255 is the "missing" code of the u8 files
+    ref_ok = np.isfinite(code) & ok
+    q = code.astype(np.int32) & 63
+    has = ref_ok & (code > 0)
+    assert has.any() and (q[has] >= 1).all()
+    assert np.abs((q[has] - 1) * 1.25 - np.clip(refc[has], 0, 76.25)).max() <= 0.625 + 1e-3
+    assert (code[ref_ok & (refc < 0)] == 0).all() and ((code[has].astype(np.int32) >> 6) <= 3).all()
 
 
 def test_refl_ptype_code_and_classes():
-    dbz = np.array([-20, 4.9, 5, 24, 74, 80], np.float32)
-    assert W.refl_ptype_code(dbz, np.zeros(6)).tolist() == [0, 0, 1, 4, 14, 15]
-    assert W.refl_ptype_code(dbz, np.full(6, 3)).tolist() == [0, 0, 49, 52, 62, 63]
+    dbz = np.array([-20, -0.1, 0, 5, 24.9, 76, 80], np.float32)
+    assert W.refl_ptype_code(dbz, np.zeros(7)).tolist() == [0, 0, 1, 5, 21, 62, 62]
+    assert W.refl_ptype_code(dbz, np.full(7, 3)).tolist() == [0, 0, 193, 197, 213, 254, 254]
     assert np.isnan(W.refl_ptype_code(np.array([np.nan], np.float32), np.array([1.0]))).all()
     one = lambda *a: np.array([a], np.float32)
     # freezing rain > sleet > snow > rain, from the flags
@@ -421,3 +424,29 @@ def test_reflectivity_is_optional_in_refs(rg):
     out, info = pipeline.process_refs(S3Source(FakeS3(NOW, missing={("REFC", 3), ("REFC", 6), ("REFD", 3), ("REFD", 6)})), CYC, rg, 6)
     assert np.isnan(out["refc"]).all() and np.isnan(out["refd"]).all() and np.isnan(out["refl_ptype"]).all()
     assert np.isfinite(out["qpf"]).any() and np.isfinite(out["psnow"]).any()
+
+
+def test_masked_no_echo_cells_inside_the_domain_are_no_echo():
+    """A GRIB bitmap that masks "no echo" must not leave holes: the page cannot interpolate across a hole, so every echo edge would come out blocky."""
+    d = np.array([[np.nan, 30.0, -999.0], [np.nan, np.nan, 12.0]], np.float32)
+    inside = np.array([[True, True, True], [True, False, True]])
+    out = W.clean_dbz(d, inside)
+    assert out.tolist()[0] == [-20.0, 30.0, -20.0] and out[1, 0] == -20.0 and out[1, 2] == 12.0 and np.isnan(out[1, 1])    # the hole outside the domain stays a hole
+    assert np.isnan(W.clean_dbz(d)[0, 0])                                     # without a footprint nothing is guessed
+
+
+def test_adjacent_messages_share_one_range_request_without_changing_anything(rg):
+    """Messages that sit back to back in a file are fetched in one request: fewer round trips, the same bytes, the same maps."""
+    def run(max_range):
+        old, pipeline.MAX_RANGE = pipeline.MAX_RANGE, max_range
+        try:
+            fake = FakeS3(NOW)
+            out, _ = pipeline.process_member(S3Source(fake), CYC, "m002", rg, 3)
+            return out, [r for r in fake.range_requests]
+        finally:
+            pipeline.MAX_RANGE = old
+    merged, mreq = run(8_000_000)
+    plain, preq = run(0)                                                      # 0 = never merge: the previous behaviour
+    assert len(mreq) < 0.7 * len(preq)
+    for k in plain:
+        np.testing.assert_array_equal(merged[k], plain[k], err_msg=k)
