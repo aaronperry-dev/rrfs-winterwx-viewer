@@ -79,7 +79,7 @@ def test_catalog_is_consistent():
 def test_one_hour_variants():
     assert {p.key for p in ONE_HOUR} == {p.key + "_1h" for p in PRODUCTS if p.has1h}
     assert {"qpf", "snow_model", "snow_12", "snow_kuchera", "snow_maxt", "snow_thick", "snow_mean",
-            "snow_cobb", "snow_cobblift", "snow_nbmthick", "snow_byun", "snow_clim"} == {p.key for p in PRODUCTS if p.has1h}
+            "snow_cobb", "snow_cobblift", "snow_nbmthick", "snow_byun", "snow_clim"} | {"hr_snow", "hr_qpf"} == {p.key for p in PRODUCTS if p.has1h}      # + the two HRRR accumulations
     for p in ONE_HOUR:
         assert p.dtype == "u16" and p.step <= BY_KEY[p.key[:-3]].step
         assert p.style is BY_KEY[p.key[:-3]].style
