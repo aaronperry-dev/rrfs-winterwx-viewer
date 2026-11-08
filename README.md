@@ -66,10 +66,11 @@ then the map with a right-hand sidebar of checkbox-style options (ensemble view,
 | | **Snow / sleet / freezing rain / rain** | Precipitation-type probability (members: 0 or 100; mean: % of members) |
 | | **Warm nose** | Warmest temperature 925–700 hPa |
 | Snow growth (DGZ) | **DGZ depth** | Geometric thickness, in thousands of feet (kft), of the layer between −12 °C and −18 °C: temperature is interpolated linearly between pressure levels and each layer's thickness comes from the hypsometric equation with its own mean temperature. Colours follow the College of DuPage NEXLAB ramp (0–20 kft). Temperature only: it says where the zone is, not whether it is moist |
-| | **Saturated DGZ depth** | The part of that layer, in kft, where the layer-mean RH with respect to ice is ≥ 100 %: the depth in which dendrites can really grow. A deep zone with little saturated depth means dry air in the zone |
-| | **Saturated DGZ with lift** | The saturated depth only where the column also has ascent: hourly-maximum upward motion `MAXUVV` ≥ 0.1 m/s. All three ingredients (right temperature, ice saturation, ascent) together. A proxy, see limitations |
+| | **Moist DGZ depth** | The part of that layer, in kft, where the layer-mean RH with respect to ice is ≥ 90 %, the moisture criterion of the NWS MDL / NBM Cobb method (about 75–78 % RH over water at −12 to −18 °C). This is the depth in which dendrites can grow. A deep zone with little moist depth means dry air in the zone |
+| | **DGZ ascent** | Mean upward motion in the −12 to −18 °C layer, as pressure vertical velocity in µbar/s: the deterministic run's `DZDT` (every 25 hPa, 925–300 hPa) converted with ω = −ρ g w, ρ = p / (R<sub>d</sub> T) at each level on the member's own temperatures (1 Pa/s = 10 µbar/s). Descent is shown as no ascent |
+| | **Moist DGZ with lift** | The moist depth only where the in-layer ascent is ≥ 0.1 m/s (about 7 µbar/s near 700 hPa). Falls back to the hourly column-maximum upward motion (`MAXUVV`) where the deterministic file is missing |
 | | **DGZ mean RH (ice)** | Pressure-weighted RHi inside the DGZ |
-| | **Peak upward motion** | `MAXUVV` (hourly max vertical velocity, 100–1000 hPa); the lift proxy, see limitations |
+| | **Peak upward motion** | `MAXUVV` (hourly max vertical velocity, 100–1000 hPa): every member publishes it, but it is the column maximum, not the ascent inside the DGZ |
 | Wind & blizzard | **Gust, wind speed, visibility** | `GUST`, `UGRD`/`VGRD`, `VIS` |
 | | **Blizzard conditions** | Wind **or** gust ≥ 35 mph **and** visibility ≤ ¼ mi **and** snow or sleet falling |
 | | **Blizzard duration** | Longest run of blizzard samples so far (the NWS criteria need ≥ 3 h) |
@@ -77,6 +78,34 @@ then the map with a right-hand sidebar of checkbox-style options (ensemble view,
 
 Colour ramps are fixed physical bins (a colour always means the same value in every frame and for every member). QPF and snowfall use the NWS Gray/Portland legends; wind and
 wind-chill legends are the same NWS-style ramps as the RTMA dashboard. The snow-ratio (SLR) maps use the ColorBrewer **RdYlBu** ramp, reversed: warm colours (red) are low ratios (dense, wet snow), cool colours (blue) are high ratios (light, fluffy snow), with pale yellow at 12–14:1 and one colour per bin (below 4, 4–6, 6–8, 8–10, 10–12, 12–14, 14–16, 16–18, 18–20, 20–25, 25–30:1; above 30 keeps the top blue).
+
+## Snow growth (DGZ): the science and the sources
+
+* **Why −12 to −18 °C.** Crystal shape depends on temperature and on supersaturation with respect to ice: plates near −2 °C, columns and needles near −5 °C, thin plates and
+  stellar dendrites near −15 °C, columns again near −30 °C, with structures getting more branched as supersaturation grows (the Nakaya diagram, Libbrecht 2012).
+  Growth by vapour deposition is fastest near −15 °C, so forecasters take −12 to −18 °C as the dendritic growth zone. Unrimed dendrites and plates give the
+  highest snow-to-liquid ratios; riming lowers them, often to 10:1 or less (WPC snow forecasting guide; NWS VLab Forecast Operations Guide).
+* **Ratio versus temperature.** The Cobb & Waldstreicher curve (2011 version, as NBM and SREF use it) gives layer ratios of about 26:1 at −16 °C, 22.5:1 at −14 °C,
+  17.5:1 at −12 °C, 23:1 at −18 °C, 18:1 at −20 °C, 12:1 at −22 °C and 12:1 at −10 °C, falling to about 9:1 near −6 °C and 7:1 below −26 °C: a broad peak around the
+  DGZ, not a cliff at its edges. That curve is what the "Cobb snowfall" products use.
+* **Moisture and ascent.** The NWS MDL SLR method counts layers with relative humidity above 90 % with respect to ice and rising motion. The usual rule of thumb is
+  RH of at least about 80 % over water for dendritic growth, and ascent inside the DGZ should be assessed: stronger ascent in a moist DGZ produces more snow and
+  bands (DTN; NWS Bismarck winter diagnostics "Dendritic RH and Omega" and "OPRH"). Roebber et al. found temperature the stronger control on snow density and humidity
+  secondary.
+* **Depth.** The usual forecaster's reading is that a deep moist DGZ gives crystals more time to grow as they fall and a very shallow one limits dendritic growth;
+  NWS Western Region technical attachment 16-04 (Uttech) examines DGZ depth and humidity against observed ratios in one storm.
+* **Warm layers.** A warm nose or a warm layer near 0 °C keeps ratios low and can melt snow into sleet or freezing rain; see the Warm nose and precipitation-type maps.
+
+**References.** Cobb, D. K., and J. S. Waldstreicher, 2005: A simple physically based snowfall algorithm. 21st Conf. on Weather Analysis and Forecasting (NWS MDL
+"Snow/Liquid Ratio" description of the 2011 version: https://www.weather.gov/media/mdl/SLR.pdf). · Roebber, P. J., S. L. Bruening, D. M. Schultz, and J. V. Cortinas, 2003:
+Improving snowfall forecasting by diagnosing snow density. *Wea. Forecasting*, 18, 264–287. · Baxter, M. A., C. E. Graves, and J. T. Moore, 2005: A climatology of
+snow-to-liquid ratio for the contiguous United States. *Wea. Forecasting*, 20, 729–744. · Libbrecht, K. G., 2012: Toward a comprehensive model of snow crystal growth
+dynamics: 1. Overarching features and physical origins (includes the Nakaya morphology diagram), https://arxiv.org/abs/1211.5555. · NOAA VLab Forecast Operations Guide, Snow Accumulation Forecasting Using NWP,
+https://vlab.noaa.gov/web/forecast-guide/-/snow-asset-publisher. · NWS Louisville, winter precipitation forecasting, https://www.weather.gov/lmk/winter-precip. ·
+NWS Bismarck winter diagnostics, https://www.weather.gov/bis/winter_diag. · Uttech, Z. P.: Snow-to-liquid ratios associated with a strong November snowstorm, NWS WR TA 16-04.
+· WPC, Snow forecasting, https://www.wpc.ncep.noaa.gov/research/snowfcst/snow.pdf. · Korolev, A., and I. Mazin, 2003: Supersaturation of water vapor in clouds, *J. Atmos.
+Sci.*, 60, 2957–2974 (the 10 cm/s ascent figure is quoted from a radar-conference preprint by Williams, 35th Conf. on Radar Meteorology, and has not been checked against the
+original).
 
 ## Data and the "lean fetch"
 
@@ -89,7 +118,7 @@ wind-chill legends are the same NWS-style ramps as the RTMA dashboard. The snow-
   HTTP `Range` request per field, a ~1–2 MB message instead of a multi-hundred-MB file. Messages are decoded from memory with
   `eccodes`; nothing is written to disk.
 * Per member and 3-hourly frame: 3 hours of `APCP` and type flags, `ASNOW`, 2 m / 10 m fields, `GUST`, `VIS`, `PRES`, `MAXUVV`,
-  `TMP` on 13 pressure levels (1000–300 hPa) and `RH` on 10 → roughly 80 requests including index files. Once per cycle the deterministic `prslev` file's `DZDT` on 26 levels is fetched per frame (about 20 MB, 26 requests) and shared with the members through a scratch file, which is removed at the end of the build (`--no-lift` skips it). The five members and the REFS mean run in parallel processes.
+  `TMP` on 13 pressure levels (1000–300 hPa) and `RH` on 13 (the three lowest, 1000/975/950 hPa, are for the DGZ only) plus 2 m `RH` → roughly 80 requests including index files. Once per cycle the deterministic `prslev` file's `DZDT` on 26 levels is fetched per frame (about 20 MB, 26 requests) and shared with the members through a scratch file, which is removed at the end of the build (`--no-lift` skips it). The five members and the REFS mean run in parallel processes.
 * The newest cycle (00/06/12/18 UTC) whose **last forecast hour (F060)** exists for the REFS mean and every member is used.
 * Fields are re-projected from the 3 km Lambert grid onto a fixed New England raster (3 km, nearest neighbour, indices
   pre-computed and cached), then quantised (8/16 bit) and gzip-compressed per product and source. The browser decodes them with
@@ -229,9 +258,20 @@ in demo mode is synthetic and marked as such on the page.
   treat it as one more scenario next to Kuchera, 10:1 and the model's own `ASNOW`. The layer runs from 2000 ft AGL (≈ 610 m, as in NBM) up to
   500 hPa, the highest level used for it; NBM and Veals et al. go to 400 hPa (nothing above 500 hPa is fetched).
 * **Kuchera** uses the 2 m temperature and levels up to 500 hPa (the original used the surface-to-500 hPa layer as well).
-* **DGZ RH** exists only at 925–500 hPa, so DGZ layers below 925 hPa count as "unknown" and not as saturated.
-* **DGZ with lift is a proxy.** RRFS publishes no omega on pressure levels, so the column-maximum upward motion stands in: it shows that ascent exists
-  somewhere above the point, not that it sits inside the DGZ. The 0.1 m/s threshold is a judgement, not a published criterion.
+* **DGZ humidity** uses RH on 1000–500 hPa (1000, 975 and 950 hPa are fetched for the DGZ only) and the 2 m RH, which with the 2 m temperature is the bottom of
+  the profile where the ground cuts between two levels, so a DGZ in the lowest part of the column (shallow cold air, high terrain) is counted. Layers with no RH at all
+  count as not moist. The deterministic-lift Cobb ratio is unchanged (it starts at 925 hPa).
+* **The DGZ maps are instantaneous ingredient maps, not snowfall.** They are valid at the frame time and say nothing about whether precipitation is falling or whether
+  it reaches the ground as snow, so they do not have to line up with the snowfall products, which are accumulated totals (run total or the chosen window) from QPF and
+  the precipitation type. Compare them with the 1-hour snowfall or reflectivity at the same valid time.
+* **DGZ ascent is the deterministic run's, not the member's.** The members publish no vertical velocity on pressure levels. `DZDT` from the deterministic
+  RRFS (already fetched once per cycle for the Cobb-with-lift ratio) is combined with each member's own temperature, so where the two runs disagree about where the
+  ascent is, the DGZ ascent and "Moist DGZ with lift" disagree too. The 0.1 m/s threshold comes from Korolev & Mazin (2003) as relayed in the Williams radar preprint
+  below, not from a verified snowfall criterion; check it before relying on it. The density used in the conversion is the ideal-gas value (no moisture term).
+* **Humidity is taken as RH over water** at every temperature (as the model files label it) and converted to ice with Magnus-type saturation pressures.
+* **The DGZ is necessary, not sufficient, for fluffy snow.** Observed snow-to-liquid ratios also depend on riming, aggregation, melting and sublimation under the
+  cloud, and compaction (Roebber et al. 2003), and no single ratio method is most accurate (a 2023 NOAA ensemble-snowfall study of ratio choices). These maps show where the
+  ingredients for dendrites are present, not a snowfall amount.
 * **No snow depth change product.** The public RRFS files carry no snow depth (`SNOD`), so a true "accumulated positive snow depth change" cannot be
   computed. `ASNOW` (Model snowfall) is the closest field; it counts snow reaching the ground and does not take off later settling or melt.
 * **Freezing rain and sleet are liquid equivalents.** No radial-ice/flat-ice accretion model is applied.
@@ -269,3 +309,8 @@ site/index.html  the dashboard (single file, no dependencies)
 
 Data: NOAA/NCEP RRFS via the NOAA Open Data Dissemination programme on AWS. Basemap: Mapzen / AWS Terrain Tiles (USGS, NOAA, GEBCO, SRTM and others, see the [attribution list](https://github.com/tilezen/joerd/blob/master/docs/attribution.md)) and Natural Earth. Method references: Kuchera (2004), Cobb &
 Waldstreicher (2005), the SREF snow/liquid-ratio write-up (Cobb 2011 curve), Cobb (2024, Cobb SLR methodology and application in NBM v4.1), Leone, Cobb & Rudack (2023, Cobb melting SLR method), Baxter et al. (2005), Byun et al. (2008), Veals et al. (2025), NBM v5.0 winter-suite documentation, NWS wind-chill and blizzard definitions.
+
+### Ensemble-mean methods: reference for SAM / SAM-LPM (not implemented)
+
+- Lee, Brewster, Snook, Spencer & Park (2024), "Spatially aligned mean (SAM) and SAM-LPM ...", Wea. Forecasting 39, 1545-1558, doi:10.1175/WAF-D-23-0229.1 (data: https://osf.io/6bame/). Validated on warm-season convective rainfall only, not on winter snowfall.
+- Snook et al. (2020), GRL: localized probability-matched mean (LPM) patch recommendations.
