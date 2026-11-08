@@ -326,7 +326,7 @@ const store = new Map();                                    // "product.source" 
 const prod = () => D.products.find(p => p.key === state.product);
 const hasMembers = p => D.members.some(m => p.available[m]);          // 1 km reflectivity is published only as the REFS probability-matched mean: no members
 const isDbz = p => p.unit === "dBZ" && !p.cat;
-const isSam = m => m === "sam" || m === "samlpm";
+const isSam = m => m === "sam" || m === "samlpm" || m === "pos";            // the views built on the spatial alignment of the members
 const PTYPE_NAMES = ["Rain", "Snow", "Sleet", "Freezing rain"];
 const CAT_MODES = { refs: ["RRFS PMM echo + REFS mean type", "REFS (PMM)"], mean: ["Member consensus (most common type, mean echo)", "Consensus"], max: ["Strongest member (its echo and type)", "Strongest"] };
 function modeInfo(m, p = prod()) {                          // [long label, short label]
@@ -348,7 +348,7 @@ const tick = v => (Math.abs(v) < 1e-9 ? "0" : String(+v.toPrecision(6)));
 const MODES = [["refs", "RRFS Mean (REFS)", "RRFS Mean (REFS)"], ["min", "Minimum", "Min"], ["p05", "5th percentile", "P5"],
   ["p10", "10th percentile", "P10"], ["p25", "25th percentile", "P25"], ["p50", "Median (50th percentile)", "P50"],
   ["mean", "Member mean", "Mean"], ["pmm", "Probability-matched mean (PMM)", "PMM"], ["lpmm", "Localized probability-matched mean (LPMM)", "LPMM"],
-  ["sam", "Spatially aligned mean (SAM)", "SAM"], ["samlpm", "Spatially aligned mean with localized probability matching (SAM–LPM)", "SAM–LPM"], ["p75", "75th percentile", "P75"], ["p90", "90th percentile", "P90"],
+  ["sam", "Spatially aligned mean (SAM)", "SAM"], ["samlpm", "Spatially aligned mean with localized probability matching (SAM–LPM)", "SAM–LPM"], ["pos", "Position spread: distance members move to line up", "Position"], ["p75", "75th percentile", "P75"], ["p90", "90th percentile", "P90"],
   ["p95", "95th percentile", "P95"], ["max", "Maximum", "Max"], ["spread", "Spread (σ)", "Spread (σ)"], ["prob", "Probability", "Probability"]];
 const PCT_MODES = { p05: 0.05, p10: 0.10, p25: 0.25, p50: 0.50, p75: 0.75, p90: 0.90, p95: 0.95 };
 const modeLabel = (m, p) => m.startsWith("m0") ? m : modeInfo(m, p)[0];
@@ -509,12 +509,12 @@ function pmmField(arrs, domKm, nx, ny, r0, r1) {            // domKm = 0: one gl
 // (large patches first, then smaller ones) on a 4x coarser, square-root transformed copy; the member is then resampled and its own value distribution restored.
 // Pure functions of their arguments (no page state) so that the same source runs in the Web Workers.
 // Choices the paper does not fix are ours: 4x coarsening (12 km), sqrt of the amount, SOAR strength alpha, and the 600 km / 225 km patch cascade scaled to this small domain.
-const SAM = { B: 4, passes: [{ km: 600, range: 8 }, { km: 225, range: 5 }], alpha: 0.1, eps: 0.05, cellKm: 3 };
-function samBlock(a, nx, ny, B) {                                      // block mean of sqrt(amount); missing = 0
+const SAM = { B: 4, passes: [{ km: 600, range: 8 }, { km: 225, range: 5 }], alpha: 0.1, floor: 0.01, cellKm: 3 };   // floor: amounts below it (inches) do not take part in the matching
+function samBlock(a, nx, ny, B, floor) {                               // block mean of sqrt(amount above the floor); missing = 0
   const cx = Math.ceil(nx / B), cy = Math.ceil(ny / B), out = new Float32Array(cx * cy);
   for (let j = 0; j < cy; j++) for (let i = 0; i < cx; i++) {
     let s = 0, c = 0;
-    for (let y = j * B; y < Math.min(ny, j * B + B); y++) for (let x = i * B; x < Math.min(nx, i * B + B); x++) { const v = a[y * nx + x]; c++; if (v === v && v > 0) s += Math.sqrt(v); }
+    for (let y = j * B; y < Math.min(ny, j * B + B); y++) for (let x = i * B; x < Math.min(nx, i * B + B); x++) { const v = a[y * nx + x]; c++; if (v === v && v > floor) s += Math.sqrt(v - floor); }
     out[j * cx + i] = s / c;
   }
   return out;
@@ -564,11 +564,11 @@ function samPass(src, tgt, cx, cy, P, R, lambda, eps) {                // -> dis
   for (let i = 0; i < cx * cy; i++) { const d = Math.max(den[i], 1e-6); sx[i] /= d; sy[i] /= d; }
   return { sx, sy };
 }
-function samField(arr, tgt, nx, ny) {                                  // displacement of one member toward the target, in coarse cells
-  const o = SAM, B = o.B, cx = Math.ceil(nx / B), cy = Math.ceil(ny / B), t = samBlock(tgt, nx, ny, B), c = samRestore(samBlock(arr, nx, ny, B), t);   // member given the target's value distribution first, so that an amplitude bias does not drive the shifts
+function samField(arr, tgt, nx, ny, floor) {                           // displacement of one member toward the target, in coarse cells
+  const o = SAM, B = o.B, cx = Math.ceil(nx / B), cy = Math.ceil(ny / B), t = samBlock(tgt, nx, ny, B, floor), c = samRestore(samBlock(arr, nx, ny, B, floor), t);   // member given the target's value distribution first, so that an amplitude bias does not drive the shifts
   let cur = c, tx = new Float32Array(cx * cy), ty = new Float32Array(cx * cy);
   for (const ps of o.passes) {
-    const P = Math.round(ps.km / (o.cellKm * B)), lambda = o.alpha * Math.SQRT2 * P, f = samPass(cur, t, cx, cy, P, ps.range, lambda, o.eps);
+    const P = Math.round(ps.km / (o.cellKm * B)), lambda = o.alpha * Math.SQRT2 * P, f = samPass(cur, t, cx, cy, P, ps.range, lambda, Math.sqrt(floor));
     const nxs = new Float32Array(cx * cy), nys = new Float32Array(cx * cy);
     for (let y = 0; y < cy; y++) for (let x = 0; x < cx; x++) {            // total(x) = s2(x) + s1(x + s2(x))
       const i = y * cx + x, ax = x + f.sx[i], ay = y + f.sy[i];
@@ -603,8 +603,27 @@ function samRestore(moved, orig) {                                     // reassi
   }
   return out;
 }
-function samAlign(arr, tgt, nx, ny) { return samRestore(samResample(arr, nx, ny, samField(arr, tgt, nx, ny), SAM.B), arr); }
-function work(m) { return m.op === "align" ? samAlign(m.arr, m.tgt, m.nx, m.ny) : pmmField(m.arrs, m.km, m.nx, m.ny, m.r0, m.r1); }   // one job for a worker (or, without workers, for the page)
+// The displacement is found on one field (the model's liquid-equivalent precipitation: continuous across a rain/snow line, unlike snowfall) and can then be
+// applied to any other field of the same member, so that all snowfall products of a member move together.
+function samShift(arr, tgt, nx, ny, floor) {                           // -> the member's displacement field, coarse cells: all x shifts, then all y shifts
+  const d = samField(arr, tgt, nx, ny, floor === undefined ? SAM.floor : floor), out = new Float32Array(2 * d.sx.length);
+  out.set(d.sx); out.set(d.sy, d.sx.length); return out;
+}
+function samWarp(arr, sh, nx, ny) {                                    // move a member by its displacement field and restore its own value distribution
+  const B = SAM.B, cx = Math.ceil(nx / B), cy = Math.ceil(ny / B), n = cx * cy;
+  return samRestore(samResample(arr, nx, ny, { sx: sh.subarray(0, n), sy: sh.subarray(n), cx, cy }, B), arr);
+}
+function samAlign(arr, tgt, nx, ny, floor) { return samWarp(arr, samShift(arr, tgt, nx, ny, floor), nx, ny); }
+function samSpread(shifts, nx, ny) {                                   // km: root-mean-square displacement of the members (how far they had to move to line up)
+  const B = SAM.B, cx = Math.ceil(nx / B), cy = Math.ceil(ny / B), n = cx * cy, c = new Float32Array(n), out = new Float32Array(nx * ny), km = B * SAM.cellKm;
+  for (const sh of shifts) for (let i = 0; i < n; i++) c[i] += (sh[i] * sh[i] + sh[n + i] * sh[n + i]) / shifts.length;
+  for (let i = 0; i < n; i++) c[i] = Math.sqrt(c[i]) * km;
+  for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) out[y * nx + x] = samBilin(c, cx, cy, (x + 0.5) / B - 0.5, (y + 0.5) / B - 0.5);
+  return out;
+}
+function work(m) {                                                     // one job for a worker (or, without workers, for the page)
+  return m.op === "shift" ? samShift(m.arr, m.tgt, m.nx, m.ny, m.floor) : m.op === "warp" ? samWarp(m.arr, m.shift, m.nx, m.ny) : pmmField(m.arrs, m.km, m.nx, m.ny, m.r0, m.r1);
+}
 
 // ---- worker pool: heavy fields are computed off the main thread, in parallel, and cached; neighbouring forecast hours are computed ahead of time
 const pool = { ok: null, workers: [], idle: [], queue: [] };
@@ -612,7 +631,7 @@ let prefetchGen = 0, lastDir = 1;
 function initPool() {
   if (pool.ok !== null) return pool.ok;
   try {
-    const src = `"use strict";const PCT_MODES=${JSON.stringify(PCT_MODES)},SAM=${JSON.stringify(SAM)};\n` + [percentile, reduce, lowerBound, upperBound, pmmRegion, pmmPatch, pmmField, samBlock, samBilin, samWarpCoarse, samSoar, samPass, samField, samResample, samRestore, samAlign, work].map(f => f.toString()).join("\n") +
+    const src = `"use strict";const PCT_MODES=${JSON.stringify(PCT_MODES)},SAM=${JSON.stringify(SAM)};\n` + [percentile, reduce, lowerBound, upperBound, pmmRegion, pmmPatch, pmmField, samBlock, samBilin, samWarpCoarse, samSoar, samPass, samField, samResample, samRestore, samShift, samWarp, work].map(f => f.toString()).join("\n") +
       `\nonmessage=e=>{const out=work(e.data);postMessage({out},[out.buffer]);};`;
     const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" })), n = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
     for (let i = 0; i < n; i++) {
@@ -661,23 +680,31 @@ function matched(key, arrs, km, opt) {
   matchCache.set(key, e); if (matchCache.size > 40) matchCache.delete(matchCache.keys().next().value);
   return e.promise;
 }
-const alignedPmm = (p, win, fi, mem) => [p.key, win, fi, "pmm", 0, mem.join()].join("|");        // the PMM the members are aligned to is the cached global PMM
-function aligned(key, tgtKey, arrs, opt) {                  // -> the members moved onto the PMM pattern, each with its own value distribution restored (one worker job per member)
+// SAM works in two cached stages: the members' displacement fields (found on the liquid-equivalent precipitation, one per member and window), then each
+// product's members are moved by them. Both stages are one worker job per member and join the same priority scheme as the PMM jobs.
+function jobSet(key, opt, start) {
   let e = matchCache.get(key);
   if (e) { if (opt.tok !== undefined) { e.opt = { tok: opt.tok }; for (const j of e.jobs) { j.prio = 0; j.tok = opt.tok; j.gen = undefined; } } return e.promise; }
   e = { jobs: [], opt: { tok: opt.tok, gen: opt.gen } };
-  const nx = D.grid.nx, ny = D.grid.ny;
-  e.promise = matched(tgtKey, arrs, 0, opt).then(tgt => {
-    if (!tgt) return null;
-    if (!initPool() || !pool.workers.length) return arrs.map(a => samAlign(a, tgt, nx, ny));
-    const parts = arrs.map(a => new Promise(resolve => {
-      const job = { prio: e.opt.tok !== undefined ? 0 : 1, tok: e.opt.tok, gen: e.opt.gen, resolve, msg: { op: "align", arr: a, tgt, nx, ny } };
-      e.jobs.push(job); pool.queue.push(job); }));
-    pump();
-    return Promise.all(parts).then(res => (res.some(r => !r) ? null : res));
-  }).then(v => { if (!v && matchCache.get(key) === e) matchCache.delete(key); return v; });
+  e.promise = start(e).then(v => { if (!v && matchCache.get(key) === e) matchCache.delete(key); return v; });
   matchCache.set(key, e); if (matchCache.size > 40) matchCache.delete(matchCache.keys().next().value);
   return e.promise;
+}
+function queueJobs(e, msgs) {                               // -> Promise of the results in order, null if any job was dropped as stale
+  if (!initPool() || !pool.workers.length) return Promise.resolve(msgs.map(work));
+  const parts = msgs.map(msg => new Promise(resolve => {
+    const job = { prio: e.opt.tok !== undefined ? 0 : 1, tok: e.opt.tok, gen: e.opt.gen, resolve, msg };
+    e.jobs.push(job); pool.queue.push(job); }));
+  pump();
+  return Promise.all(parts).then(res => (res.some(r => !r) ? null : res));
+}
+function samShifts(key, pmmKey, src, floor, opt) {          // src: the member fields the displacements are found on
+  const nx = D.grid.nx, ny = D.grid.ny;
+  return jobSet(key, opt, e => matched(pmmKey, src, 0, opt).then(tgt => (tgt ? queueJobs(e, src.map(arr => ({ op: "shift", arr, tgt, nx, ny, floor }))) : null)));
+}
+function samAligned(key, shifts, arrs, opt) {
+  const nx = D.grid.nx, ny = D.grid.ny;
+  return jobSet(key, opt, e => shifts.then(sh => (sh ? queueJobs(e, arrs.map((arr, k) => ({ op: "warp", arr, shift: sh[k], nx, ny }))) : null)));
 }
 function meanDbz(arrs) {                                    // the mean of reflectivity is taken in linear Z (mm^6/m^3) and converted back: averaging dBZ itself understates strong echoes
   const n = arrs[0].length, out = new Float32Array(n);
@@ -730,9 +757,20 @@ async function viewField(mode, fi = state.frame, opt = {}) {           // -> { v
     values = await matched(key, arrs, km, opt);
     if (!values) return { error: "Interrupted - try again." };
   } else if (isSam(mode)) {
-    const mk = mem.join(), al = await aligned([p.key, win, fi, "sam", mk].join("|"), alignedPmm(p, win, fi, mem), arrs, opt);
+    // displacements: from the liquid-equivalent precipitation (QPF) over the same window; for 1 h and 3 h views over the 6 h ending at the valid time, so that
+    // consecutive frames move together instead of jittering. Without QPF for every member the product's own fields are used.
+    const sw = win === 1 || win === 3 ? 6 : win, qp = D.products.find(x => x.key === "qpf"), uk = used.join();
+    const qarrs = qp && qp.kind === "cum" && hasMembers(qp) ? await Promise.all(used.map(m => srcField(qp, m, fi, sw))) : null;
+    const useQ = !!qarrs && qarrs.every(a => a && finite(a)), src = useQ ? qarrs : arrs, sk = useQ ? "qpf" : p.key, floor = useQ ? SAM.floor : 10 * SAM.floor;
+    const shifts = samShifts([sk, sw, fi, "shift", uk].join("|"), [sk, sw, fi, "pmm", 0, uk].join("|"), src, floor, opt);
+    const al = await samAligned([p.key, win, fi, "sam", uk, sk, sw].join("|"), shifts, arrs, opt);
     if (!al) return { error: "Interrupted - try again." };
-    values = mode === "sam" ? reduce(al, "mean") : await matched([p.key, win, fi, "samlpm", state.lpmm, mk].join("|"), al, state.lpmm, opt);
+    if (mode === "pos") {
+      const sh = await shifts;
+      if (!sh) return { error: "Interrupted - try again." };
+      values = samSpread(sh, D.grid.nx, D.grid.ny);
+      for (let i = 0; i < values.length; i++) { let wet = false; for (let k = 0; k < src.length && !wet; k++) wet = src[k][i] >= floor; if (!wet) values[i] = NaN; }
+    } else values = mode === "sam" ? reduce(al, "mean") : await matched([p.key, win, fi, "samlpm", state.lpmm, uk, sk, sw].join("|"), al, state.lpmm, opt);
     if (!values) return { error: "Interrupted - try again." };
   } else if (p.cat) values = reduceCat(arrs, mode);
   else if (mode === "mean" && isDbz(p)) values = meanDbz(arrs);
@@ -740,6 +778,7 @@ async function viewField(mode, fi = state.frame, opt = {}) {           // -> { v
   if (!finite(values)) return { error: none };
   if (mode === "prob") return { values, style: PROB, unit: "%", dec: 0, thr, used, lacking };
   if (mode === "spread") return { values, style: spreadStyle(p), unit: p.unit, dec: Math.max(p.decimals, 1), used, lacking };
+  if (mode === "pos") return { values, style: POS, unit: "km", dec: 0, used, lacking };
   return { values, ...plain, used, lacking };
 }
 const Q_NOTES = [[8, "has nothing at this time", "have nothing at this time"], [4, "is interpolated from the neighbouring hours (the model file has a gap here)", "are interpolated from the neighbouring hours (the model files have a gap here)"],
@@ -755,6 +794,8 @@ function coverageNotes(v, p, mode) {                        // what was left out
 
 const PROB = { levels: [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95], ticks: [10, 30, 50, 70, 90],
   colors: [null, "#eef1fb", "#cfd8f4", "#a9bcec", "#83a0e0", "#6b86d3", "#7a6fc4", "#8f55b3", "#a83c9c", "#c02b7f", "#d6204f", "#8f0f1e"] };
+const POS = { levels: [5, 10, 20, 30, 45, 60, 80, 100, 130, 160], ticks: [10, 30, 60, 100, 160],
+  colors: [null, "#fff7bc", "#fee391", "#fec44f", "#fe9929", "#ec7014", "#cc4c02", "#993404", "#7a2a06", "#5c1d05", "#3a1203"] };
 function spreadStyle(p) {
   const lv = p.levels[0] < 0 ? [0.5, 1, 2, 3, 5, 7, 10, 15, 20] : p.levels.map(v => +(v / 4).toPrecision(2)).filter((v, i, a) => a.indexOf(v) === i);
   const base = ["#f4f1fa", "#ddd3ef", "#c3b2e3", "#a78fd4", "#8a6dc4", "#6c4fae", "#523a92", "#3b2873", "#281a52", "#170d33", "#0c0620"];
@@ -1209,13 +1250,18 @@ async function render() {
   if (mode === "pmm" || mode === "lpmm") { const n = activeMembers().length; notes.push(mode === "pmm"
     ? `PMM keeps the member-mean pattern but takes its amounts from the pooled member values over the whole map, restoring the amplitude the plain mean smooths away. With ${n} member${n === 1 ? "" : "s"} the pooled distribution is coarse.`
     : `LPMM does the same within local patches (${Math.round(state.lpmm / 3)} km) using a ${state.lpmm} km neighbourhood, so distant regimes do not set the amounts. With ${n} member${n === 1 ? "" : "s"} the pooled distribution is coarse.`); }
-  if (isSam(mode)) { const n = activeMembers().length; notes.push((mode === "sam"
-    ? "SAM (experimental): each member is first shifted toward the probability-matched mean by a smooth displacement field (Lee et al. 2024), keeping its own amounts, and the shifted members are then averaged. Features that the members place in slightly different spots therefore add up instead of smearing out."
-    : `SAM–LPM (experimental): the spatially aligned members are combined with localized probability matching (${Math.round(state.lpmm / 3)} km patches, ${state.lpmm} km neighbourhood), restoring the amplitude the aligned mean smooths.`)
-    + " Alignment hides location spread, so it shows where the members agree after shifting, not how likely a spot is to get the amount: use Probability for that. "
-    + (mode === "sam" ? "The domain total equals the plain mean's, but amounts are moved around locally, so do not read point or basin totals from it. " : "Like LPMM it does not keep exact totals. ")
-    + "The method was verified on warm-season rainfall only, not on snowfall."
-    + (n < 3 ? " With fewer than 3 members there is little to align." : "")); }
+  if (isSam(mode)) {
+    const n = activeMembers().length, sw = state.win === 1 || state.win === 3 ? 6 : state.win;
+    const how = `Each member is shifted by a smooth displacement field found on the model's liquid-equivalent precipitation over ${sw ? "the " + sw + " hours ending at the valid time" : "the run total"}${state.win === 1 || state.win === 3 ? " (so consecutive frames move together)" : ""}, so every snowfall product of a member moves by the same amount.`;
+    if (mode === "pos") notes.push(`Position spread (experimental): how far, in km, the members had to move on average to line up with the consensus pattern (root-mean-square of the member displacements; blank where no member has precipitation). ${how} Large values mean the members disagree about where the snow falls, for instance a band that sits in different places, and small values mean they agree. It is not a probability.`);
+    else notes.push((mode === "sam"
+      ? `SAM (experimental): ${how} The shifted members, each keeping its own amounts, are then averaged (Lee et al. 2024), so features the members place in slightly different spots add up instead of smearing out.`
+      : `SAM–LPM (experimental): ${how} The aligned members are then combined with localized probability matching (${Math.round(state.lpmm / 3)} km patches, ${state.lpmm} km neighbourhood), restoring the amplitude the aligned mean smooths.`)
+      + " Alignment hides location spread, so it shows where the members agree after shifting, not how likely a spot is to get the amount: use Probability, or the Position view, for that. "
+      + (mode === "sam" ? "The domain total equals the plain mean's, but amounts are moved around locally, so do not read point or basin totals from it. " : "Like LPMM it does not keep exact totals. ")
+      + "The method was verified on warm-season rainfall only, not on snowfall.");
+    if (n < 3) notes.push("With fewer than 3 members there is little to align.");
+  }
   if (mode in PCT_MODES) { const n = activeMembers().length; notes.push(`Percentiles are interpolated across the ${n} member${n === 1 ? "" : "s"} switched on, so with so few members P5/P10 sit close to the minimum and P90/P95 close to the maximum.`); }
   if (notes.length) { notice.hidden = false; notice.textContent = notes.join(" "); }
   mapHeader(mode);
@@ -1237,7 +1283,7 @@ async function render() {
 let current = null;
 
 async function renderStamps(token, p) {
-  const defs = p.cat ? [["refs", "REFS (PMM echo + mean type)"], ["mean", "Consensus"], ["max", "Strongest member"], ...D.members.map(m => [m, m])] : state.layout === "pctl" ? MODES.filter(x => !["refs", "spread", "prob", "pmm", "lpmm", "sam", "samlpm"].includes(x[0])).map(x => [x[0], x[1].replace("Median (50th percentile)", "Median (P50)").replace(" percentile", "")])
+  const defs = p.cat ? [["refs", "REFS (PMM echo + mean type)"], ["mean", "Consensus"], ["max", "Strongest member"], ...D.members.map(m => [m, m])] : state.layout === "pctl" ? MODES.filter(x => !["refs", "spread", "prob", "pmm", "lpmm", "sam", "samlpm", "pos"].includes(x[0])).map(x => [x[0], x[1].replace("Median (50th percentile)", "Median (P50)").replace(" percentile", "")])
     : [["refs", "RRFS Mean (REFS)"], ["mean", "Member mean"], ...(p.pmm ? [["pmm", "PMM"], ["lpmm", "LPMM"]] : []), ...(p.sam ? [["sam", "SAM"], ["samlpm", "SAM–LPM"]] : []), ["spread", "Spread (σ)"], ["prob", "Probability"], ...D.members.map(m => [m, m])];
   const grid = $("#stamps"); grid.replaceChildren(); grid.className = state.layout === "pctl" ? "pctl" : "";
   const first = await viewField("mean", state.frame, { tok: token }); if (token !== renderToken) return;
@@ -1542,7 +1588,7 @@ function updateTimeline() {
 }
 function header(mode) {                                     // the text block of the page header and of the exported PNG
   const p = prod(), f = state.frame, w = p.kind === "cum" && state.win ? `${state.win}-hr ` : "", n = activeMembers().length;
-  const sub = mode === "prob" ? `Probability ${p.thr_dir === "le" ? "≤" : "≥"} ${thrOf(p)} ${p.unit}` : `${modeLabel(mode)}${mode === "lpmm" || mode === "samlpm" ? ` · ${state.lpmm} km domain` : ""} (${p.unit})`;
+  const sub = mode === "prob" ? `Probability ${p.thr_dir === "le" ? "≤" : "≥"} ${thrOf(p)} ${p.unit}` : `${modeLabel(mode)}${mode === "lpmm" || mode === "samlpm" ? ` · ${state.lpmm} km domain` : ""} (${mode === "pos" ? "km" : p.unit})`;
   const fromMembers = mode !== "refs" && !mode.startsWith("m0");
   const exportSub = ["RRFS ensemble", sub, p.kind === "cum" && !state.win && "run total",
     fromMembers && (n === D.members.length ? `${n} members` : `${n} of ${D.members.length} members: ${activeMembers().join(", ")}`), D.demo && "SYNTHETIC DEMO DATA"].filter(Boolean).join(" · ");
