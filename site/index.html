@@ -1184,6 +1184,81 @@ function zoomStations(vw) {                                 // labels that fit a
   return kept.map(k => k.s);
 }
 const fcap = (f = state.frame) => `F${String(D.frames[f]).padStart(3, "0")}`;
+// ---------------------------------------------------------------- significance lines (added): a labelled isoline at a physically meaningful value (e.g. the thickness rain/snow line)
+const sigCache = new WeakMap();                              // values array -> Map(level -> polylines in grid coordinates)
+function isoPolylines(values, nx, ny, level) {               // marching squares on the display grid; segments are stitched into polylines so the dashes run on unbroken
+  const segs = [], ek = (c, r, vert) => (r * nx + c) * 2 + (vert ? 1 : 0), pos = new Map();
+  const edge = (c0, r0, c1, r1, a, b) => {                   // crossing of `level` on the edge between two grid points (linear interpolation)
+    const t = (level - a) / (b - a), vert = c0 === c1, key = ek(Math.min(c0, c1), Math.min(r0, r1), vert);
+    if (!pos.has(key)) pos.set(key, [c0 + (c1 - c0) * t, r0 + (r1 - r0) * t]);
+    return key;
+  };
+  for (let r = 0; r < ny - 1; r++) for (let c = 0; c < nx - 1; c++) {
+    const a = values[r * nx + c], b = values[r * nx + c + 1], d = values[(r + 1) * nx + c], e = values[(r + 1) * nx + c + 1];
+    if (a !== a || b !== b || d !== d || e !== e) continue;
+    const idx = (a >= level ? 1 : 0) | (b >= level ? 2 : 0) | (e >= level ? 4 : 0) | (d >= level ? 8 : 0);
+    if (idx === 0 || idx === 15) continue;
+    const bot = () => edge(c, r, c + 1, r, a, b), right = () => edge(c + 1, r, c + 1, r + 1, b, e), top = () => edge(c, r + 1, c + 1, r + 1, d, e), left = () => edge(c, r, c, r + 1, a, d);
+    switch (idx) {
+      case 1: case 14: segs.push([left(), bot()]); break;
+      case 2: case 13: segs.push([bot(), right()]); break;
+      case 3: case 12: segs.push([left(), right()]); break;
+      case 4: case 11: segs.push([right(), top()]); break;
+      case 6: case 9: segs.push([bot(), top()]); break;
+      case 7: case 8: segs.push([left(), top()]); break;
+      case 5: case 10: { const m = (a + b + d + e) / 4 >= level; if ((idx === 5) === m) segs.push([left(), top()], [bot(), right()]); else segs.push([left(), bot()], [right(), top()]); break; }
+    }
+  }
+  const adj = new Map(); segs.forEach((sg, i) => { for (const k of sg) { if (!adj.has(k)) adj.set(k, []); adj.get(k).push(i); } });
+  const used = new Uint8Array(segs.length), lines = [];
+  const walk = (start, first) => {                           // follow segments from a key until the line ends or closes
+    const out = [start]; let key = start, si = first;
+    while (si !== undefined && !used[si]) {
+      used[si] = 1; const sg = segs[si]; key = sg[0] === key ? sg[1] : sg[0]; out.push(key);
+      si = (adj.get(key) || []).find(j => !used[j]);
+    }
+    return out;
+  };
+  for (const [k, list] of adj) if (list.length === 1) { const i = list[0]; if (!used[i]) lines.push(walk(k, i).map(q => pos.get(q))); }   // open ends first (lines leaving the map or the data)
+  segs.forEach((sg, i) => { if (!used[i]) lines.push(walk(sg[0], i).map(q => pos.get(q))); });                                        // then closed rings
+  return lines;
+}
+function drawSigLines(ctx, v, vw = view) {
+  const lines = v && v.style && v.style.lines; if (!lines || !lines.length || !v.values) return;
+  const { nx, ny } = D.grid, { u0, v0 } = viewOrigin(vw), z = vw.z;
+  let cache = sigCache.get(v.values); if (!cache) sigCache.set(v.values, cache = new Map());
+  const toXY = q => [MAP.x + ((q[0] + .5) / nx - u0) * z * MAP.w, MAP.y + ((1 - (q[1] + .5) / ny) - v0) * z * MAP.h];
+  ctx.save(); ctx.beginPath(); ctx.rect(MAP.x, MAP.y, MAP.w, MAP.h); ctx.clip(); ctx.lineJoin = "round"; ctx.lineCap = "round";
+  for (const [level, label] of lines) {
+    if (!cache.has(level)) cache.set(level, isoPolylines(v.values, nx, ny, level));
+    const pls = cache.get(level).map(pl => pl.map(toXY)), path = new Path2D();
+    for (const pl of pls) { pl.forEach((q, i) => i ? path.lineTo(q[0], q[1]) : path.moveTo(q[0], q[1])); }
+    ctx.setLineDash([]); ctx.strokeStyle = "rgba(255,255,255,.95)"; ctx.lineWidth = 5.2; ctx.stroke(path);      // white casing, then a dashed black line: readable on every colour
+    ctx.setLineDash([9, 5]); ctx.strokeStyle = "#000"; ctx.lineWidth = 2.4; ctx.stroke(path); ctx.setLineDash([]);
+    ctx.font = "800 12px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.lineWidth = 3.6; ctx.strokeStyle = "#fff"; ctx.fillStyle = "#000";
+    const txt = String(level);
+    for (const pl of pls) {                                  // a number on each long visible stretch (about every 380 px of line)
+      let acc = 0, next = 160;
+      for (let i = 1; i < pl.length; i++) {
+        const [x0, y0] = pl[i - 1], [x1, y1] = pl[i]; acc += Math.hypot(x1 - x0, y1 - y0);
+        if (acc >= next && x1 > MAP.x + 24 && x1 < MAP.x + MAP.w - 24 && y1 > MAP.y + 12 && y1 < MAP.y + MAP.h - 12) { ctx.strokeText(txt, x1, y1); ctx.fillText(txt, x1, y1); next = acc + 380; }
+      }
+    }
+  }
+  ctx.restore();
+}
+function sigKey(ctx, v) {                                    // a small key at the bottom left of the map: dashed sample and the label
+  const lines = v && v.style && v.style.lines; if (!lines || !lines.length) return;
+  ctx.save(); ctx.font = "700 12px system-ui, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  const rowH = 20, w = 54 + Math.max(...lines.map(l => ctx.measureText(l[1]).width)) + 10, h = lines.length * rowH + 8, x = MAP.x + 10, y = MAP.y + MAP.h - 10 - h;
+  ctx.fillStyle = "rgba(255,255,255,.88)"; ctx.strokeStyle = "rgba(0,0,0,.35)"; ctx.lineWidth = 1; ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
+  lines.forEach(([, label], i) => {
+    const yy = y + 4 + rowH * (i + .5);
+    ctx.setLineDash([9, 5]); ctx.strokeStyle = "#000"; ctx.lineWidth = 2.4; ctx.beginPath(); ctx.moveTo(x + 8, yy); ctx.lineTo(x + 40, yy); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = "#111"; ctx.fillText(label, x + 46, yy);
+  });
+  ctx.restore();
+}
 function drawMain(ctx, v, mode, markers, vw = view, ds = 1) {
   const W = 1200, H = 836, { u0, v0 } = viewOrigin(vw), z = vw.z;
   ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
@@ -1192,6 +1267,7 @@ function drawMain(ctx, v, mode, markers, vw = view, ds = 1) {
   drawCounties(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);        // optional layers: county lines and highways under the boundary lines; cities, towns, peaks and route labels over them
   drawRoads(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);
   drawOverlay(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);
+  drawSigLines(ctx, v, vw); sigKey(ctx, v);                         // (added) significance lines, e.g. thickness rain/snow line
   const stationList = zoomStations(vw);
   drawGisLabels(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, stationList);
   // station values (nearest cell), bold with a white halo
@@ -1420,9 +1496,9 @@ function initPlumes() {
   if ("IntersectionObserver" in window) new IntersectionObserver((es, ob) => { if (es.some(e => e.isIntersecting)) { plumeSeen = true; ob.disconnect(); plumes(); } }, { rootMargin: "500px" }).observe($("#plumes"));
   initPtExtras();
 }
-// ---------------------------------------------------------------- point extras (added): precipitation-type timeline at the plume location, ski-area / station table
+// ---------------------------------------------------------------- point extras (added): precipitation-type timeline at the plume location, station table
 const PT_TYPES = [["prain", "brain", "Rain", "#3fae5b"], ["psleet", "bsleet", "Sleet", "#f59a2c"], ["pfrzr", "bfrzr", "Freezing rain", "#d63fa0"], ["psnow", "bsnow", "Snow", "#2f7fd6"]];
-let ptSet = "ski", ptWhen = 0, ptTok = 0, ptTabTok = 0, ptSort = "p50", ptDir = -1, ptShape = null;
+let ptSet = "", ptWhen = 0, ptTok = 0, ptTabTok = 0, ptSort = "p50", ptDir = -1, ptShape = null;
 const ptCache = new Map();                                  // "product|points" -> Promise<{ member: Float32Array(points x (1 + frames)) }>
 function ptSeries(key, pts, tag) {                          // values of one product at some points, every member that has it (index 0 of each point is F000)
   const p = D.products.find(x => x.key === key);
@@ -1495,7 +1571,7 @@ function ptHover(ev) {
   $("#pt-cap").textContent = `${hourLabel(D.valid[f])} (F${String(D.frames[f]).padStart(3, "0")}) · ${parts.join(" · ")}`;
 }
 const ptQuant = (arr, q) => { const a = arr.filter(v => v === v).sort((x, y) => x - y); if (!a.length) return NaN; const i = q * (a.length - 1), lo = Math.floor(i), hi = Math.ceil(i); return a[lo] + (a[hi] - a[lo]) * (i - lo); };
-const ptPoints = () => ptSet === "ski" ? (D.ski_all || []) : (D.stations_all || []).filter(s => s.st === ptSet).sort((a, b) => shortName(a).localeCompare(shortName(b)));
+const ptPoints = () => (D.stations_all || []).filter(s => s.st === ptSet).sort((a, b) => shortName(a).localeCompare(shortName(b)));
 async function renderPtTable() {
   const tab = $("#pt-table"), tok = ++ptTabTok;
   const pts = ptPoints(), snowP = D.products.find(p => p.key === plumeSnow);
@@ -1525,13 +1601,12 @@ async function renderPtTable() {
   for (const th of tab.querySelectorAll("th")) th.addEventListener("click", () => { const k = th.dataset.k; if (k === "mix") return; ptDir = k === ptSort ? -ptDir : (k === "name" ? 1 : -1); ptSort = k; renderPtTable(); });
   $("#pt-note").textContent = `Snowfall: ${snowP.label}, ${ptWhen ? ptWhen + " h" : "run total"}, in inches; P10 / P50 / P90 across the ${mem.length} active members (a few members: treat the tails loosely). ≥ 6 in and ≥ 12 in: share of those members. ` +
     `Type mix: share of the precipitation frames (3-hourly, all members) that are snow / sleet / freezing rain / rain by the model's flags. Peak gust, mph: the median over members of each member's strongest 3-hourly gust (the strongest member in brackets). ` +
-    `Ski areas are base-area positions, nearest 3 km cell: terrain much higher or lower than the model's smoothed terrain (summits, valleys) is not represented.`;
+    `Places are station positions, nearest 3 km cell.`;
 }
 function ptExtras() { if (!$("#ptx")) return; paintPtype(); renderPtTable(); }
 function initPtExtras() {
   const set = $("#pt-set"); if (!set) return;
   const opt = (v, t) => { const o = document.createElement("option"); o.value = v; o.textContent = t; return o; };
-  if ((D.ski_all || []).length) set.append(opt("ski", "Ski areas")); else ptSet = "";
   for (const [name, list] of plumeGroups()) if (list.length) set.append(opt(list[0].st || name, name));
   if (!ptSet) ptSet = set.options.length ? set.options[0].value : "";
   set.value = ptSet;
