@@ -123,14 +123,6 @@
   .tile .u { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: 2px; }
   .note { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
   #chart { width: 100%; height: auto; display: block; cursor: crosshair; }
-  #chartwrap { position: relative; }
-  #chart-cursor { position: absolute; width: 0; border-left: 1.5px dashed var(--muted); pointer-events: none; }
-  .ctip { line-height: 1.55; padding: 6px 10px; font-size: 12.5px; }
-  .ctip b { font-weight: 700; }
-  .ctip .t2 { color: #aab4bf; font-size: 11.5px; margin-bottom: 3px; }
-  .ctip .row { display: flex; justify-content: space-between; gap: 18px; }
-  .ctip .sw { display: inline-block; width: 12px; height: 0; border-top: 3px solid; vertical-align: middle; margin-right: 6px; }
-  .ctip .off { opacity: .55; }
   .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); margin-top: 6px; }
   .legend i { display: inline-block; width: 18px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 4px; }
   .keys { margin: 0; padding: 0; list-style: none; font-size: 13.5px; }
@@ -274,13 +266,10 @@
         <p class="note">Map view only. The image has the title, subtitle, init (run) time and valid time on top.</p></div></div>
       <div class="panel" id="p-summary"><h2 id="sum-title">New England land area</h2><div class="body">
         <div class="tiles" id="tiles"></div>
-        <div class="sublabel" style="margin-top:2px">Point forecast <span id="pt-name" style="font-weight:500"></span></div>
-        <div id="chartwrap"><canvas id="chart" width="680" height="440" aria-label="Point forecast by member"></canvas><div id="chart-cursor" hidden></div></div>
-        <div class="legend" id="chart-legend"></div>
         <p class="note" id="blurb"></p></div></div>
       <div class="panel"><h2>Keyboard Shortcuts</h2><div class="body"><ul class="keys">
         <li><kbd>&lt;</kbd> / <kbd>←</kbd> previous time</li><li><kbd>&gt;</kbd> / <kbd>→</kbd> next time</li>
-        <li><kbd>p</kbd> / <kbd>space</kbd> play / pause</li><li><kbd>h</kbd> toggle top menu</li><li><kbd>s</kbd> save the map as a PNG</li><li>Click the map for a point forecast</li>
+        <li><kbd>p</kbd> / <kbd>space</kbd> play / pause</li><li><kbd>h</kbd> toggle top menu</li><li><kbd>s</kbd> save the map as a PNG</li><li>Click the map to move the plumes to that point</li>
         <li><kbd>+</kbd> / <kbd>-</kbd> zoom, <kbd>0</kbd> full view, <kbd>shift</kbd>+arrows pan; scroll wheel, drag and double-click also work</li></ul></div></div>
       <div class="panel"><h2>More Information</h2><div class="body"><ul class="links">
         <li><a href="https://registry.opendata.aws/noaa-rrfs/">RRFS data on NOAA Open Data (AWS)</a></li>
@@ -297,7 +286,6 @@
   </footer>
 </div>
 <div class="tip" id="tip" hidden></div>
-<div class="tip ctip" id="ctip" hidden></div>
 
 <script>
 "use strict";
@@ -960,7 +948,7 @@ let renderToken = 0, loadTimer = null;
 async function render() {
   const token = ++renderToken, p = prod(); prefetchGen++;
   if (!p.pmm && (state.mode === "pmm" || state.mode === "lpmm")) state.mode = "mean";      // e.g. switching from snowfall to temperature while a PMM view is up
-  writeHash(); statusLine(); controls();
+  writeUrl(); statusLine(); controls();
   $("#mapwrap").hidden = state.layout !== "map"; $("#stampwrap").hidden = state.layout === "map"; $("#p-summary").hidden = state.layout !== "map"; $("#p-gis").hidden = state.layout !== "map" || !D.gis;
   syncExport();
   $("#blurb").textContent = p.desc;
@@ -985,12 +973,12 @@ async function render() {
   try { v = await viewField(mode, state.frame, { tok: token }); } catch (e) { clearTimeout(loadTimer); showMsg("Could not load data (" + e.message + ")"); return; }
   if (token !== renderToken) return;
   clearTimeout(loadTimer);
-  if (v.error) { msg.textContent = v.error; msg.hidden = false; current = null; syncExport(); tiles(null); chart(); plumes(); return; }
+  if (v.error) { msg.textContent = v.error; msg.hidden = false; current = null; syncExport(); tiles(null); plumes(); return; }
   msg.hidden = true;
   const more = coverageNotes(v, p, mode); if (more.length) { notice.hidden = false; notice.textContent = [...notes, ...more].join(" "); }
   drawMain($("#map").getContext("2d"), v, mode, true);
   current = { v, mode, hdr: header(mode) };                 // the title block is captured with the map it describes (the state may move on while the next map computes)
-  syncExport(); tiles(v); chart(); plumes(); evictOthers(); prefetch();
+  syncExport(); tiles(v); plumes(); evictOthers(); prefetch();
 }
 let current = null;
 
@@ -1025,7 +1013,7 @@ async function renderStamps(token, p) {
   evictOthers();
 }
 
-// ---------------------------------------------------------------- summary tiles + point chart
+// ---------------------------------------------------------------- summary tiles
 function tiles(v) {
   const el = $("#tiles");
   if (!v) { el.innerHTML = ""; return; }
@@ -1035,78 +1023,8 @@ function tiles(v) {
   $("#sum-title").textContent = "New England land area";
   el.innerHTML = t("Low", lo) + t("Average", s / Math.max(c, 1)) + t("High", hi);
 }
-let chartInfo = null;
-function chartFrameAt(ev) {
-  const cv = $("#chart"), i = chartInfo; if (!i) return -1;
-  const x = (ev.clientX - cv.getBoundingClientRect().left) * cv.width / cv.getBoundingClientRect().width;
-  if (x < i.L - 12 || x > i.W - i.R + 12) return -1;
-  return Math.max(0, Math.min(i.nf - 1, Math.round((x - i.L) / (i.W - i.L - i.R) * (i.nf - 1))));
-}
-function hideChartTip() { $("#ctip").hidden = true; $("#chart-cursor").hidden = true; }
-function showChartTip(ev) {
-  const f = chartFrameAt(ev), i = chartInfo, tip = $("#ctip"), cur = $("#chart-cursor");
-  if (f < 0) { hideChartTip(); return; }
-  const cv = $("#chart"), k = cv.getBoundingClientRect().width / i.W, p = i.p, val = y => { const v = y && y[f]; return v === v && v != null ? `${fnum(v, p.decimals)} ${p.unit}` : "—"; };
-  const row = (col, name, v, dash, off) => `<div class="row${off ? " off" : ""}"><span><i class="sw" style="border-color:${col};${dash ? "border-top-style:dashed;" : ""}"></i>${name}${off ? " (off)" : ""}</span><b>${v}</b></div>`;
-  tip.innerHTML = `<b>${fcap(f)}</b><div class="t2">${fmtDate(D.valid[f], "UTC")} · ${fmtDate(D.valid[f], TZ)}</div>` +
-    (i.mean ? row("#fff", "Member mean", val(i.mean)) : "") + (i.ry ? row("#fff", "REFS mean", val(i.ry), true) : "") +
-    i.series.map(s => row(s.col, s.m, val(s.y), false, !s.on)).join("");
-  tip.hidden = false;
-  const w = tip.offsetWidth, h = tip.offsetHeight, x = ev.clientX + 16 + w > innerWidth ? ev.clientX - 16 - w : ev.clientX + 16;
-  tip.style.left = Math.max(4, x) + "px"; tip.style.top = Math.max(4, Math.min(innerHeight - h - 4, ev.clientY - h / 2)) + "px";
-  cur.hidden = false; cur.style.left = i.X(f) * k + "px"; cur.style.top = i.T * k + "px"; cur.style.height = (i.H - i.T - i.B) * k + "px";
-}
-$("#chart").addEventListener("pointermove", showChartTip);
-$("#chart").addEventListener("pointerleave", hideChartTip);
-$("#chart").addEventListener("click", ev => { const f = chartFrameAt(ev); if (f >= 0) set({ frame: f }); });
-const MCOL = ["#e8590c", "#2f9e44", "#7048e8", "#c2255c", "#0c8599"];
-async function chart() {
-  const cv = $("#chart"), ctx = cv.getContext("2d"), W = cv.width, H = cv.height, p = prod();
-  chartInfo = null; hideChartTip();
-  ctx.clearRect(0, 0, W, H); $("#chart-legend").innerHTML = ""; $("#pt-name").textContent = "";
-  const dark = matchMedia("(prefers-color-scheme: dark)").matches, ink = dark ? "#e6edf3" : "#1c2128", grid = dark ? "#30363d" : "#d8dee4", muted = dark ? "#9198a1" : "#59636e";
-  if (!state.point) { ctx.fillStyle = muted; ctx.font = "26px system-ui"; ctx.textAlign = "center"; ctx.fillText("Click the map for a point forecast", W / 2, H / 2); return; }
-  const { r, c } = state.point, { nx } = D.grid, idx = r * nx + c, nf = D.frames.length;
-  const series = [];
-  for (const [i, m] of D.members.entries()) { const y = await pointSeries(p, m, idx); if (y) series.push({ m, col: MCOL[i], on: !!state.on[m], y }); }
-  const ry = await pointSeries(p, "refs", idx);
-  const act = series.filter(s => s.on), mean = act.length ? D.frames.map((_, f) => { let s = 0, k = 0; for (const a of act) { const v = a.y[f]; if (v === v) { s += v; k++; } } return k ? s / k : NaN; }) : null;
-  const all = [...series.flatMap(s => s.y), ...(ry || []), ...(mean || [])].filter(v => v === v);
-  if (!all.length) { ctx.fillStyle = muted; ctx.font = "26px system-ui"; ctx.textAlign = "center"; ctx.fillText("No data at this point", W / 2, H / 2); return; }
-  let ymin = Math.min(0, ...all), ymax = Math.max(...all); if (p.lo < 0 && ymin === 0) ymin = Math.min(...all);
-  if (ymax - ymin < 1e-6) ymax = ymin + 1; const pad = (ymax - ymin) * 0.08; ymax += pad; if (ymin !== 0) ymin -= pad;
-  const L = 92, R = 20, T = 20, B = 72, X = f => L + (W - L - R) * f / Math.max(nf - 1, 1), Y = v => T + (H - T - B) * (1 - (v - ymin) / (ymax - ymin));
-  ctx.strokeStyle = grid; ctx.fillStyle = muted; ctx.font = "23px system-ui"; ctx.lineWidth = 1.5;
-  const step = niceStep((ymax - ymin) / 5); ctx.textAlign = "right"; ctx.textBaseline = "middle";
-  for (let y = Math.ceil(ymin / step) * step; y <= ymax; y += step) { ctx.beginPath(); ctx.moveTo(L, Y(y)); ctx.lineTo(W - R, Y(y)); ctx.stroke(); ctx.fillText(tick(+y.toFixed(6)), L - 10, Y(y)); }
-  ctx.textAlign = "center"; ctx.textBaseline = "top";
-  D.frames.forEach((h, f) => { if (h % 12 === 0 || f === 0) ctx.fillText(h, X(f), H - B + 10); });
-  ctx.fillText("forecast hour", (L + W - R) / 2, H - 30);
-  const line = (ys, col, w, dash) => { ctx.strokeStyle = col; ctx.lineWidth = w; ctx.setLineDash(dash || []); ctx.beginPath(); let pen = false;
-    ys.forEach((v, f) => { if (v !== v) { pen = false; return; } pen ? ctx.lineTo(X(f), Y(v)) : ctx.moveTo(X(f), Y(v)); pen = true; }); ctx.stroke(); ctx.setLineDash([]); };
-  for (const s of series) line(s.y, s.on ? s.col : grid, s.on ? 3 : 2, s.on ? [] : [6, 6]);
-  if (ry) line(ry, ink, 4, [12, 8]);
-  if (mean) line(mean, ink, 6);
-  chartInfo = { L, R, T, B, W, H, nf, X, series, ry, mean, p };
-  ctx.strokeStyle = muted; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(X(state.frame), T); ctx.lineTo(X(state.frame), H - B); ctx.stroke();
-  const st = D.stations.length ? nearestStation(r, c) : null;
-  $("#pt-name").textContent = `· ${p.kind === "cum" && state.win ? state.win + "-hr " : ""}${p.title} (${p.unit}) ${st ? "near " + st : ""}`;
-  $("#chart-legend").innerHTML = series.map(s => `<span><i style="border-color:${s.on ? s.col : grid}"></i>${s.m}</span>`).join("") +
-    (mean ? `<span><i style="border-color:${ink};border-top-width:3px"></i>member mean</span>` : "") + (ry ? `<span><i style="border-color:${ink};border-top-style:dashed"></i>REFS mean</span>` : "");
-}
-async function pointSeries(p, src, idx) {                  // value at one grid cell for every frame, honouring the window
-  const win = p.kind === "cum" ? state.win : 0;
-  if (win === 1) { const d1 = await load(p, src, true); return d1 ? D.frames.map((_, f) => frameField1(d1, f, idx)) : null; }
-  const d = await load(p, src);
-  if (!d) return null;
-  const tot = D.frames.map((_, f) => frameField1(d, f, idx));
-  if (!win) return tot;
-  const k = win / D.frame_step;
-  return tot.map((v, f) => f - k < 0 ? v : Math.max(0, v - tot[f - k]));
-}
 function frameField1(d, f, idx) { const n = D.grid.nx * D.grid.ny, q = d.u[f * n + idx], top = d.p.dtype === "u8" ? 255 : 65535; return q === top ? NaN : d.p.lo + d.p.step * q; }
 function niceStep(x) { const e = Math.pow(10, Math.floor(Math.log10(x))), f = x / e; return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * e; }
-function nearestStation(r, c) { let b = null, bd = 1e9; for (const s of D.stations) { const d = (s.r - r) ** 2 + (s.c - c) ** 2; if (d < bd) { bd = d; b = s; } } return bd < 36 ? b.id : null; }
 
 // ---------------------------------------------------------------- plumes: accumulated QPF and snowfall at one location, one line per member
 // Like the GEFS plumes of NCEP/EMC: every member in gray, the ensemble mean in black, the member with the highest final total in red and the one with the lowest in
@@ -1143,10 +1061,10 @@ function initPlumes() {
   loc.addEventListener("change", () => {
     plumeLoc = loc.value;
     const s = (D.stations_all || []).find(x => x.id === plumeLoc);
-    if (s) { state.point = { r: s.r, c: s.c }; if (current) drawMain($("#map").getContext("2d"), current.v, current.mode, true); chart(); }      // the map marker and the side chart follow
-    plumes();
+    if (s) { state.point = { r: s.r, c: s.c }; if (current) drawMain($("#map").getContext("2d"), current.v, current.mode, true); }      // the map marker follows
+    plumes(); writeUrl();
   });
-  snow.addEventListener("change", () => { plumeSnow = snow.value; try { localStorage.setItem("rrfs-plume-snow", plumeSnow); } catch (e) { /* ignore */ } evictOthers(); plumes(); });
+  snow.addEventListener("change", () => { plumeSnow = snow.value; try { localStorage.setItem("rrfs-plume-snow", plumeSnow); } catch (e) { /* ignore */ } evictOthers(); plumes(); writeUrl(); });
   for (const k of ["qpf", "snow"]) {
     const cv = $("#" + PLUME[k].id);
     cv.addEventListener("pointermove", ev => plumeHover(k, ev));
@@ -1359,24 +1277,55 @@ function statusLine() {
   const c = new Date(D.cycle), z = String(c.getUTCHours()).padStart(2, "0") + "Z";
   $("#sel-date").innerHTML = `<option>${c.toISOString().slice(0, 10)}</option>`; $("#sel-run").innerHTML = `<option>${z}</option>`;
 }
-function readHash() {
-  const [pk, mode, f, w, layout, vw, gl] = location.hash.slice(1).split("/");
-  if (D.products.some(p => p.key === pk)) state.product = pk;
-  if (mode && (MODES.some(m => m[0] === mode) || D.members.includes(mode))) state.mode = mode;
-  if (f !== undefined && f !== "" && +f >= 0 && +f < D.frames.length) state.frame = +f;
-  if (WINDOWS.includes(+w) && w !== undefined && w !== "") state.win = +w;
-  if (layout === "stamps" || layout === "pctl") state.layout = layout;
-  const [z, cx, cy, c] = (vw || "").split(",").map(Number);   // optional 6th part "zoom,cx,cy[,1 = cells]"; absent = the full view
+// ---------------------------------------------------------------- the link: ?product=..&fhr=..&region=..&init_datetime=..&valid_datetime=..
+// Rewritten (history.replaceState, no new history entries) whenever the view changes: product, hour, view, zoom, layers, the plume location.  Only what differs from the
+// defaults is added after the five main parameters.  Older "#product/mode/frame/window/layout" links are still read, then rewritten in the new form.
+const REGION = "new_england", stamp12 = iso => iso.replace(/[-:T]/g, "").slice(0, 12);
+const qEnc = v => encodeURIComponent(v).replace(/%2C/g, ",");
+function frameFor(q) {                                      // the frame a link means: its forecast hour on the same run, else the same valid time on this run
+  const fi = D.frames.indexOf(+q.fhr);
+  if (q.init_datetime === undefined || q.init_datetime === stamp12(D.cycle)) return fi;
+  const vi = q.valid_datetime ? D.valid.findIndex(v => stamp12(v) === q.valid_datetime) : -1;
+  return vi >= 0 ? vi : fi;
+}
+function applyQuery(q) {
+  if (D.products.some(p => p.key === q.product)) state.product = q.product;
+  const mode = q.mode; if (mode && (MODES.some(m => m[0] === mode) || D.members.includes(mode))) state.mode = mode;
+  const fi = frameFor(q); if (fi >= 0) state.frame = fi;
+  if (q.window !== undefined && WINDOWS.includes(+q.window)) state.win = +q.window;
+  if (q.layout === "stamps" || q.layout === "pctl") state.layout = q.layout;
+  const [z, cx, cy, c] = (q.zoom || "").split(",").map(Number);        // "zoom,cx,cy[,1 = cells]"; absent = the full view
   Object.assign(view, { z: 1, cx: 0.5, cy: 0.5, cells: false });
   if (z > 1 && cx >= 0 && cx <= 1 && cy >= 0 && cy <= 1) { Object.assign(view, { z, cx, cy, cells: c === 1 }); clampView(); }
   else if (c === 1) view.cells = true;
-  if (gl !== undefined) { for (const [k] of GIS_KEYS) gisOn[k] = gl.includes(k); if (gisAny()) loadGis(); gisPanelRefresh(); }   // 7th part: the letters of the layers that are on ("-" = none); absent = the defaults
+  if (q.layers !== undefined) { for (const [k] of GIS_KEYS) gisOn[k] = q.layers.includes(k); if (gisAny()) loadGis(); gisPanelRefresh(); }     // letters of the layers that are on ("-" = none)
+  const st = (D.stations_all || []).find(x => x.id === q.station), pt = (q.point || "").split(",").map(Number);
+  if (st) { state.point = { r: st.r, c: st.c }; plumeLoc = st.id; }
+  else if (pt.length === 2 && pt[0] >= 0 && pt[0] < D.grid.ny && pt[1] >= 0 && pt[1] < D.grid.nx && Number.isInteger(pt[0]) && Number.isInteger(pt[1])) { state.point = { r: pt[0], c: pt[1] }; plumeLoc = "map"; }
+  if (plumeProducts().some(p => p.key === q.plume_snow)) plumeSnow = q.plume_snow;
 }
-const writeHash = () => {
-  const vw = view.z > 1 || view.cells ? `${view.z.toFixed(2)},${view.cx.toFixed(4)},${view.cy.toFixed(4)}${view.cells ? ",1" : ""}` : "";
+function readUrl() {
+  const q = Object.fromEntries(new URLSearchParams(location.search));
+  if (!Object.keys(q).length && location.hash.length > 1) {                    // a link in the old form
+    const [product, mode, f, window_, layout, zoom, layers] = location.hash.slice(1).split("/");
+    Object.assign(q, { product, mode, window: window_, layout, zoom, layers });
+    if (f !== undefined && f !== "" && D.frames[+f] !== undefined) q.fhr = D.frames[+f];
+  }
+  applyQuery(q);
+}
+const writeUrl = () => {
+  if (!D) return;
+  const f = state.frame, parts = [["product", state.product], ["fhr", D.frames[f]], ["region", REGION], ["init_datetime", stamp12(D.cycle)], ["valid_datetime", stamp12(D.valid[f])]];
+  if (state.mode !== "mean") parts.push(["mode", state.mode]);
+  if (state.win) parts.push(["window", state.win]);
+  if (state.layout !== "map") parts.push(["layout", state.layout]);
+  if (view.z > 1 || view.cells) parts.push(["zoom", `${view.z.toFixed(2)},${view.cx.toFixed(4)},${view.cy.toFixed(4)}${view.cells ? ",1" : ""}`]);
   const letters = GIS_KEYS.filter(([k]) => gisOn[k]).map(([k]) => k).join(""), dflt = GIS_KEYS.filter(([k]) => GIS_DEFAULT[k]).map(([k]) => k).join("");
-  const gl = letters === dflt ? "" : letters || "-";            // only a change from the defaults goes into the link
-  try { history.replaceState(null, "", `#${state.product}/${state.mode}/${state.frame}/${state.win}/${state.layout}` + (vw || gl ? `/${vw}` : "") + (gl ? `/${gl}` : "")); }
+  if (letters !== dflt) parts.push(["layers", letters || "-"]);                // only a change from the defaults goes into the link
+  if (state.point) { if (plumeLoc !== "map" && (D.stations_all || []).some(s => s.id === plumeLoc)) parts.push(["station", plumeLoc]); else parts.push(["point", `${state.point.r},${state.point.c}`]); }
+  else if (plumeLoc !== "KBOS" && (D.stations_all || []).some(s => s.id === plumeLoc)) parts.push(["station", plumeLoc]);
+  if (plumeSnow !== "snow_mean") parts.push(["plume_snow", plumeSnow]);
+  try { history.replaceState(null, "", `${location.pathname}?${parts.map(([k, v]) => `${k}=${qEnc(v)}`).join("&")}`); }
   catch (e) { /* Safari throws past 100 URL changes in 30 s: not worth losing a repaint over */ }
 };
 function set(patch) { if (patch.frame !== undefined && patch.frame !== state.frame) lastDir = Math.sign(patch.frame - state.frame); Object.assign(state, patch); render(); }
@@ -1427,7 +1376,7 @@ $("#map").addEventListener("mousemove", ev => {
   tip.hidden = v !== v; if (v === v) { tip.textContent = `${fnum(v, current.v.dec)} ${current.v.unit}`; tip.style.left = ev.clientX + 14 + "px"; tip.style.top = ev.clientY + 12 + "px"; }
 });
 $("#map").addEventListener("mouseleave", () => { $("#tip").hidden = true; });
-$("#map").addEventListener("click", ev => { if (dragged) { dragged = false; return; } const cell = cellAt(ev); if (cell) { state.point = cell; plumeLoc = "map"; if (current) { drawMain($("#map").getContext("2d"), current.v, current.mode, true); } chart(); plumes(); } });
+$("#map").addEventListener("click", ev => { if (dragged) { dragged = false; return; } const cell = cellAt(ev); if (cell) { state.point = cell; plumeLoc = "map"; if (current) { drawMain($("#map").getContext("2d"), current.v, current.mode, true); } plumes(); writeUrl(); } });
 // ---- zoom and pan: wheel, +/- buttons and keys, drag, pinch, double-click.  Only the view changes; the data and the colours stay as they are.
 let dragged = false;
 function clampView() {
@@ -1452,7 +1401,7 @@ function redraw(isMove = false) {
   if (rafId) return;
   rafId = requestAnimationFrame(() => {
     rafId = 0; const lo = moving && fieldMs > SLOW_MS; moving = false;
-    updateZoomUI(); clearTimeout(hashTimer); hashTimer = setTimeout(writeHash, 250);
+    updateZoomUI(); clearTimeout(hashTimer); hashTimer = setTimeout(writeUrl, 250);
     if (current && state.layout === "map") drawMain($("#map").getContext("2d"), current.v, current.mode, true, view, lo ? 2 : 1);
     clearTimeout(settleTimer); if (lo) settleTimer = setTimeout(() => redraw(), 140);
   });
@@ -1494,8 +1443,8 @@ $("#map").addEventListener("pointerup", endPtr); $("#map").addEventListener("poi
 $("#z-in").addEventListener("click", () => zoomTo(view.z * 1.6)); $("#z-out").addEventListener("click", () => zoomTo(view.z / 1.6));
 $("#z-reset").addEventListener("click", () => { Object.assign(view, { z: 1, cx: 0.5, cy: 0.5 }); redraw(); });
 $("#z-cells").addEventListener("click", () => { view.cells = !view.cells; redraw(); });
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { chart(); plumes(); });
-window.addEventListener("hashchange", () => { readHash(); render(); });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { plumes(); });
+window.addEventListener("hashchange", () => { readUrl(); render(); });           // an old-style #link typed or pasted into the open page
 
 // ---------------------------------------------------------------- start
 (async () => {
@@ -1504,7 +1453,7 @@ window.addEventListener("hashchange", () => { readHash(); render(); });
     D.frame_step = D.frames.length > 1 ? D.frames[1] - D.frames[0] : 3;
     D.members.forEach(m => state.on[m] = !!D.sources[m]?.ok);
     state.group = prod().group;
-    readHash();
+    readUrl();
     overlay = new Image(); overlay.src = `${D.overlay}?v=${D.version}`; await overlay.decode().catch(() => {});
     if (D.counties) { countiesImg = new Image(); countiesImg.src = `${D.counties}?v=${D.version}`; await countiesImg.decode().catch(() => {}); }      // the light-gray county lines, a layer of their own
     loadLines();                                            // the vector boundaries for zoomed views (not awaited: only needed once the user zooms)
