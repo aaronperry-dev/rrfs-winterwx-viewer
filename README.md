@@ -65,8 +65,9 @@ then the map with a right-hand sidebar of checkbox-style options (ensemble view,
 | Ice & p-type | **Freezing rain, sleet** | Hourly `APCP` × `CFRZR` / `CICEP` flag (liquid equivalent) |
 | | **Snow / sleet / freezing rain / rain** | Precipitation-type probability (members: 0 or 100; mean: % of members) |
 | | **Warm nose** | Warmest temperature 925–700 hPa |
-| Snow growth (DGZ) | **DGZ depth** | Depth (hPa) of the layer between −12 °C and −18 °C, from linear interpolation between pressure levels |
-| | **Saturated DGZ depth** | The part of that layer where layer-mean RH with respect to ice ≥ 100 % |
+| Snow growth (DGZ) | **DGZ depth** | Geometric thickness, in thousands of feet (kft), of the layer between −12 °C and −18 °C: temperature is interpolated linearly between pressure levels and each layer's thickness comes from the hypsometric equation with its own mean temperature. Colours follow the College of DuPage NEXLAB ramp (0–20 kft). Temperature only: it says where the zone is, not whether it is moist |
+| | **Saturated DGZ depth** | The part of that layer, in kft, where the layer-mean RH with respect to ice is ≥ 100 %: the depth in which dendrites can really grow. A deep zone with little saturated depth means dry air in the zone |
+| | **Saturated DGZ with lift** | The saturated depth only where the column also has ascent: hourly-maximum upward motion `MAXUVV` ≥ 0.1 m/s. All three ingredients (right temperature, ice saturation, ascent) together. A proxy, see limitations |
 | | **DGZ mean RH (ice)** | Pressure-weighted RHi inside the DGZ |
 | | **Peak upward motion** | `MAXUVV` (hourly max vertical velocity, 100–1000 hPa); the lift proxy, see limitations |
 | Wind & blizzard | **Gust, wind speed, visibility** | `GUST`, `UGRD`/`VGRD`, `VIS` |
@@ -229,6 +230,10 @@ in demo mode is synthetic and marked as such on the page.
   500 hPa, the highest level used for it; NBM and Veals et al. go to 400 hPa (nothing above 500 hPa is fetched).
 * **Kuchera** uses the 2 m temperature and levels up to 500 hPa (the original used the surface-to-500 hPa layer as well).
 * **DGZ RH** exists only at 925–500 hPa, so DGZ layers below 925 hPa count as "unknown" and not as saturated.
+* **DGZ with lift is a proxy.** RRFS publishes no omega on pressure levels, so the column-maximum upward motion stands in: it shows that ascent exists
+  somewhere above the point, not that it sits inside the DGZ. The 0.1 m/s threshold is a judgement, not a published criterion.
+* **No snow depth change product.** The public RRFS files carry no snow depth (`SNOD`), so a true "accumulated positive snow depth change" cannot be
+  computed. `ASNOW` (Model snowfall) is the closest field; it counts snow reaching the ground and does not take off later settling or melt.
 * **Freezing rain and sleet are liquid equivalents.** No radial-ice/flat-ice accretion model is applied.
 * **Blizzard** uses the model's visibility (no blowing snow) and 3-hourly samples: two consecutive qualifying samples are taken
   to span 3 hours. Treat it as guidance for where criteria are plausible.
