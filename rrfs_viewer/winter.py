@@ -499,3 +499,314 @@ def ptype_class_fractions(crain, csnow, cicep, cfrzr) -> np.ndarray:
     st = np.stack([np.nan_to_num(np.asarray(a, np.float32), nan=0.0) for a in (crain, csnow, cicep, cfrzr)])
     cls = 3 - np.argmax(st[::-1], axis=0)
     return np.where(st.max(axis=0) > 0, cls, 0).astype(np.float32)
+
+
+# ============================================================================== winter diagnostics added for the "group A" build
+# Everything below is new; nothing above this line was changed.  Profiles are handled as "nodes": the surface (2 m temperature at the model terrain)
+# followed by the pressure levels that lie above the ground, lowest first.  Levels at or below the surface pressure are left out (NaN).
+RD = 287.04                                     # J kg-1 K-1
+GRAV = 9.80665
+EARTH_OMEGA = 7.2921e-5
+M_PER_FT = 0.3048
+
+
+def td_from_rh_c(t_c, rh):
+    """Dew point (degC) from air temperature (degC) and relative humidity (%) with respect to water (Magnus)."""
+    t = np.asarray(t_c, np.float64)
+    g = np.log(np.clip(np.asarray(rh, np.float64), 1.0, 100.0) / 100.0) + 17.62 * t / (243.12 + t)
+    return (243.12 * g / (17.62 - g)).astype(np.float32)
+
+
+def profile_nodes(t_k: np.ndarray, levels, t2_k, ps_hpa, terrain_m, rh=None, rh2=None):
+    """Surface + above-ground pressure levels as stacked arrays, lowest node first.
+
+    ``t_k``: (n_levels, ny, nx) temperature on ``levels`` (hPa, any order); ``rh``: the same for relative humidity (optional).
+    Returns ``dict(p, t, z[, rh])``, each (n_nodes, ny, nx): pressure (hPa), temperature (K), height (m MSL; hypsometric from the terrain height, the
+    layer-mean temperature stands in for virtual temperature).  A level that is not above the ground at a point is NaN there.
+    """
+    order = np.argsort(-np.asarray(levels, float))
+    lv = [float(levels[i]) for i in order]
+    ps = np.asarray(ps_hpa, np.float64)
+    P = [ps]
+    T = [np.asarray(t2_k, np.float64)]
+    Z = [np.asarray(terrain_m, np.float64)]
+    H = None if rh is None else [None if rh2 is None else np.asarray(rh2, np.float64)]
+    prev_p, prev_t, prev_z = P[0].copy(), T[0].copy(), Z[0].copy()
+    for j, i in enumerate(order):
+        p, t = lv[j], np.asarray(t_k[i], np.float64)
+        ok = (p < prev_p - 0.5) & np.isfinite(t)
+        tm = 0.5 * (prev_t + np.where(ok, t, prev_t))
+        z = prev_z + RD * tm / GRAV * np.log(prev_p / p)
+        P.append(np.where(ok, p, np.nan))
+        T.append(np.where(ok, t, np.nan))
+        Z.append(np.where(ok, z, np.nan))
+        if H is not None:
+            H.append(np.where(ok, np.asarray(rh[i], np.float64), np.nan))
+        prev_p, prev_t, prev_z = np.where(ok, p, prev_p), np.where(ok, t, prev_t), np.where(ok, z, prev_z)
+    out = dict(p=np.stack(P).astype(np.float32), t=np.stack(T).astype(np.float32), z=np.stack(Z).astype(np.float32))
+    if H is not None:
+        out["rh"] = np.stack([np.full(ps.shape, np.nan) if h is None else h for h in H]).astype(np.float32)
+    return out
+
+
+def first_crossing_up(v: np.ndarray, z: np.ndarray, thresh: float = 0.0):
+    """Lowest height (searching up the nodes) where ``v`` goes from above ``thresh`` to at-or-below it, by linear interpolation; NaN where there is none."""
+    n = v.shape[0]
+    found = np.zeros(v.shape[1:], bool)
+    out = np.full(v.shape[1:], np.nan, np.float64)
+    for i in range(n - 1):
+        a, b = v[i].astype(np.float64), v[i + 1].astype(np.float64)
+        hit = ~found & np.isfinite(a) & np.isfinite(b) & (a > thresh) & (b <= thresh)
+        if hit.any():
+            f = (a - thresh) / np.where(hit, a - b, 1.0)
+            out = np.where(hit, z[i] + f * (z[i + 1] - z[i]), out)
+            found |= hit
+    return out.astype(np.float32)
+
+
+def level_heights(v_c: np.ndarray, z_m: np.ndarray, cap_agl_m: float = 3000.0):
+    """``(level MSL [m], level above ground [m])`` of the 0 degC crossing of the profile ``v_c`` (nodes, lowest first).
+
+    Searching up from the ground: a profile that is at or below 0 at the ground has its level at the ground (AGL 0: the cold air reaches the surface);
+    one that is above 0 at the ground has its level at the first crossing above it; one that never crosses (all warm) has no level (NaN MSL, AGL = cap).
+    """
+    ground = z_m[0].astype(np.float64)
+    cross = first_crossing_up(v_c, z_m, 0.0).astype(np.float64)
+    cold_sfc = np.asarray(v_c[0], np.float64) <= 0.0
+    lvl = np.where(cold_sfc, ground, cross)
+    agl = np.where(cold_sfc, 0.0, np.where(np.isfinite(cross), np.minimum(cross - ground, cap_agl_m), cap_agl_m))
+    bad = ~np.isfinite(v_c[0])
+    return np.where(bad, np.nan, lvl).astype(np.float32), np.where(bad, np.nan, agl).astype(np.float32)
+
+
+def inversion_strength_c(t_k: np.ndarray, p_hpa: np.ndarray, p_top: float = 850.0):
+    """Largest temperature excess (degC) of any node between the ground and ``p_top`` over the surface temperature, 0 if none is warmer."""
+    t0 = t_k[0].astype(np.float64)
+    best = np.zeros(t0.shape)
+    for i in range(1, t_k.shape[0]):
+        ok = np.isfinite(t_k[i]) & (p_hpa[i] >= p_top)
+        best = np.where(ok, np.maximum(best, t_k[i] - t0), best)
+    return np.where(np.isfinite(t0), best, np.nan).astype(np.float32)
+
+
+# ------------------------------------------------------------------------- precipitation type from the profile (Bourgouin energy method)
+BOURG_SUB = 5                         # sub-layers per layer: a layer that crosses 0 degC is split so its warm and cold parts are weighed separately
+BOURG_P_TOP = 250.0                   # warm layers above this (stratosphere) do not count (as in UPP)
+
+
+def _bourgouin_sublayers(p_hpa: np.ndarray, t_k: np.ndarray):
+    """Yield ``(energy, warm)`` for each sub-layer from the ground up (float32 arrays; energy 0 and warm False where there is no data), one at a time so no profile-sized stack is built."""
+    n = p_hpa.shape[0]
+    for i in range(n - 1):
+        p1, p2 = p_hpa[i].astype(np.float64), p_hpa[i + 1].astype(np.float64)
+        t1, t2 = t_k[i].astype(np.float64), t_k[i + 1].astype(np.float64)
+        ok = np.isfinite(p1) & np.isfinite(p2) & np.isfinite(t1) & np.isfinite(t2)
+        lp1, lp2 = np.log(p1), np.log(np.where(ok, p2, p1))
+        dlp = (lp1 - lp2) / BOURG_SUB
+        for s in range(BOURG_SUB):
+            ta = t1 + (t2 - t1) * (s / BOURG_SUB)
+            tb = t1 + (t2 - t1) * ((s + 1) / BOURG_SUB)
+            tm = 0.5 * (ta + tb)
+            pm = np.exp(lp1 - (s + 0.5) * dlp)
+            ok_s = ok & (pm > BOURG_P_TOP)
+            yield np.where(ok_s, RD * tm * dlp * np.log(tm / 273.15), 0.0), (tm >= 273.15) & ok_s
+
+
+def bourgouin_energies(p_hpa: np.ndarray, t_k: np.ndarray):
+    """``(surfw, areape, areane)`` in J/kg from the nodes (lowest first), as the NCEP UPP routine CALWXT_BOURG defines them.
+
+    Layer energy = Rd * Tm * ln(p1/p2) * ln(Tm / 273.15): positive for a layer warmer than 0 degC, negative for a colder one.
+    ``surfw``: warm layers touching the ground (the unbroken warm run from the surface); ``areape``: other (elevated) warm layers;
+    ``areane``: the cold layers below the highest warm layer (the refreezing energy), as a positive number.
+    Two passes over the sub-layers (the second needs the height of the highest warm one), each holding only one sub-layer at a time.
+    """
+    shape = p_hpa.shape[1:]
+    surfw = np.zeros(shape)
+    areape = np.zeros(shape)
+    top_warm = np.full(shape, -1)
+    in_sfc = None
+    for k, (e, w) in enumerate(_bourgouin_sublayers(p_hpa, t_k)):
+        if in_sfc is None:
+            in_sfc = w.copy()
+        in_sfc = in_sfc & w                                  # the surface-based warm run ends at the first cold sub-layer
+        surfw += np.where(w & in_sfc, e, 0.0)
+        areape += np.where(w & ~in_sfc, e, 0.0)
+        top_warm = np.where(w, k, top_warm)
+    areane = np.zeros(shape)
+    for k, (e, w) in enumerate(_bourgouin_sublayers(p_hpa, t_k)):
+        areane += np.where(~w & (k < top_warm) & (e != 0.0), -e, 0.0)
+    return surfw.astype(np.float32), areape.astype(np.float32), areane.astype(np.float32)
+
+
+def bourgouin_fractions(surfw, areape, areane, t_sfc_k):
+    """Precipitation type from the energies, as fractions ``(snow, rain, ice pellets, freezing rain)`` that sum to 1.
+
+    The UPP routine breaks its 50/50 transition zones with a random number; here each zone gives half to each type, so the result is a probability:
+    areape < 2:  surfw < 5.6 snow, > 13.2 rain, between: half and half.  Otherwise areane > 66 + 0.66 areape: ice pellets (rain if surfw > 13.2, half and
+    half between 5.6 and 13.2); areane < 46 + 0.66 areape: freezing rain if the surface is below freezing, else rain; between the two bounds: half of each.
+    """
+    sw, pe, ne = (np.asarray(a, np.float64) for a in (surfw, areape, areane))
+    sub = np.asarray(t_sfc_k, np.float64) < 273.15
+    z = np.zeros(sw.shape)
+    # no elevated warm layer: snow or rain by the surface-based melting energy
+    sn_a = np.where(sw < 5.6, 1.0, np.where(sw > 13.2, 0.0, 0.5))
+    rn_a = 1.0 - sn_a
+    # elevated warm layer
+    ip_zone_ip = np.where(sw < 5.6, 1.0, np.where(sw > 13.2, 0.0, 0.5))            # ice pellets that survive to the ground, else rain
+    zr_zone_zr = np.where(sub, 1.0, 0.0)                                           # freezing rain needs a sub-freezing surface, else rain
+    hi, lo = ne > 66.0 + 0.66 * pe, ne < 46.0 + 0.66 * pe
+    ip_b = np.where(hi, ip_zone_ip, np.where(lo, 0.0, 0.5 * ip_zone_ip))
+    zr_b = np.where(hi, 0.0, np.where(lo, zr_zone_zr, 0.5 * zr_zone_zr))
+    rn_b = 1.0 - ip_b - zr_b
+    no_warm = pe < 2.0
+    sn = np.where(no_warm, sn_a, z)
+    rn = np.where(no_warm, rn_a, rn_b)
+    ip = np.where(no_warm, z, ip_b)
+    zr = np.where(no_warm, z, zr_b)
+    bad = ~(np.isfinite(sw) & np.isfinite(pe) & np.isfinite(ne) & np.isfinite(sub))
+    return tuple(np.where(bad, np.nan, a).astype(np.float32) for a in (sn, rn, ip, zr))
+
+
+# ------------------------------------------------------------------------- dynamics on the display raster
+def lcc_rotation_deg(lon_deg, lon0=-70.6, phi1=42.0, phi2=46.0):
+    """Angle (degrees) by which the display raster's +y axis is turned from true north at each longitude: n * (lon - lon0) for a two-parallel Lambert conformal."""
+    p1, p2 = np.radians(phi1), np.radians(phi2)
+    n = np.log(np.cos(p1) / np.cos(p2)) / np.log(np.tan(np.pi / 4 + p2 / 2) / np.tan(np.pi / 4 + p1 / 2))
+    return n * (np.asarray(lon_deg, np.float64) - lon0)
+
+
+def rotate_to_grid(u, v, lon_deg):
+    """Earth-relative wind components -> components along the raster's +x / +y axes."""
+    a = np.radians(lcc_rotation_deg(lon_deg))
+    ca, sa = np.cos(a), np.sin(a)
+    return (u * ca - v * sa).astype(np.float32), (u * sa + v * ca).astype(np.float32)
+
+
+def smooth(a, sigma_cells: float = 2.0):
+    """Gaussian smoothing of a raster (3 km cells: sigma 2 = 6 km); NaN-safe by filling with the local mean first."""
+    from scipy import ndimage
+    a = np.asarray(a, np.float64)
+    bad = ~np.isfinite(a)
+    if bad.any():
+        a = np.where(bad, np.nanmean(a) if np.isfinite(a).any() else 0.0, a)
+    out = ndimage.gaussian_filter(a, sigma_cells, mode="nearest")
+    return np.where(bad, np.nan, out).astype(np.float32)
+
+
+def theta_k(t_k, p_hpa):
+    return np.asarray(t_k, np.float64) * (1000.0 / np.asarray(p_hpa, np.float64)) ** 0.2857
+
+
+def frontogenesis_k100km3h(theta, ug, vg, dx_m: float = 3000.0, sigma_cells: float = 4.0):
+    """Petterssen 2-D frontogenesis of potential temperature, in K per 100 km per 3 h: ``F = -(1/|grad th|) (th_x^2 u_x + th_x th_y (v_x + u_y) + th_y^2 v_y)``.
+
+    ``ug`` / ``vg`` are the wind components along the raster axes (:func:`rotate_to_grid`).  Fields are smoothed first (``sigma_cells`` 3 km cells, 12 km):
+    a 3 km derivative field is mostly noise, the banding signal lives at 25-100 km.  Positive = the thermal gradient is sharpening.
+    """
+    th, u, v = (smooth(a, sigma_cells).astype(np.float64) for a in (theta, ug, vg))
+    ty, tx = np.gradient(th, dx_m)
+    uy, ux = np.gradient(u, dx_m)
+    vy, vx = np.gradient(v, dx_m)
+    mag = np.hypot(tx, ty)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        f = -(tx * tx * ux + tx * ty * (vx + uy) + ty * ty * vy) / mag
+    f = np.where(mag > 1e-7, f, 0.0)                      # no thermal gradient: nothing to sharpen
+    return (f * 1e5 * 10800.0).astype(np.float32)
+
+
+def saturation_theta_e_k(t_k, p_hpa):
+    """Saturation equivalent potential temperature (K), Bolton (1980) with the mixing ratio of saturation at (T, p)."""
+    t = np.asarray(t_k, np.float64)
+    p = np.asarray(p_hpa, np.float64)
+    tc = t - 273.15
+    es = 6.112 * np.exp(17.67 * tc / (tc + 243.5))
+    rs = 0.622 * es / np.maximum(p - es, 1.0)              # kg/kg
+    th = t * (1000.0 / p) ** (0.2854 * (1.0 - 0.28 * rs))
+    return th * np.exp((3.376 / t - 0.00254) * rs * 1000.0 * (1.0 + 0.81 * rs))
+
+
+def mpv_sat_pvu(t_lo_k, t_hi_k, u_lo, v_lo, u_hi, v_hi, p_lo_hpa, p_hi_hpa, lat_deg, dx_m: float = 3000.0, sigma_cells: float = 4.0):
+    """Saturated moist potential vorticity (MPV*) of the layer between two pressure levels, in PVU (1e-6 K m2 kg-1 s-1).
+
+    ``MPV* = -g [ zeta_a d(theta_es)/dp + du/dp d(theta_es)/dy - dv/dp d(theta_es)/dx ]``  (Schultz & Schumacher 1999 / Bennetts & Hoskins 1979).  Negative values
+    in a saturated layer mean the layer is unstable to slantwise ascent (conditional symmetric instability, CSI).  ``zeta_a`` is the mean absolute vorticity of the two
+    levels, the gradients of theta_es are the mean of the two, and the vertical derivatives are layer differences.  Winds along raster axes; smoothed first.
+    """
+    th_lo, th_hi = saturation_theta_e_k(t_lo_k, p_lo_hpa), saturation_theta_e_k(t_hi_k, p_hi_hpa)
+    dp = (p_hi_hpa - p_lo_hpa) * 100.0                                  # Pa, negative going up
+    S = lambda a: smooth(a, sigma_cells).astype(np.float64)
+    th_lo, th_hi, u_lo, v_lo, u_hi, v_hi = (S(a) for a in (th_lo, th_hi, u_lo, v_lo, u_hi, v_hi))
+    thy_lo, thx_lo = np.gradient(th_lo, dx_m)
+    thy_hi, thx_hi = np.gradient(th_hi, dx_m)
+    thx, thy = 0.5 * (thx_lo + thx_hi), 0.5 * (thy_lo + thy_hi)
+    zeta = 0.0
+    for u, v in ((u_lo, v_lo), (u_hi, v_hi)):
+        uy = np.gradient(u, dx_m)[0]
+        vx = np.gradient(v, dx_m)[1]
+        zeta = zeta + 0.5 * (vx - uy)
+    f = 2.0 * EARTH_OMEGA * np.sin(np.radians(np.asarray(lat_deg, np.float64)))
+    za = zeta + f
+    dth_dp = (th_hi - th_lo) / dp
+    du_dp, dv_dp = (u_hi - u_lo) / dp, (v_hi - v_lo) / dp
+    mpv = -GRAV * (za * dth_dp + du_dp * thy - dv_dp * thx)
+    return (mpv * 1e6).astype(np.float32)
+
+
+# ------------------------------------------------------------------------- timing and joint impacts (per member, from the stored frame series)
+def snow_timing(cum_in: np.ndarray, hours, step_h: int = 3, onset_in: float = 0.1, rates_in_per_h=(0.5, 1.0)):
+    """Causal timing of snowfall from a (frames, ny, nx) run-total series.
+
+    Each output is "so far" at every frame (the last frame is the answer for the whole run):
+    * ``start``  forecast hour of the first frame whose total reaches ``onset_in`` (NaN until then),
+    * ``end``    forecast hour of the latest frame whose 3-h increment is at least ``onset_in`` (NaN until snow has started),
+    * ``hours``  for each rate: hours of the run so far spent at or above that rate (3-h increments / 3 h, counted in whole 3-h blocks).
+    """
+    c = np.nan_to_num(np.asarray(cum_in, np.float32), nan=0.0)
+    n = c.shape[0]
+    inc = np.diff(np.concatenate([np.zeros((1,) + c.shape[1:], np.float32), np.maximum.accumulate(c, axis=0)]), axis=0)
+    known = np.isfinite(np.asarray(cum_in)).any(axis=(1, 2)) if n else np.array([], bool)
+    start = np.full(c.shape, np.nan, np.float32)
+    end = np.full(c.shape, np.nan, np.float32)
+    hrs = [np.zeros(c.shape, np.float32) for _ in rates_in_per_h]
+    first = np.full(c.shape[1:], np.nan, np.float32)
+    last = np.full(c.shape[1:], np.nan, np.float32)
+    acc = [np.zeros(c.shape[1:], np.float32) for _ in rates_in_per_h]
+    for k in range(n):
+        h = float(hours[k])
+        run_max = c[k] if k == 0 else np.maximum(run_max, c[k])
+        total = run_max
+        first = np.where(np.isnan(first) & (total >= onset_in), h, first)
+        last = np.where(inc[k] >= onset_in, h, last)
+        for j, r in enumerate(rates_in_per_h):
+            acc[j] = acc[j] + np.where(inc[k] >= r * step_h, float(step_h), 0.0)
+            hrs[j][k] = acc[j]
+        start[k], end[k] = first, np.where(np.isnan(first), np.nan, last)
+    nodata = ~known
+    for a in (start, end, *hrs):
+        a[nodata] = np.nan
+    return start, end, hrs
+
+
+def changeover_hours(snow_frac: np.ndarray, wet: np.ndarray, hours):
+    """Forecast hour of the first frame where precipitation that had been snow is no longer snow (rain, sleet or freezing rain), "so far" (NaN before it happens).
+
+    ``snow_frac``: (frames, ny, nx) fraction of the precipitation that is snow; ``wet``: boolean, precipitation falling at that frame.
+    """
+    n = snow_frac.shape[0]
+    out = np.full(snow_frac.shape, np.nan, np.float32)
+    seen = np.zeros(snow_frac.shape[1:], bool)
+    when = np.full(snow_frac.shape[1:], np.nan, np.float32)
+    for k in range(n):
+        sf = np.nan_to_num(snow_frac[k], nan=-1.0)
+        w = wet[k] & (sf >= 0)
+        flip = seen & w & (sf < 0.5) & np.isnan(when)
+        when = np.where(flip, float(hours[k]), when)
+        seen = seen | (w & (sf >= 0.5))
+        out[k] = when
+    return out
+
+
+def impact_hours(flag: np.ndarray, step_h: int = 3):
+    """Cumulative hours (frames, ny, nx) a boolean condition has held, counted in whole ``step_h`` blocks; NaN where the condition could not be evaluated (flag is NaN)."""
+    f = np.asarray(flag, np.float32)
+    return np.cumsum(np.nan_to_num(f, nan=0.0), axis=0, dtype=np.float32) * float(step_h)

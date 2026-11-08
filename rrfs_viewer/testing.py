@@ -167,7 +167,8 @@ class FakeS3:
     _KEY = re.compile(
         r"^(?:refs\.(?P<d1>\d{8})/(?P<c1>\d{2})/ensprod/refs\.t(?P=c1)z\.(?P<t1>mean|pmmn)\.f(?P<h1>\d{2})\.conus\.grib2"
         r"|rrfs\.(?P<d3>\d{8})/(?P<c3>\d{2})/rrfs\.t(?P=c3)z\.prslev\.3km\.f(?P<h3>\d{3})\.conus\.grib2"
-        r"|rrfsens\.(?P<d2>\d{8})/(?P<c2>\d{2})/(?P<m>m00[1-5])/rrfs\.t(?P=c2)z\.(?P=m)\.(?P<k>2dfld|prslev)nomads\.3km\.f(?P<h2>\d{3})\.conus\.grib2)"
+        r"|rrfsens\.(?P<d2>\d{8})/(?P<c2>\d{2})/(?P<m>m00[1-5])/rrfs\.t(?P=c2)z\.(?P=m)\.(?P<k>2dfld|prslev)nomads\.3km\.f(?P<h2>\d{3})\.conus\.grib2"
+        r"|hrrr\.(?P<d4>\d{8})/conus/hrrr\.t(?P<c4>\d{2})z\.wrf(?P<k4>sfc|prs)f(?P<h4>\d{2})\.grib2)"
         r"(?P<idx>\.idx)?$")
 
     def __init__(self, now: datetime, lag_hours: int = 4, refs_totals: bool = False, grid: DemoGrid | None = None,
@@ -184,7 +185,9 @@ class FakeS3:
         self.range_requests: list[tuple[str, str | None]] = []
 
     # ------------------------------------------------------------------ availability
-    def _published(self, cycle: datetime, h: int) -> bool:
+    def _published(self, cycle: datetime, h: int, hrrr: bool = False) -> bool:
+        if hrrr and h > 48:
+            return False
         return cycle + timedelta(hours=self.lag + 0.04 * h) <= self.now and cycle.hour % 6 == 0
 
     def _storm(self, member: int, cycle: datetime) -> Storm:
@@ -198,10 +201,12 @@ class FakeS3:
     # ------------------------------------------------------------------ file synthesis
     def _messages(self, key: str, m) -> list[tuple[str, str, str, np.ndarray]]:
         """(var, level, info, values) for one file."""
-        cyc = datetime.strptime((m["d1"] or m["d2"] or m["d3"]) + (m["c1"] or m["c2"] or m["c3"]), "%Y%m%d%H").replace(tzinfo=timezone.utc)
-        h = int(m["h1"] or m["h2"] or m["h3"])
+        cyc = datetime.strptime((m["d1"] or m["d2"] or m["d3"] or m["d4"]) + (m["c1"] or m["c2"] or m["c3"] or m["c4"]), "%Y%m%d%H").replace(tzinfo=timezone.utc)
+        h = int(m["h1"] or m["h2"] or m["h3"] or m["h4"])
         K, MPH = 273.15, 1.0
         msgs: list[tuple[str, str, str, np.ndarray]] = []
+        if m["h4"]:                                       # ---- HRRR surface / pressure-level file (bucket noaa-hrrr-bdp-pds), hourly to F048
+            return self._hrrr_messages(cyc, h, m["k4"])
         if m["h3"]:                                       # ---- deterministic run: DZDT [m/s] every 25 hPa, ascent peaking near 600 hPa
             x = self._storm(1, cyc).hour(h)
             up = np.asarray(x["uvv"], np.float32)
@@ -251,6 +256,8 @@ class FakeS3:
                     ("CICEP", "surface", _info("inst", h), f32(x["ip"])),
                     ("CFRZR", "surface", _info("inst", h), f32(x["zr"])),
                     ("CRAIN", "surface", _info("inst", h), f32(x["rain"])),
+                    ("HGT", "surface", _info("inst", h), self.grid.elev),
+                    ("MSLET", "mean sea level", _info("inst", h), (x["ps"] + 0.115 * self.grid.elev + 4.0 * self.grid.n[2]) * 100),
                     ("APCP", "surface", _info("acc0", h), s.cum_rate(h))]
             if self.member_hourly_apcp:
                 msgs.append(("APCP", "surface", _info("acc1", h), x["rate"]))
@@ -267,12 +274,59 @@ class FakeS3:
             msgs.insert(0, ("HGT", "1000 mb", _info("inst", h), np.full_like(x["t2"], 100.0)))
             msgs += [("TMP", f"{p} mb", _info("inst", h), x["T"][p]) for p in T_LEV]
             msgs += [("RH", f"{p} mb", _info("inst", h), x["RH"][p]) for p in RH_LEV]
+            for p, k in ((925, 1.6), (850, 2.0), (700, 2.4), (500, 3.0)):                  # winds aloft: stronger and backing with height, with a front-like confluence
+                msgs.append(("UGRD", f"{p} mb", _info("inst", h), (x["u"] * k + 4.0 * (self.grid.b - self.grid.b.mean()) / 200.0).astype(np.float32)))
+                msgs.append(("VGRD", f"{p} mb", _info("inst", h), (x["v"] * k - 3.0 * (self.grid.a - self.grid.a.mean()) / 300.0).astype(np.float32)))
         mem = m["m"]
         return [t for t in msgs if (t[0], h) not in self.missing and (t[0], h, mem) not in self.missing]
 
+    def _hrrr_messages(self, cyc: datetime, h: int, kind: str) -> list[tuple[str, str, str, np.ndarray]]:
+        """HRRR-style messages (names and level descriptors as in the real wrfsfc / wrfprs inventories) from the demo storm of member 1."""
+        K = 273.15
+        s = self._storm(1, cyc)
+        x = s.hour(max(h, 1))
+        g = self.grid
+        f32 = lambda a: np.asarray(a, np.float32)
+        t2 = x["t2"]
+        if kind == "prs":
+            msgs = []
+            for p in (1000, 975, 950, 925, 900, 850, 800, 750, 700, 600, 500, 400, 300):
+                msgs.append(("TMP", f"{p} mb", _info("inst", h), x["T"][p]))
+                msgs.append(("RH", f"{p} mb", _info("inst", h), x["RH"][p]))
+            for p in LIFT_LEV:                             # omega, Pa/s (negative = rising): ascent peaking near 600 hPa
+                msgs.append(("VVEL", f"{p} mb", _info("inst", h), (-8.0 * np.asarray(x["uvv"], np.float32) * np.exp(-(((p - 600.0) / 220.0) ** 2))).astype(np.float32)))
+            return msgs
+        cum = s.cum_rate(h) if h >= 1 else np.zeros_like(t2)
+        asn = x["asnow"] if h >= 1 else s.asnow(0)
+        wet = x["rate"] >= 0.1
+        sn, ip, zr, rn = (f32(x[k]) for k in ("sn", "ip", "zr", "rain"))
+        env = np.clip(x["uvv"] / 0.5, 0, 1)
+        msgs = [("REFC", "entire atmosphere", _info("inst", h), _dbz(x["rate"])),
+                ("VIS", "surface", _info("inst", h), x["vis"]),
+                ("GUST", "surface", _info("inst", h), x["gust"]),
+                ("MSLMA", "mean sea level", _info("inst", h), (x["ps"] + 0.115 * g.elev + 3.0 * g.n[2]) * 100),
+                ("PRES", "surface", _info("inst", h), x["ps"] * 100),
+                ("HGT", "surface", _info("inst", h), g.elev),
+                ("SNOD", "surface", _info("inst", h), (0.10 + 0.7 * asn - 0.0015 * h * (t2 > 1.0)).clip(0, None).astype(np.float32)),
+                ("TMP", "2 m above ground", _info("inst", h), t2 + K),
+                ("DPT", "2 m above ground", _info("inst", h), t2 + K - 1.5),
+                ("RH", "2 m above ground", _info("inst", h), x["RH"][1000]),
+                ("CPOFP", "surface", _info("inst", h), np.where(wet, 100.0 * sn + 60.0 * ip + 20.0 * zr, -50.0).astype(np.float32)),
+                ("CSNOW", "surface", _info("inst", h), sn), ("CICEP", "surface", _info("inst", h), ip),
+                ("CFRZR", "surface", _info("inst", h), zr), ("CRAIN", "surface", _info("inst", h), rn),
+                ("HGT", "0C isotherm", _info("inst", h), (g.elev + np.clip(t2, 0, None) / 0.0065).astype(np.float32)),
+                ("LAYTH", "261 K level - 256 K level", _info("inst", h), (700.0 + 900.0 * env).astype(np.float32))]
+        if h >= 1:
+            msgs += [("ASNOW", "surface", _info("acc0", h), asn),
+                     ("APCP", "surface", _info("acc0", h), cum), ("APCP", "surface", _info("acc1", h), x["rate"]),
+                     ("WEASD", "surface", _info("acc0", h), (asn * 1000.0 / 12.0).astype(np.float32)),
+                     ("FRZR", "surface", _info("acc0", h), (0.15 * cum * zr).astype(np.float32)),
+                     ("FROZR", "surface", _info("acc0", h), (0.10 * cum * ip).astype(np.float32))]
+        return msgs
+
     def _file(self, key: str, m):
         if key not in self._files:
-            cyc = datetime.strptime((m["d1"] or m["d2"] or m["d3"]) + (m["c1"] or m["c2"] or m["c3"]), "%Y%m%d%H").replace(tzinfo=timezone.utc)
+            cyc = datetime.strptime((m["d1"] or m["d2"] or m["d3"] or m["d4"]) + (m["c1"] or m["c2"] or m["c3"] or m["c4"]), "%Y%m%d%H").replace(tzinfo=timezone.utc)
             blob, idx, off = b"", [], 0
             for i, (var, level, info, vals) in enumerate(self._messages(key, m), 1):
                 msg = self.grid.message(np.asarray(vals, np.float32), cyc)
@@ -289,8 +343,8 @@ class FakeS3:
         m = self._KEY.match(Key)
         if not m:
             raise KeyError(Key)
-        cyc = datetime.strptime((m["d1"] or m["d2"] or m["d3"]) + (m["c1"] or m["c2"] or m["c3"]), "%Y%m%d%H").replace(tzinfo=timezone.utc)
-        if not self._published(cyc, int(m["h1"] or m["h2"] or m["h3"])):
+        cyc = datetime.strptime((m["d1"] or m["d2"] or m["d3"] or m["d4"]) + (m["c1"] or m["c2"] or m["c3"] or m["c4"]), "%Y%m%d%H").replace(tzinfo=timezone.utc)
+        if not self._published(cyc, int(m["h1"] or m["h2"] or m["h3"] or m["h4"]), hrrr=bool(m["h4"])):
             raise KeyError(Key)
         return m
 

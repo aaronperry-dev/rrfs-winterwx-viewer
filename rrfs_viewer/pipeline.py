@@ -26,6 +26,7 @@ from . import grib, winter
 from .catalog import STORE
 from .config import COBB_UPPER, DGZ_RH_LOW, FILE_2D, FILE_PMMN, FILE_PRS, LIFT_LEVELS, MEMBERS, RH_LEVELS, T_LEVELS, frames
 from .s3 import S3Source, find_entry
+from . import diag
 
 log = logging.getLogger(__name__)
 Req = namedtuple("Req", "kind fhr var level info")
@@ -181,7 +182,7 @@ class RunTotal:
 
 
 # ============================================================================== ensemble members
-MEMBER_KEYS = tuple(p.key for p in STORE)
+MEMBER_KEYS = tuple(p.key for p in STORE if not p.single)          # single-source (HRRR) products are not member products
 SNOW_METHODS = ("snow_model", "snow_12", "snow_kuchera", "snow_maxt", "snow_thick")      # the five that make the multi-method mean
 EXTRA_METHODS = ("snow_cobb", "snow_cobblift", "snow_nbmthick", "snow_byun", "snow_clim")   # literature methods shown on their own
 # "snow_cobb" runs without its lift term (the public RRFS member files carry no omega); "snow_cobblift" weights the layers with the
@@ -251,6 +252,12 @@ def _plan_member(F, k, acc_p: Acc, acc_s: Acc):
     R["rh2"] = Req(FILE_2D, fr, "RH", "2 m above ground", None)          # the surface node of the DGZ profile
     for p in Z_LEVELS:
         R[("Z", p)] = Req(FILE_PRS, fr, "HGT", f"{p} mb", None)
+    # group-A additions: terrain (snow level above ground, profile heights), sea-level pressure, winds on four levels
+    R["terrain"] = Req(FILE_2D, fr, "HGT", "surface", None)
+    R["mslp"] = Req(FILE_2D, fr, "MSLET", "mean sea level", None)
+    for p in diag.WIND_LEVELS:
+        R[("U", p)] = Req(FILE_PRS, fr, "UGRD", f"{p} mb", None)
+        R[("V", p)] = Req(FILE_PRS, fr, "VGRD", f"{p} mb", None)
     reqs = list(R.values()) + [r for p in plans.values() if p for r in p[0]]
     return R, plans, reqs
 
@@ -383,6 +390,7 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
     seen: set = set()                                          # snow methods that have had a ratio at least once
     snow_run, snow_lost = z(), 0                               # the model's own ASNOW run total, and the hours missing from it
     quality = [0] * len(F)
+    diag_failed: list[int] = []                                # group-A diagnostics: report a failure once per member, not once per frame
     lower_bound: dict[int, np.ndarray] = {}                    # frames whose own block of ASNOW had a hole: used only if they cannot be interpolated
     hours_of = lambda k: range((F[k - 1] if k else 0) + 1, F[k] + 1)
 
@@ -471,6 +479,31 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
         if dz_1000_700 is not None:
             slr["snow_thick"] = out["slr_thick"][k] = winter.slr_thickness_cmc(dz_1000_700, dz_850_700)
             slr["snow_nbmthick"] = out["slr_nbmthick"][k] = winter.slr_thickness_nbm(dz_850_700)
+
+        # ---------------------------------------------------------------- group-A diagnostics: snow level, wet bulb, low-level cold air, forcing (never fatal)
+        _nodes = None
+        if all_T:
+            try:
+                Tk_ = np.stack(have_T)
+                RH_ = np.stack([g(("RH", p)) if g(("RH", p)) is not None else np.full((ny, nx), np.nan, np.float32) for p in T_LEVELS])
+                if all(a is not None for a in Z.values()):
+                    d1000_850 = Z[850] - Z[1000]
+                else:
+                    d1000_850 = winter.layer_thickness_m(Tk_, T_LEVELS, 1000, 850)
+                prods, _nodes = diag.frame_products(
+                    t_levels=T_LEVELS, Tk=Tk_, RH=RH_, t2k=t2k, rh2=g("rh2"), ps_pa=ps_pa, terrain_m=g("terrain"), mslp_pa=g("mslp"),
+                    winds={p: (g(("U", p)), g(("V", p))) for p in diag.WIND_LEVELS}, lon=rg.lon, lat=rg.lat,
+                    dgz_sat=out["dgz_sat"][k] if np.isfinite(out["dgz_sat"][k]).any() else None,
+                    dz_1000_850=d1000_850, dz_850_700=dz_850_700)
+                for key, a in prods.items():
+                    out[key][k] = a
+            except Exception:
+                if not diag_failed:
+                    log.exception("%s F%03d: group-A diagnostics failed (the other products are unaffected)", member, fr)
+                    diag_failed.append(1)
+                _nodes = None
+        elif g("mslp") is not None:
+            out["mslp"][k] = g("mslp") / 100.0
 
         # ---------------------------------------------------------------- hourly precipitation accounting
         for name, r in slr.items():                                         # a method without a ratio now reuses its last one
@@ -597,10 +630,23 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
                 out["blizzard_dur"][k] = clock.update(cond)
         if refl is not None and all(a is not None for a in fl):                 # reflectivity coloured by this member's precipitation type
             out["refl_ptype"][k] = winter.refl_ptype_code(refl, winter.ptype_class_flags(*fl))
+        if _nodes is not None and ap is not None and all(a is not None for a in fl):            # precipitation type from the profile (Bourgouin) and its agreement with the model's
+            try:
+                for key, a in diag.profile_ptype(_nodes, np.nan_to_num(ap, nan=0.0) >= 0.1, winter.precip_fractions(*fl)).items():
+                    out[key][k] = a
+            except Exception:
+                if not diag_failed:
+                    log.exception("%s F%03d: profile precipitation type failed (the other products are unaffected)", member, fr)
+                    diag_failed.append(1)
         if progress:
             progress(member, fr)
     pool.shutdown()
     fill_gaps(out, quality, fallback={"snow_model": lower_bound})
+    try:                                                    # timing and joint impacts, from the finished frames
+        for key, a in diag.series_products(out, F).items():
+            out[key] = a
+    except Exception:
+        log.exception("%s: timing / impact products failed (the other products are unaffected)", member)
     info = {"missing": f.missing, "hints": f.hints, "bytes": src.bytes_downloaded, "requests": src.requests, "quality": quality}
     return out, info
 

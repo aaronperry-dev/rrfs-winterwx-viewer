@@ -219,3 +219,44 @@ def temp_style() -> Style:
 def wind_chill_style() -> Style:
     levels, cols = _apparent_colors()
     return Style(levels.tolist(), list(cols), np.arange(-60, 121, 10).tolist())
+
+
+# --------------------------------------------------------------------------- ramps added for the group-A diagnostics and the HRRR products
+# (nothing above this line was changed)
+# Snow level / freezing level, thousands of feet MSL: cold blues where the level is low (snow comes down to the valleys), through yellow to red when it is high.
+HEIGHT_KFT = ramp_style([(0.25, "#4a2a8c"), (1, "#3b6fc9"), (2, "#74add1"), (3, "#d6ecf5"), (4, "#fee090"), (6, "#f58a4a"), (8, "#c8302a"), (10, "#6d1226")],
+                        [0.25, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10], ticks=[0.5, 1, 2, 3, 4, 6, 8, 10])
+# Height of the snow level above the ground, feet: nothing drawn where snow reaches the ground (0), then pale yellow (snow just overhead) to dark red (rain far below the snow).
+AGL_FT = ramp_style([(100, "#fff3c4"), (1000, "#ffc04a"), (3000, "#e8562a"), (6000, "#a01a4a"), (10000, "#4a0a5a")],
+                    [100, 500, 1000, 1500, 2000, 3000, 4000, 6000, 8000], ticks=[100, 500, 1000, 2000, 3000, 4000, 6000, 8000])
+MSLP = ramp_style([(960, "#4b2c8a"), (990, "#3b7bd4"), (1008, "#e8eef5"), (1020, "#f2c46a"), (1040, "#c8502a")],
+                  [960, 972, 984, 996, 1004, 1008, 1012, 1016, 1020, 1028, 1036, 1044], ticks=[972, 996, 1008, 1020, 1036])
+# Thickness (dam) with the rain-snow rule-of-thumb value (130 dam for 1000-850 hPa, 154 dam for 850-700 hPa) as the white mid-point.
+THK_1000_850 = ramp_style([(114, "#2a4fb0"), (126, "#9fc4ee"), (130, "#ffffff"), (134, "#ffc27a"), (142, "#9b1c2f")],
+                          [116, 120, 124, 126, 128, 130, 132, 134, 136, 140, 144], under="#2a4fb0", ticks=[120, 126, 130, 134, 140])
+THK_850_700 = ramp_style([(146, "#2a4fb0"), (151, "#9fc4ee"), (154, "#ffffff"), (157, "#ffc27a"), (162, "#9b1c2f")],
+                         [148, 150, 151, 152, 153, 154, 155, 156, 157, 158, 160], under="#2a4fb0", ticks=[148, 151, 154, 157, 160])
+INVERSION = ramp_style([(0.5, "#fff3c4"), (3, "#ffc04a"), (7, "#e8562a"), (12, "#7a1630")], [0.5, 1, 2, 3, 4, 6, 8, 10, 14])
+FRONTO = ramp_style([(-10, "#2a7fb8"), (-2, "#dce9f2"), (2, "#fdebc8"), (8, "#f5a04a"), (20, "#d23a2a"), (40, "#4a0a5a")],
+                    [-10, -5, -2, 2, 5, 10, 15, 20, 30, 40], under="#2a7fb8", ticks=[-10, -5, 2, 5, 10, 20, 30, 40])
+BAND = ramp_style([(2, "#fdebc8"), (5, "#ffc04a"), (10, "#e8562a"), (20, "#a01a4a"), (35, "#4a0a5a")], [2, 4, 6, 8, 10, 15, 20, 30], ticks=[2, 6, 10, 20, 30])
+CSI = ramp_style([(0.01, "#fde3f3"), (0.1, "#f08ac8"), (0.3, "#c02a8c"), (0.7, "#6a1b7a"), (1.5, "#2a0a4a")], [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1, 1.5],
+              ticks=[0.01, 0.1, 0.3, 0.75, 1.5])
+# Forecast hour of an event (run start 0 h): early = warm yellow, late = dark.
+TIME_H = ramp_style([(0, "#fff7bc"), (12, "#fec44f"), (24, "#fe9929"), (36, "#d95f0e"), (48, "#993404"), (60, "#3d1602")],
+                    [3, 6, 9, 12, 15, 18, 21, 24, 30, 36, 42, 48, 54, 60], ticks=[6, 12, 18, 24, 36, 48, 60])
+IMPACT_H = ramp_style([(3, "#ffd9b3"), (6, "#ff9a4a"), (12, "#d2381e"), (24, "#7a1630"), (36, "#2a0a2a")], [3, 6, 9, 12, 18, 24, 36], ticks=[3, 6, 12, 24, 36])
+
+
+def temp_c_style() -> Style:
+    """Upper-air temperature in degC: the 2 m ramp on a Celsius axis (2 degC bins from -40 to +30)."""
+    lv = np.arange(-40, 32, 2, dtype=float)
+    mids = (lv[:-1] + lv[1:]) / 2
+    cols = [to_hex(c) for c in TEMP_F(mids * 1.8 + 32)]
+    return Style(lv.tolist(), [to_hex(TEMP_F(-40.0001 * 1.8 + 32)[0])] + cols + [to_hex(TEMP_F(30 * 1.8 + 32)[0])], np.arange(-40, 31, 10).tolist())
+
+
+# Snow depth change (in): browns for melt / settling, transparent for no change, the snowfall blues above.
+_SD_LEVELS = [-12, -6, -3, -1, -0.5, 0.5, 1, 2, 3, 4, 6, 8, 12, 18, 24, 36]
+_SD_COLORS = ["#7a3b0a", "#a9622a", "#d09a5c", "#ecd2a8", None, "#bdd7e7", "#6baed6", "#3182bd", "#08519c", "#082694", "#ffff96", "#ffc400", "#ff8700", "#db1400", "#8a0a52"]
+SNOD_CHG = Style(list(_SD_LEVELS), ["#4a1f06", *_SD_COLORS, "#4a0a50"], [-12, -3, -1, 1, 3, 6, 12, 24, 36], True)

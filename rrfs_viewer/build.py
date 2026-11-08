@@ -21,9 +21,9 @@ from pathlib import Path
 
 import numpy as np
 
-from . import encode, grib, pipeline
+from . import encode, grib, hrrr as hrrr_mod, pipeline, ski
 from .catalog import BY_KEY, GROUPS, PRODUCTS, STORE
-from .config import EDGE_M, FILE_2D, MEMBERS, MIN_SEP_M, frames
+from .config import EDGE_M, FILE_2D, FILE_HSFC, MEMBERS, MIN_SEP_M, OUT_DX_M, frames
 from .s3 import S3Source
 
 log = logging.getLogger("rrfs_viewer")
@@ -60,7 +60,7 @@ def _run_source(args) -> tuple[str, dict[str, bytes], dict]:
     t0 = time.time()
     cycle = datetime.fromisoformat(cycle_iso)
     rg = grib.Regrid.load(Path(regrid_path))
-    src = S3Source(_client(demo_now))
+    src = S3Source(_client(demo_now), **({"bucket": hrrr_mod.HRRR_BUCKET} if source == "hrrr" else {}))
     tick = lambda s, fr: log.info("%s F%03d  (%.0fs)", s, fr, time.time() - t0)
     if source == "det":                                   # not a displayed source: it only feeds the members' Cobb-with-lift products
         lift, info = pipeline.process_lift(src, cycle, rg, max_fhr, tick)
@@ -68,7 +68,9 @@ def _run_source(args) -> tuple[str, dict[str, bytes], dict]:
             np.save(Path(lift_dir) / LIFT_FILE, lift)
         info["seconds"] = round(time.time() - t0, 1)
         return source, {}, info
-    if source == "refs":
+    if source == "hrrr":                                  # one deterministic run, its own native grid; hourly files to F048 (frames beyond stay empty)
+        arrays, info = hrrr_mod.process_hrrr(src, cycle, rg, max_fhr, tick)
+    elif source == "refs":
         arrays, info = pipeline.process_refs(src, cycle, rg, max_fhr, tick)
     else:
         path = Path(lift_dir) / LIFT_FILE
@@ -151,6 +153,25 @@ def ensure_regrid(src: S3Source, cycle: datetime, cache: Path, first_fhr: int) -
     return rg
 
 
+def ensure_regrid_hrrr(src: S3Source, cycle: datetime, cache: Path, fhr: int) -> grib.Regrid:
+    """HRRR native grid (1799 x 1059 Lambert conformal, 3 km) -> the same display raster as the RRFS products; cached like the RRFS mapping."""
+    from .basemap import EXTENT, PROJ
+    from .config import OUT_DX_M
+
+    path = cache / "regrid_hrrr.npz"
+    loc = src.locate(FILE_HSFC, "hrrr", cycle, fhr)
+    if loc is None:
+        raise RuntimeError(f"no HRRR surface file for {cycle:%Y%m%d %H}z F{fhr:02d}")
+    vals, geo = grib.decode(src.fetch_message(loc, "PRES", "surface"), want_geometry=True)
+    rg = grib.Regrid.load(path)
+    if rg is not None and rg.native_shape == vals.shape:
+        return rg
+    log.info("building HRRR native -> display grid mapping (%s)", vals.shape)
+    rg = grib.build_regrid(geo[0], geo[1], PROJ, EXTENT, OUT_DX_M)
+    rg.save(path)
+    return rg
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="public")
@@ -161,6 +182,7 @@ def main(argv=None) -> int:
     ap.add_argument("--workers", type=int, default=min(4, os.cpu_count() or 1))
     ap.add_argument("--sources", default="refs," + ",".join(MEMBERS))
     ap.add_argument("--no-lift", action="store_true", help="skip the deterministic-RRFS DZDT fetch (the Cobb-with-lift products stay empty)")
+    ap.add_argument("--no-hrrr", action="store_true", help="skip the HRRR products (a separate bucket and grid; the HRRR group stays empty)")
     ap.add_argument("--no-terrain", action="store_true", help="skip the terrain / water basemap (the map background stays white)")
     ap.add_argument("--cycle", help="force a cycle (YYYYMMDDHH) instead of the newest complete one")
     ap.add_argument("--skip-if-deployed", metavar="URL", help="exit early (code 0, no output directory) when the site at URL already shows this cycle built by this code version")
@@ -211,7 +233,14 @@ def main(argv=None) -> int:
                     args.max_fhr, ",".join(complete))
         sources = [s for s in sources if s in began] or sources
     lift_dir = tempfile.mkdtemp(prefix="rrfs_lift_")                  # ~300 MB at F060: scratch space, removed below, never the cache
-    mk = lambda s: (s, iso(cycle), args.max_fhr, str(cache / "regrid.npz"), demo_now, lift_dir)
+    use_hrrr = not args.no_hrrr
+    if use_hrrr:                                                      # HRRR is optional: without its files or grid the rest of the site is built as before
+        try:
+            ensure_regrid_hrrr(S3Source(_client(demo_now), bucket=hrrr_mod.HRRR_BUCKET), cycle, cache, F[0])
+        except Exception as exc:
+            log.warning("HRRR products unavailable for this cycle: %s", exc)
+            use_hrrr = False
+    mk = lambda s: (s, iso(cycle), args.max_fhr, str(cache / ("regrid_hrrr.npz" if s == "hrrr" else "regrid.npz")), demo_now, lift_dir)
     results: dict[str, tuple[dict, dict]] = {}
     lift_info: dict = {}
 
@@ -229,6 +258,7 @@ def main(argv=None) -> int:
     # the deterministic lift first (the members read it), in parallel with the REFS mean, then the members
     first = [] if args.no_lift else ["det"]
     first += [s for s in sources if s == "refs"]
+    first += ["hrrr"] if use_hrrr else []
     rest = [s for s in sources if s != "refs"]
     try:
         if args.workers <= 1:
@@ -247,10 +277,11 @@ def main(argv=None) -> int:
     total = 0
     avail: dict[str, dict[str, bool]] = {p.key: {} for p in STORE}
     for s, (blobs, info) in results.items():
+        slot = "refs" if s == "hrrr" else s                # HRRR products are single-source: they use the single-source slot, shown on the page under their own name
         for key, blob in blobs.items():
-            (out / "data" / f"{key}.{s}.bin").write_bytes(blob)
+            (out / "data" / f"{key}.{slot}.bin").write_bytes(blob)
             total += len(blob)
-            avail[key][s] = True
+            avail[key][slot] = True
     from . import basemap, boundaries
     layers = boundaries.load(basemap.PROJ)
     overlay_bytes = basemap.render_overlay(layers, out / "overlay.png")
@@ -289,6 +320,8 @@ def main(argv=None) -> int:
         "grid": {"nx": nx, "ny": ny}, "overlay": "overlay.png", "counties": "counties.png", "overlay_px": list(basemap.OVERLAY_PX),
         "sources": {s: {"label": SOURCE_LABELS[s], "ok": bool(results.get(s, ({}, {}))[0])} for s in ["refs", *MEMBERS]},
         "members": list(MEMBERS), "groups": list(GROUPS),
+        "ski_all": ski.ski_all(rg.x, rg.y, basemap.PROJ, basemap.PC, basemap.EXTENT, OUT_DX_M),
+        "hrrr": {"ok": bool(results.get("hrrr", ({}, {}))[0]), "frames": results.get("hrrr", ({}, {}))[1].get("frames", 0), "max_fhr": hrrr_mod.HRRR_MAX_FHR},
         "basemap": basemap_block, "stations": basemap.station_layout(rg.x, rg.y), "stations_all": basemap.station_all(rg.x, rg.y), "lines": "data/lines.bin", "gis": gis_file,
         "station_px": {"sep": round(MIN_SEP_M / ((basemap.EXTENT[1] - basemap.EXTENT[0]) / basemap.OVERLAY_PX[0]), 3),
                        "edge": round(EDGE_M / ((basemap.EXTENT[1] - basemap.EXTENT[0]) / basemap.OVERLAY_PX[0]), 3)},
@@ -297,7 +330,7 @@ def main(argv=None) -> int:
             "desc": p.desc, "decimals": p.decimals, "dtype": p.dtype, "lo": p.lo, "step": p.step, "refs": p.refs,
             "levels": p.style.levels, "colors": p.style.colors, "ticks": p.style.ticks, "equal": p.style.equal_width, "classes": p.style.classes,
             "thr": list(p.thr), "thr_dir": p.thr_dir, "available": avail[p.key],
-            "pmm": p.pmm, "sam": p.sam, "cat": p.cat, "has1h": p.has1h, "step1h": (p.step1h or p.step) if p.has1h else None,
+            "pmm": p.pmm, "sam": p.sam, "single": p.single, "cat": p.cat, "has1h": p.has1h, "step1h": (p.step1h or p.step) if p.has1h else None,
             "available_1h": avail.get(p.key + "_1h", {}) if p.has1h else {},
         } for p in PRODUCTS],
         "stats": {"data_bytes": total, "overlay_bytes": overlay_bytes, "counties_bytes": counties_bytes,
