@@ -39,6 +39,7 @@ LIFT_LEVELS = tuple(range(925, 299, -25))                               # determ
 # --------------------------------------------------------------------------- vertical levels fetched from the member prslev files
 T_LEVELS = (1000, 975, 950, 925, 900, 850, 800, 750, 700, 600, 500)     # TMP: Kuchera / max-T-aloft / DGZ / warm nose
 RH_LEVELS = (925, 900, 850, 800, 750, 700, 600, 500)                    # RH: saturation test inside the DGZ
+DGZ_RH_LOW = (1000, 975, 950)           # extra RH levels for the DGZ only (the Cobb method starts at 925): in shallow cold air the DGZ sits in the lowest 100 hPa
 COBB_UPPER = (400, 300)                 # extra TMP + RH levels so the Cobb integration reaches NBM's 300 hPa top; kept apart from T_LEVELS
                                         # so Kuchera / max-T-aloft / DGZ / warm nose do not change
 

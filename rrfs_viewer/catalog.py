@@ -170,33 +170,45 @@ PRODUCTS: tuple[Product, ...] = (
     _P("prain", "Rain", G_MIX, "%", "inst", C.PCT_RAIN, "u8", 0.0, 0.4, 0, True,
        "Percent of members with rain.", (50,), "ge", "Precipitation Type - Rain"),
     _P("warmnose", "Warm nose", G_MIX, "°C", "inst", C.WARM_NOSE, "u8", -40.0, 0.25, 1, False,
-       "Warmest temperature between 925 and 700 hPa. Above 0 °C over sub-freezing surface air means sleet or freezing rain.",
+       "Warmest temperature between 925 and 700 hPa. Above 0 °C over sub-freezing surface air means sleet or freezing rain. A warm layer that nears 0 °C "
+       "also keeps snow ratios low (WPC snow forecasting guide), and one that warms the DGZ out of its -12 to -18 °C window ends dendrite growth: read it with the DGZ maps.",
        (0, 1, 3), "ge", "Elevated Warm Layer (max T 925-700 mb)"),
     # ------------------------------------------------------------------ dendritic growth zone
-    # Dendrites need three things together: air between -12 and -18 C, air saturated with respect to ice, and ascent to keep supplying vapour.
-    # The products go in that order: where the zone is and how deep, how much of it is saturated, and where saturated depth meets lift.
+    # Dendrites need three things together: air between -12 and -18 C (where vapour excess over ice and growth rates peak, Bergeron-Findeisen), air close to ice
+    # saturation, and ascent to keep supplying vapour.  The products go in that order, then the humidity they are built on.  Sources: Cobb & Waldstreicher
+    # (2005); NWS MDL / NBM Cobb method (2011 ratio curve, >90 % RH w.r.t. ice and rising motion); Roebber et al. (2003); Baxter et al. (2005);
+    # Libbrecht (2012) after Nakaya (1954); Korolev & Mazin (2003).  Full list in the README.
     _P("dgz_depth", "DGZ depth", G_DGZ, "kft", "inst", C.DGZ, "u8", 0.0, 0.1, 1, False,
-       "Thickness of the layer between the -12 and -18 °C isotherms, in thousands of feet, whether or not it is moist. This is where the air is right for "
-       "dendrites: deeper means more time for them to grow while they fall. Under about 1 kft the zone is a thin sliver, 2-4 kft is a solid growth layer, "
-       "and 5 kft or more is deep. Blank where no air in the column is that cold or the zone is below ground. Only a map of temperature: pair it with the "
-       "saturated depth and the lift.",
+       "Thickness of the layer between the -12 and -18 °C isotherms, in thousands of feet of height, whether or not it is moist. Dendrites and sectored "
+       "plates grow fastest here, so a deeper layer gives crystals more time to grow as they fall (the DGZ-depth maps of NWS and College of DuPage). "
+       "Under about 1 kft is a thin sliver, 2-4 kft a solid layer, 5 kft or more deep. Blank where no air in the column is that cold or the layer is below ground. "
+       "Temperature only: read it with the saturated depth and the ascent.",
        (1, 2, 4, 6), "ge", "Dendritic Growth Zone Depth (kft)"),
-    _P("dgz_sat", "Saturated DGZ depth", G_DGZ, "kft", "inst", C.DGZ, "u8", 0.0, 0.1, 1, False,
-       "The part of the growth zone that is also saturated with respect to ice (layer-mean RHi of 100 % or more), in kft. This is the depth in which "
-       "dendrites can really grow, so it is the one to read for fluffy, high-ratio snow. Deep growth zone but little saturated depth means dry air "
-       "in the zone: the snow will be sparse or fall as needles, plates and small flakes. Uses 925-500 hPa humidity, so zone below 925 hPa counts as dry.",
-       (1, 2, 4, 6), "ge", "Ice-Saturated DGZ Depth (kft)"),
-    _P("dgz_lift", "Saturated DGZ with lift", G_DGZ, "kft", "inst", C.DGZ, "u8", 0.0, 0.1, 1, False,
-       "Saturated growth-zone depth (kft) only where the model also has strong ascent (upward motion of 0.1 m/s or more somewhere in the column in the "
-       "last hour; RRFS publishes no omega on pressure levels, so the column maximum stands in). Where this is coloured all three ingredients are "
-       "present, the setup for the heaviest, fluffiest snow bands; a thick saturated zone without lift can still be light and ineffective.",
-       (1, 2, 4), "ge", "Ice-Saturated DGZ Depth With Lift (kft)"),
+    _P("dgz_sat", "Moist DGZ depth", G_DGZ, "kft", "inst", C.DGZ, "u8", 0.0, 0.1, 1, False,
+       "The part of the growth zone that is also moist enough, in kft: layer-mean relative humidity with respect to ice of 90 % or more, the criterion the NWS "
+       "MDL Cobb method uses (about 75-78 % RH over water at these temperatures). This is the depth in which dendrites can really grow, so it is the one to read "
+       "for fluffy snow. A deep zone with little moist depth means dry air in the zone: sparse flakes, or plates and needles. Uses 925-500 hPa humidity, so "
+       "zone below 925 hPa counts as dry.",
+       (1, 2, 4, 6), "ge", "Moist (RHi >= 90%) DGZ Depth (kft)"),
+    _P("dgz_omega", "DGZ ascent", G_DGZ, "µbar/s", "inst", C.OMEGA, "u8", 0.0, 0.2, 0, False,
+       "Mean upward motion inside the -12 to -18 °C layer, as a pressure vertical velocity in microbar/s, the omega unit of BUFKIT and the original Cobb & "
+       "Waldstreicher work. Converted from the geometric vertical velocity DZDT with omega = -rho g w (ideal gas, hydrostatic). The RRFS members publish no "
+       "vertical velocity on pressure levels, so DZDT is the deterministic RRFS run's, on this member's own temperatures: where the two disagree on where "
+       "the ascent is, this map does too. Strong ascent inside a moist DGZ is what makes heavy snow bursts and bands. Empty where the deterministic file is missing.",
+       (5, 10, 20), "ge", "Ascent in the DGZ (microbar/s)"),
+    _P("dgz_lift", "Moist DGZ with lift", G_DGZ, "kft", "inst", C.DGZ, "u8", 0.0, 0.1, 1, False,
+       "Moist growth-zone depth (kft) only where that layer also has ascent of 0.1 m/s or more (about 7 microbar/s near 700 hPa; Korolev & Mazin (2003) need "
+       "roughly 10 cm/s to keep air ice-supersaturated for dendrite growth). All three ingredients are present where it is coloured: the setup for the heaviest, "
+       "fluffiest snow bands. Ascent is the mean inside the DGZ from the deterministic run's DZDT; where that file is missing, the hourly column-maximum "
+       "upward motion stands in, which only shows that ascent exists somewhere above the point.",
+       (1, 2, 4), "ge", "Moist DGZ Depth With Ascent (kft)"),
     _P("dgz_rhi", "DGZ mean RH (ice)", G_DGZ, "%", "inst", C.RHI, "u8", 0.0, 0.6, 0, False,
-       "Pressure-weighted mean relative humidity with respect to ice inside the growth zone. 100 % is ice saturation: blues are saturated "
-       "(dendrites grow), tans are dry (growth stalls, flakes sublimate).", (90, 100), "ge", "Mean RH w.r.t. Ice in the DGZ"),
+       "Pressure-weighted mean relative humidity with respect to ice inside the growth zone. 100 % is ice saturation; the 90 % line is the NWS moisture "
+       "criterion. Blues are moist (dendrites grow), tans are dry (growth stalls, flakes sublimate). Humidity is the secondary control on snow density; "
+       "temperature matters more (Roebber et al. 2003).", (90, 100), "ge", "Mean RH w.r.t. Ice in the DGZ"),
     _P("uvv", "Peak upward motion", G_DGZ, "m/s", "inst", C.UVV, "u8", 0.0, 0.01, 2, False,
-       "Hourly-maximum upward vertical velocity (100-1000 hPa). RRFS does not publish omega on pressure levels, so this column "
-       "maximum is the lift proxy: look for it overlapping a saturated DGZ.", (0.1, 0.25, 0.5), "ge", "Peak Upward Vertical Velocity"),
+       "Hourly-maximum upward vertical velocity (100-1000 hPa), published by every member. It is the column maximum, not the ascent inside the DGZ, so use "
+       "it where the deterministic DZDT (DGZ ascent) is missing.", (0.1, 0.25, 0.5), "ge", "Peak Upward Vertical Velocity"),
     # ------------------------------------------------------------------ wind and blizzard
     _P("gust", "Wind gust", G_WIND, "mph", "inst", C.wind_style(), "u8", 0.0, 0.6, 0, False,
        "10 m wind gust.", (30, 40, 50, 58), "ge", "10m Wind Gust"),

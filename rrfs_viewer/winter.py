@@ -297,34 +297,47 @@ def rh_ice(rh_w, t_c):
 
 DGZ_WARM_C, DGZ_COLD_C = -12.0, -18.0
 M_PER_KFT = 304.8
-DGZ_LIFT_MS = 0.10             # upward motion (m/s) that counts as "lift present" in dgz_with_lift
+DGZ_SAT_RHI = 90.0             # layer-mean RH w.r.t. ice (%) that counts as moist enough: the NWS MDL / NBM Cobb-method moisture criterion (about 75-78 % RH w.r.t. water at -12..-18 C)
+DGZ_LIFT_MS = 0.10             # upward motion (m/s) that counts as "lift present": Korolev & Mazin (2003) need about 10 cm/s to keep a cloud ice-supersaturated for dendrites
 
 
-def dgz_metrics(t_c, rh_w, levels, ps_hpa, units: str = "hpa"):
+def dgz_metrics(t_c, rh_w, levels, ps_hpa, units: str = "hpa", sat_rhi: float = DGZ_SAT_RHI, t_sfc_c=None, rh_sfc=None):
     """Dendritic growth zone from the level temperatures (``t_c``: (L, ny, nx) degC, ``levels`` descending hPa).
 
     Linear interpolation of temperature between adjacent levels gives, per layer, the fraction lying between -12 and -18 degC.
     Returns three (ny, nx) arrays:
 
     * ``depth``  - DGZ depth
-    * ``sat``    - DGZ depth that is saturated with respect to ice (layer-mean RHi >= 100 %)
+    * ``sat``    - DGZ depth that is moist enough for dendrites: layer-mean RH with respect to ice of at least ``sat_rhi`` (90 %, the NWS MDL / NBM Cobb criterion)
     * ``rhi``    - pressure-weighted mean RH w.r.t. ice inside the DGZ, % (NaN where there is no DGZ)
 
     ``units="hpa"`` measures depths in hPa; ``units="kft"`` in thousands of feet of geometric height, the unit a forecaster reads off a sounding
     (hypsometric thickness of each layer from its mean temperature, dry air).  ``rh_w`` is (L, ny, nx) with NaN where RH was not fetched;
     unsaturated/unknown layers do not count towards ``sat``.
+
+    ``t_sfc_c`` / ``rh_sfc`` (optional, 2 m values): the ground is then the bottom of the profile where it cuts between two levels, so a DGZ that sits in the
+    lowest part of the column (shallow cold air, high terrain) is not lost with the part of the layer below the first level above ground.
     """
     if units not in ("hpa", "kft"):
         raise ValueError(units)
     p = np.asarray(levels, np.float32)
-    above = p.reshape(-1, 1, 1) <= ps_hpa[None]
+    ps = np.asarray(ps_hpa, np.float32)
+    above = p.reshape(-1, 1, 1) <= ps[None]
     T = np.where(above, t_c, np.nan)
     depth = np.zeros(T.shape[1:], np.float32)
     sat = np.zeros_like(depth)
     rhsum = np.zeros_like(depth)
     wsum = np.zeros_like(depth)
+    ts = None if t_sfc_c is None else np.asarray(t_sfc_c, np.float32)
+    rs = None if rh_sfc is None else np.asarray(rh_sfc, np.float32)
     for i in range(len(p) - 1):
-        ta, tb, dp = T[i], T[i + 1], float(p[i] - p[i + 1])
+        ta, tb, ra_in, pa = T[i], T[i + 1], rh_w[i], np.where(above[i], p[i], ps)
+        if ts is not None:                                                    # the ground cuts this layer: the surface is its bottom
+            cut = ~above[i] & above[i + 1] & (ps > p[i + 1]) & np.isfinite(ts)
+            ta = np.where(cut, ts, ta)
+            ra_in = np.where(cut, np.nan if rs is None else rs, np.where(above[i], rh_w[i], np.nan))
+            pa = np.where(above[i] | cut, pa, p[i + 1])
+        dp = pa - p[i + 1]
         d = tb - ta
         with np.errstate(all="ignore"):
             t1, t2 = (DGZ_WARM_C - ta) / d, (DGZ_COLD_C - ta) / d
@@ -334,16 +347,16 @@ def dgz_metrics(t_c, rh_w, levels, ps_hpa, units: str = "hpa"):
         f = np.where(np.isnan(ta) | np.isnan(tb), 0.0, f).astype(np.float32)
         if units == "kft":                                                    # geometric thickness of the layer, from its own mean temperature
             with np.errstate(all="ignore"):
-                dz = RD_OVER_G * (0.5 * (ta + tb) + 273.15) * np.log(float(p[i]) / float(p[i + 1])) / M_PER_KFT
+                dz = RD_OVER_G * (0.5 * (ta + tb) + 273.15) * np.log(pa / p[i + 1]) / M_PER_KFT
             size = np.where(f > 0, dz, 0.0)
         else:
             size = dp
         depth += f * size
-        ra, rb = rh_ice(rh_w[i], ta), rh_ice(rh_w[i + 1], tb)
+        ra, rb = rh_ice(ra_in, ta), rh_ice(rh_w[i + 1], tb)
         cnt = np.isfinite(ra).astype(np.float32) + np.isfinite(rb)
         known = cnt > 0
         rl = np.where(known, (np.nan_to_num(ra) + np.nan_to_num(rb)) / np.maximum(cnt, 1), 0.0)
-        sat += np.where(known & (rl >= 100.0), f * size, 0.0)
+        sat += np.where(known & (rl >= sat_rhi), f * size, 0.0)
         rhsum += f * dp * rl
         wsum += np.where(known, f * dp, 0.0)
     with np.errstate(all="ignore"):
@@ -351,11 +364,47 @@ def dgz_metrics(t_c, rh_w, levels, ps_hpa, units: str = "hpa"):
     return depth, sat, mean_rhi
 
 
+def dgz_ascent(t_c, levels_hpa, ps_hpa, w_ms):
+    """Mean ascent inside the dendritic growth zone, from geometric vertical velocity on the 25 hPa grid ``COBB_GRID``.
+
+    ``t_c`` (degC) is ``(nlev, ny, nx)`` on ``levels_hpa`` (interpolated linearly in ln p to the grid, nothing extrapolated); ``w_ms`` is DZDT in m/s,
+    positive up, ``(26, ny, nx)`` on the grid.  Every grid level that lies above the ground and between -12 and -18 degC counts.  Returns two (ny, nx) arrays,
+    NaN where there is no DGZ level or no velocity:
+
+    * ``w``      - mean geometric vertical velocity over those levels, m/s (negative = sinking, kept so that the mean is honest)
+    * ``omega``  - the same as a pressure vertical velocity, ``-omega = rho g w`` with the density of each level (ideal gas, hydrostatic), microbar/s,
+                   positive = ascent (1 Pa/s = 10 microbar/s)
+    """
+    lev = np.asarray(levels_hpa, float)
+    order = np.argsort(-lev)
+    lev, t = lev[order], np.asarray(t_c, np.float64)[order]
+    ps = np.asarray(ps_hpa, np.float64)
+    t = np.where(lev[:, None, None] <= ps[None] + 1e-6, t, np.nan)
+    wsum, osum, n = np.zeros(ps.shape), np.zeros(ps.shape), np.zeros(ps.shape)
+    for pt in COBB_GRID:
+        if pt > lev[0] + 1e-6 or pt < lev[-1] - 1e-6:
+            continue
+        i = int(np.searchsorted(-lev, -pt, side="left"))
+        lo, hi = (i, i) if abs(lev[i] - pt) < 1e-6 else (i - 1, i)
+        f = 0.0 if lo == hi else np.log(pt / lev[lo]) / np.log(lev[hi] / lev[lo])
+        a, b = t[lo], t[hi]
+        tl = np.where(np.isnan(a), b, np.where(np.isnan(b), a, a + f * (b - a)))
+        w = np.asarray(w_ms[(COBB_P_BOT - pt) // COBB_P_STEP], np.float64)
+        good = np.isfinite(tl) & np.isfinite(w) & (pt <= ps + 1e-6) & (tl <= DGZ_WARM_C) & (tl >= DGZ_COLD_C)
+        rho = 100.0 * pt / (RD * (np.where(good, tl, 0.0) + 273.15))
+        wsum += np.where(good, w, 0.0)
+        osum += np.where(good, UBAR_S_PER_PA_S * rho * G0 * w, 0.0)
+        n += good
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return (np.where(n > 0, wsum / n, np.nan).astype(np.float32), np.where(n > 0, osum / n, np.nan).astype(np.float32))
+
+
 def dgz_with_lift(sat_depth, uvv_ms, threshold: float = DGZ_LIFT_MS):
     """Ice-saturated DGZ depth where the column also has ascent: the three ingredients of dendrite growth together.
 
-    ``uvv_ms`` is the hourly-maximum upward motion anywhere in the column (RRFS publishes no pressure-level omega), so this is a generous proxy:
-    it says ascent exists somewhere above the point, not that it sits inside the DGZ.  NaN where the depth or the motion is unknown.
+    ``uvv_ms`` is the ascent to test against ``threshold``: the mean vertical velocity inside the DGZ from :func:`dgz_ascent` where the deterministic run's
+    DZDT is available, otherwise the hourly-maximum upward motion anywhere in the column (a generous proxy: ascent exists somewhere above the point, not
+    necessarily inside the DGZ).  NaN where the depth or the motion is unknown.
     """
     s, w = np.asarray(sat_depth, np.float32), np.asarray(uvv_ms, np.float32)
     return np.where(np.isfinite(s) & np.isfinite(w), np.where(w >= threshold, s, 0.0), np.nan).astype(np.float32)

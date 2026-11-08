@@ -20,7 +20,7 @@ DX = 3000.0
 CENTRE = (-71.4, 44.2)
 LEVELS_ALL = (250, 300, 400, 500, 600, 700, 750, 800, 850, 900, 925, 950, 975, 1000)
 T_LEV = (1000, 975, 950, 925, 900, 850, 800, 750, 700, 600, 500, 400, 300)
-RH_LEV = (925, 900, 850, 800, 750, 700, 600, 500, 400, 300)
+RH_LEV = (1000, 975, 950, 925, 900, 850, 800, 750, 700, 600, 500, 400, 300)
 HGT_LEV = (1000, 850, 700, 500)
 LIFT_LEV = tuple(range(925, 299, -25))
 
@@ -244,6 +244,7 @@ class FakeS3:
                     ("PRES", "surface", _info("inst", h), x["ps"] * 100),
                     ("TMP", "2 m above ground", _info("inst", h), x["t2"] + K),
                     ("DPT", "2 m above ground", _info("inst", h), x["t2"] + K - 1.5),
+                    ("RH", "2 m above ground", _info("inst", h), x["RH"][1000]),
                     ("UGRD", "10 m above ground", _info("inst", h), x["u"]),
                     ("VGRD", "10 m above ground", _info("inst", h), x["v"]),
                     ("CSNOW", "surface", _info("inst", h), f32(x["sn"])),

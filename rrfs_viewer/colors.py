@@ -161,6 +161,8 @@ RHI = ramp_style([(60, "#c8a46e"), (80, "#e8e2c8"), (100, "#7cc0e8"), (110, "#2b
                  [70, 80, 90, 95, 100, 105, 110], under="#b58a52")
 WARM_NOSE = ramp_style([(-12, "#2a4fb0"), (-3, "#9fc4ee"), (0, "#ffffff"), (2, "#ffc27a"), (5, "#ef6a3b"), (8, "#9b1c2f")],
                        [-10, -6, -3, -1, 0, 1, 2, 3, 5, 8], under="#2a4fb0")
+# Ascent inside the DGZ, microbar/s (1 microbar/s = 0.1 Pa/s; about 1.3 cm/s near 700 hPa).
+OMEGA = ramp_style([(2, "#e6e6ee"), (10, "#9a8fd0"), (20, "#7a2fa6"), (40, "#d8438f")], [2, 5, 10, 15, 20, 30, 40])
 UVV = ramp_style([(0.05, "#e6e6ee"), (0.3, "#9a8fd0"), (0.75, "#7a2fa6"), (2, "#d8438f")],
                  [0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1, 1.5, 2])
 BLIZ_HOURS = ramp_style([(3, "#ffb3c1"), (6, "#ff5f7e"), (12, "#c4163f"), (24, "#6a1b9a"), (36, "#2a0a4a")],

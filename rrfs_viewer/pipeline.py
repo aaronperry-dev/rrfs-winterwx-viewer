@@ -24,7 +24,7 @@ import numpy as np
 
 from . import grib, winter
 from .catalog import STORE
-from .config import COBB_UPPER, FILE_2D, FILE_PMMN, FILE_PRS, LIFT_LEVELS, MEMBERS, RH_LEVELS, T_LEVELS, frames
+from .config import COBB_UPPER, DGZ_RH_LOW, FILE_2D, FILE_PMMN, FILE_PRS, LIFT_LEVELS, MEMBERS, RH_LEVELS, T_LEVELS, frames
 from .s3 import S3Source, find_entry
 
 log = logging.getLogger(__name__)
@@ -246,6 +246,9 @@ def _plan_member(F, k, acc_p: Acc, acc_s: Acc):
         R[("RH", p)] = Req(FILE_PRS, fr, "RH", f"{p} mb", None)
     for p in COBB_UPPER:
         R[("T", p)] = Req(FILE_PRS, fr, "TMP", f"{p} mb", None)
+    for p in DGZ_RH_LOW:
+        R[("RH", p)] = Req(FILE_PRS, fr, "RH", f"{p} mb", None)
+    R["rh2"] = Req(FILE_2D, fr, "RH", "2 m above ground", None)          # the surface node of the DGZ profile
     for p in Z_LEVELS:
         R[("Z", p)] = Req(FILE_PRS, fr, "HGT", f"{p} mb", None)
     reqs = list(R.values()) + [r for p in plans.values() if p for r in p[0]]
@@ -428,6 +431,7 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
         pr3 = None if any(a is None for a in apcps.values()) else sum(np.nan_to_num(a, nan=0.0) for a in apcps.values())
         if t2k is not None and pr3 is not None:
             slr["snow_byun"] = out["slr_byun"][k] = winter.slr_byun(t2k - 273.15, pr3)
+        ascent = None
         have_T = [g(("T", p)) for p in T_LEVELS]
         all_T = all(a is not None for a in have_T)
         if t2k is not None and ps_pa is not None and all_T:
@@ -437,12 +441,11 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
             slr["snow_maxt"] = winter.slr_max_t_aloft(winter.tmax_aloft_c(t2k, Tk, T_LEVELS, ps))
             out["slr_kuchera"][k], out["slr_maxt"][k] = slr["snow_kuchera"], slr["snow_maxt"]
             out["warmnose"][k] = winter.warm_nose_c(Tk, T_LEVELS, ps)
-            rh = np.stack([g(("RH", p)) if p in RH_LEVELS and g(("RH", p)) is not None else np.full((ny, nx), np.nan, np.float32)
+            rh = np.stack([g(("RH", p)) if (p in RH_LEVELS or p in DGZ_RH_LOW) and g(("RH", p)) is not None else np.full((ny, nx), np.nan, np.float32)
                            for p in T_LEVELS])
-            d, s_, r_ = winter.dgz_metrics(Tk - 273.15, rh, T_LEVELS, ps, units="kft")
+            d, s_, r_ = winter.dgz_metrics(Tk - 273.15, rh, T_LEVELS, ps, units="kft", t_sfc_c=t2k - 273.15, rh_sfc=g("rh2"))
             out["dgz_depth"][k], out["dgz_sat"][k], out["dgz_rhi"][k] = d, s_, r_
-            if g("uvv") is not None:
-                out["dgz_lift"][k] = winter.dgz_with_lift(s_, np.clip(g("uvv"), 0, None))
+            ascent = np.clip(g("uvv"), 0, None) if g("uvv") is not None else None        # fallback: hourly column-maximum ascent
             cobb_t = [g(("T", p)) for p in COBB_RH_LEVELS]
             cobb_rh = [g(("RH", p)) for p in COBB_RH_LEVELS]
             if all(a is not None for a in cobb_t + cobb_rh):
@@ -450,6 +453,11 @@ def process_member(src: S3Source, cycle: datetime, member: str, rg: grib.Regrid,
                 slr["snow_cobb"] = out["slr_cobb"][k] = winter.slr_cobb(ct, cr, COBB_RH_LEVELS, ps)
                 if lift is not None and np.isfinite(lift[k, 0]).any():
                     slr["snow_cobblift"] = out["slr_cobblift"][k] = winter.slr_cobb(ct, cr, COBB_RH_LEVELS, ps, w_ms=np.asarray(lift[k], np.float32))
+                    w_dgz, om_dgz = winter.dgz_ascent(ct, COBB_RH_LEVELS, ps, np.asarray(lift[k], np.float32))     # ascent inside this member's DGZ
+                    out["dgz_omega"][k] = np.clip(om_dgz, 0.0, None)
+                    ascent = w_dgz
+        if ascent is not None and np.isfinite(out["dgz_sat"][k]).any():
+            out["dgz_lift"][k] = winter.dgz_with_lift(out["dgz_sat"][k], ascent)
         # thickness ratio: model heights when present, otherwise the hypsometric equation on the temperature levels
         Z = {p: g(("Z", p)) for p in Z_LEVELS}
         if all(a is not None for a in Z.values()):
