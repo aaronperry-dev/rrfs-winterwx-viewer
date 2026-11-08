@@ -52,7 +52,7 @@ def test_member_products_complete_and_physical(member, rg):
     ny, nx = rg.shape
     for k, a in out.items():
         assert a.shape == (2, ny, nx), k
-        if "cobblift" in k:                       # needs the deterministic run's DZDT: checked in test_cobb_with_lift_products
+        if "cobblift" in k or k == "refd":        # cobblift needs the deterministic run's DZDT; 1 km reflectivity is published in the REFS PMM file only
             continue
         assert np.isfinite(a).any(), f"{k} is empty"
     assert info["missing"] == {}
@@ -376,3 +376,48 @@ def test_up_to_date_waits_for_late_members():
     assert build.up_to_date(m, "2026-11-05T12:00:00Z", "c", ["m003", "m002", "m001", "refs"])
     assert not build.up_to_date(m, "2026-11-05T12:00:00Z", "c", ["refs", "m001", "m002", "m003", "m004"])     # m004 has finished since
     assert build.up_to_date({**m, "complete": None}, "2026-11-05T12:00:00Z", "c", ["refs"])                    # older sites without the field
+
+
+# ---------------------------------------------------------------------------- reflectivity
+def test_member_reflectivity_and_type_mask(member):
+    out, _, _ = member
+    refc, code = out["refc"], out["refl_ptype"]
+    assert np.isnan(out["refd"]).all()                                        # members do not publish a 1 km field
+    ok = np.isfinite(refc)
+    assert ok.any() and refc[ok].min() >= -20.0 and refc[ok].max() <= 81.0
+    assert not (refc[ok] < 0).any() or (refc[ok][refc[ok] < 0] == -20.0).all()  # the no-echo fill is floored, not left at its own value
+    # the code: class * 16 + floor(dBZ / 5); no echo (< 5 dBZ) is 0
+    c = code[np.isfinite(code)]
+    assert c.min() >= 0 and c.max() <= 63
+    echo, ref_ok = code > 0, np.isfinite(code) & ok
+    assert echo.any() and (code[echo] % 16 == np.clip(np.floor(refc[echo] / 5), 1, 15)).all()
+    assert (code[ref_ok & (refc < 5)] == 0).all()
+
+
+def test_refl_ptype_code_and_classes():
+    dbz = np.array([-20, 4.9, 5, 24, 74, 80], np.float32)
+    assert W.refl_ptype_code(dbz, np.zeros(6)).tolist() == [0, 0, 1, 4, 14, 15]
+    assert W.refl_ptype_code(dbz, np.full(6, 3)).tolist() == [0, 0, 49, 52, 62, 63]
+    assert np.isnan(W.refl_ptype_code(np.array([np.nan], np.float32), np.array([1.0]))).all()
+    one = lambda *a: np.array([a], np.float32)
+    # freezing rain > sleet > snow > rain, from the flags
+    assert W.ptype_class_flags(one(1, 1, 1, 0, 0), one(0, 1, 0, 1, 0), one(0, 0, 1, 0, 0)).tolist() == [[1, 2, 3, 2, 0]]
+    # largest weight in a mean file; a tie goes to the more wintry type; nothing at all is rain
+    f = lambda r, sn, ip, zr: float(W.ptype_class_fractions(np.array([r]), np.array([sn]), np.array([ip]), np.array([zr]))[0])
+    assert [f(.7, .3, 0, 0), f(.2, .5, .2, .1), f(.5, .5, 0, 0), f(0, 0, 0, 0), f(.3, 0, .3, .3)] == [0, 1, 1, 0, 3]
+
+
+def test_refs_reflectivity_from_the_pmm_file(rg):
+    out, info = pipeline.process_refs(S3Source(FakeS3(NOW)), CYC, rg, 6)
+    for k in ("refc", "refd", "refl_ptype"):
+        assert np.isfinite(out[k]).any(), k
+    both = np.isfinite(out["refc"]) & np.isfinite(out["refd"])
+    assert (out["refd"][both] <= out["refc"][both] + 1e-3).all()              # 1 km echo never stronger than the column maximum
+    assert info["missing"] == {}
+
+
+def test_reflectivity_is_optional_in_refs(rg):
+    """No PMM file (or no REFD in it): the other REFS fields are unaffected and the reflectivity products are simply empty."""
+    out, info = pipeline.process_refs(S3Source(FakeS3(NOW, missing={("REFC", 3), ("REFC", 6), ("REFD", 3), ("REFD", 6)})), CYC, rg, 6)
+    assert np.isnan(out["refc"]).all() and np.isnan(out["refd"]).all() and np.isnan(out["refl_ptype"]).all()
+    assert np.isfinite(out["qpf"]).any() and np.isfinite(out["psnow"]).any()

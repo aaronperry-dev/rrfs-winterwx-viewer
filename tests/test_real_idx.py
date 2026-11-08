@@ -100,3 +100,15 @@ def test_deterministic_key_layout():
     from rrfs_viewer.config import FILE_PRS
     cyc = datetime(2026, 11, 6, 6, tzinfo=timezone.utc)
     assert FILE_PRS.key_for("det", cyc, 3) == "rrfs.20261106/06/rrfs.t06z.prslev.3km.f003.conus.grib2"
+
+
+def test_member_composite_reflectivity_request_exists():
+    """process_member asks for REFC at exactly this level wording (the real member 2dfld file); the member files carry no 1 km REFD."""
+    from rrfs_viewer.pipeline import REFC_LEVEL
+    assert s3.find_entry(E2D, "REFC", REFC_LEVEL)
+    assert not [e for e in E2D + EPRS if e.var == "REFD"]
+
+
+def test_loose_level_match():
+    assert s3.find_entry(E2D, "REFC", "~entire atmosphere") is not None
+    assert s3.find_entry(E2D, "REFC", "~1000 m above ground") is None
