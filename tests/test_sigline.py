@@ -50,3 +50,20 @@ def test_isoline_follows_the_level_and_handles_gaps():
     assert out["n"] == 1 and out["len"] == 10 and all(abs(x - 7.5) < 1e-6 for x in out["xs"])
     assert out["nb"] == 2 and out["none"] == 0
     assert out["ringN"] == 1 and out["closed"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_freezing_line_smoothing_and_specs():
+    js = "const D = { grid: { nx: 6, ny: 5 } };\nconst fzSmoothed = new WeakMap();\n" + _function_source("fzSmooth") + """
+    const a = new Float32Array(30).fill(10); a[14] = 40; a[0] = NaN;
+    const o = fzSmooth(a);
+    console.log(JSON.stringify({ same: fzSmooth(a) === o, centre: o[14], nan: Number.isNaN(o[0]), far: o[29] }));
+    """
+    out = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
+    assert out["same"] and out["nan"] and out["far"] == 10
+    assert abs(out["centre"] - (40 + 8 * 10) / 9) < 1e-4                    # a lone warm cell is spread over its 3 x 3 neighbourhood
+    # every map gets the line: the 2 m temperature (or HRRR's) is the fallback, the temperature maps use their own field
+    assert 'const FZ_T2 = [32, "32 °F (0 °C) 2 m temperature"' in HTML
+    for k in ("t2", "hr_t2", "tw2", "hr_tw2", "t925", "t850"):
+        assert re.search(rf"\b{k}: \[(32|0),", HTML)
+    assert '["z", "0 °C line"]' in HTML and "z: true," in HTML                 # a Map Layers switch, on by default
