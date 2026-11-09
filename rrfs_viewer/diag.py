@@ -147,6 +147,25 @@ def series_products(out: dict[str, np.ndarray], hours) -> dict[str, np.ndarray]:
             flag[~np.isfinite(slr) | ~np.isfinite(gust)] = np.nan
             res["imp_wetwind"] = winter.impact_hours(flag)
             res["imp_wetwind"][~(np.isfinite(slr) & np.isfinite(gust))] = np.nan
+    # ---- snow production: ordinal level from the member's growth zone, lift, banding potential and the model's snowfall in the block
+    sat, lift, band = out.get("dgz_sat"), out.get("dgz_lift"), out.get("band_pot")
+    if finite(sat) or finite(base):
+        shape = (n,) + np.shape(sat if finite(sat) else base)[1:]
+        ok = lambda a: np.nan_to_num(a, nan=0.0) if finite(a) else np.zeros(shape, np.float32)
+        snowing = (inc >= 0.1) if finite(base) else np.zeros(shape, bool)
+        grow = ok(sat) >= 1.0
+        lifted = ok(lift) >= 0.5
+        banded = ok(band) >= 2.0
+        lvl = np.zeros(shape, np.float32)
+        lvl[grow] = 1
+        lvl[lifted] = 2
+        lvl[snowing] = 3
+        lvl[snowing & lifted] = 4
+        lvl[snowing & lifted & banded] = 5
+        known = (np.isfinite(sat) if finite(sat) else np.zeros(shape, bool)) | (np.isfinite(cum) if finite(base) else np.zeros(shape, bool))
+        lvl[~known] = np.nan
+        res["snow_prod"] = lvl
+        res["snow_prod_h"] = winter.impact_hours(np.where(np.isfinite(lvl), (lvl >= 4).astype(np.float32), np.nan))
     ps, pi, pz, pr = (out.get(k) for k in ("psnow", "psleet", "pfrzr", "prain"))
     if all(finite(a) for a in (ps, pi, pz, pr)):
         wet = (np.nan_to_num(ps) + np.nan_to_num(pi) + np.nan_to_num(pz) + np.nan_to_num(pr)) > 0

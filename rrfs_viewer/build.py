@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from . import encode, grib, hrrr as hrrr_mod, pipeline
-from .catalog import BY_KEY, GROUPS, PRODUCTS, STORE
+from .catalog import BY_KEY, FAMILIES, GROUPS, PRODUCTS, STORE
 from .config import EDGE_M, FILE_2D, FILE_HSFC, MEMBERS, MIN_SEP_M, OUT_DX_M, frames
 from .s3 import S3Source
 
@@ -319,7 +319,7 @@ def main(argv=None) -> int:
         "valid": [iso(cycle + timedelta(hours=h)) for h in F],
         "grid": {"nx": nx, "ny": ny}, "overlay": "overlay.png", "counties": "counties.png", "overlay_px": list(basemap.OVERLAY_PX),
         "sources": {s: {"label": SOURCE_LABELS[s], "ok": bool(results.get(s, ({}, {}))[0])} for s in ["refs", *MEMBERS]},
-        "members": list(MEMBERS), "groups": list(GROUPS),
+        "members": list(MEMBERS), "groups": list(GROUPS), "families": [{"name": n, "groups": list(g)} for n, g in FAMILIES],
         "hrrr": {"ok": bool(results.get("hrrr", ({}, {}))[0]), "frames": results.get("hrrr", ({}, {}))[1].get("frames", 0), "max_fhr": hrrr_mod.HRRR_MAX_FHR},
         "basemap": basemap_block, "stations": basemap.station_layout(rg.x, rg.y), "stations_all": basemap.station_all(rg.x, rg.y), "lines": "data/lines.bin", "gis": gis_file,
         "station_px": {"sep": round(MIN_SEP_M / ((basemap.EXTENT[1] - basemap.EXTENT[0]) / basemap.OVERLAY_PX[0]), 3),
@@ -329,7 +329,7 @@ def main(argv=None) -> int:
             "desc": p.desc, "decimals": p.decimals, "dtype": p.dtype, "lo": p.lo, "step": p.step, "refs": p.refs,
             "levels": p.style.levels, "colors": p.style.colors, "ticks": p.style.ticks, "equal": p.style.equal_width, "classes": p.style.classes,
             "thr": list(p.thr), "thr_dir": p.thr_dir, "available": avail[p.key],
-            "pmm": p.pmm, "sam": p.sam, "single": p.single, "lines": [list(l) for l in p.lines], "cat": p.cat, "has1h": p.has1h, "step1h": (p.step1h or p.step) if p.has1h else None,
+            "pmm": p.pmm, "sam": p.sam, "single": p.single, "lines": [list(l) for l in p.lines], "names": list(p.names), "cat": p.cat, "has1h": p.has1h, "step1h": (p.step1h or p.step) if p.has1h else None,
             "available_1h": avail.get(p.key + "_1h", {}) if p.has1h else {},
         } for p in PRODUCTS],
         "stats": {"data_bytes": total, "overlay_bytes": overlay_bytes, "counties_bytes": counties_bytes,

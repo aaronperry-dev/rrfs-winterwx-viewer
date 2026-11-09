@@ -38,6 +38,7 @@ class Product:
     sam: bool = False           # offers SAM / SAM-LPM (experimental spatially aligned means): liquid and snowfall amounts only
     pmm: bool = False           # offers PMM / LPMM: set below for the precipitation-amount products (liquid, snow and ice accumulations)
     single: str = ""            # a product that has ONE source that is not the REFS mean or an RRFS member ("HRRR"): it is stored in the single-source slot and shown under this name
+    names: tuple = ()           # class names for an ordinal product, one per colour block of the legend (the page prints them under the colour bar and in the readout)
     lines: tuple = ()           # significance lines the page draws over the map (physical-unit views only): ((value, "label"), ...)
 
     @property
@@ -49,6 +50,7 @@ _P = Product
 G_PRECIP, G_RADAR, G_SNOW, G_SLR, G_MIX, G_DGZ, G_WIND, G_TEMP = ("Precipitation", "Reflectivity", "Snowfall", "Snow ratio (SLR)", "Ice & p-type",
                                                                   "Snow growth (DGZ)", "Wind & blizzard", "Temperature")
 # groups added after the originals (the original groups keep their order and position)
+G_PRODUCTION = "Snow production"
 G_LEVEL, G_LOW, G_FORCE, G_PROF, G_TIME, G_IMPACT, G_HRRR = ("Snow level & wet bulb", "Low-level cold air", "Forcing & banding", "P-type from profiles",
                                                           "Timing", "Joint impacts", "HRRR (hi-res, to 48 h)")
 
@@ -351,6 +353,22 @@ _ADDED: tuple[Product, ...] = (
        "Hours so far (3-hour blocks) with at least 0.02 in of freezing rain in the block and a gust of 30 mph or more at the valid time, in the same member: glaze on lines and "
        "trees that is also being blown around. Computed member by member, so the probability map is the chance that both happen together.", (3, 6), "ge",
        "Freezing Rain + Gusts 30 mph (hours)"),
+    # ------------------------------------------------------------------ snow production (member by member, from the finished frames)
+    _P("snow_prod", "Snow production", G_PRODUCTION, "level", "inst", C.SNOW_PROD, "u8", 0.0, 1.0, 0, False,
+       "Where snow is being produced, or is set up to be, on a five-step scale made from ingredients the model already has, member by member. "
+       "1 Growth zone only: a moist snow-growth layer (at least 1 kft deep, -12 to -18 C, ice-saturated) but no lift in it and no snow reaching the ground. "
+       "2 Lift, not snowing yet: that growth layer also has ascent (the Moist DGZ with lift map, at least 0.5 kft) while the model shows little snow reaching the ground: "
+       "production aloft, snow likely to follow or sublimating on the way down. "
+       "3 Snowing: the model snowfall in the 3-hour block is at least 0.1 in. "
+       "4 Snowing with lift: step 3 under a lifted, moist growth zone: efficient production. "
+       "5 Banded: step 4 where the banding-potential composite is at least 2 as well (forcing, saturation and growth temperatures together). "
+       "The ascent is the deterministic run's, as for the other lift maps, so without it steps 2, 4 and 5 are missing. "
+       "Use Probability for how likely it is that production reaches a level (the default is level 3 or more), and Maximum for the strongest member.",
+       (2, 3, 4), "ge", "Snow Production (level)", names=("Growth zone only", "Lift, not snowing yet", "Snowing", "Snowing with lift", "Banded")),
+    _P("snow_prod_h", "Hours of efficient production", G_PRODUCTION, "h", "max", C.IMPACT_H, "u8", 0.0, 0.25, 0, False,
+       "Hours so far (3-hour blocks) at snow-production level 4 or 5: snow reaching the ground from a moist growth zone that also has lift. "
+       "A long stretch of this is what builds a big, fluffy storm total. Computed member by member, so the probability map is the chance of at least that many hours.",
+       (3, 6, 12), "ge", "Hours of Efficient Snow Production"),
     # ------------------------------------------------------------------ HRRR (single source: shown under the name HRRR; its own regrid; to 48 h, hourly)
     _P("hr_snow", "HRRR snowfall", G_HRRR, "in", "cum", C.SNOW, "u16", 0.0, 0.05, 1, False,
        "HRRR physical snow accumulation (ASNOW: variable snow-liquid ratio). A single deterministic run, hourly; the forecast stops at F048 (cycles 00, 06, 12, 18 UTC).",
@@ -420,3 +438,16 @@ ONE_HOUR = tuple(replace(p, key=p.key + "_1h", label=p.label + " (1 h)", has1h=F
 STORE = PRODUCTS + ONE_HOUR
 BY_KEY = {p.key: p for p in STORE}
 GROUPS = tuple(dict.fromkeys(p.group for p in PRODUCTS))
+
+# How the page presents the groups: a family tab row on top, then (for a family with several groups) a row of its groups, then the products.  Display only: the
+# groups, product keys and storage are unchanged, so existing links and data keep working.  Every group is in exactly one family (tests/test_groupa.py).
+FAMILIES = (
+    ("Precipitation & Radar", (GROUPS[0], GROUPS[1])),
+    ("Snowfall", ("Snowfall", "Snow ratio (SLR)")),
+    ("Snow Growth & Production", ("Snow growth (DGZ)", G_FORCE, G_PRODUCTION)),
+    ("Precipitation Type", ("Ice & p-type", G_PROF)),
+    ("Temperature & Thermal", ("Temperature", G_LEVEL, G_LOW)),
+    ("Wind", ("Wind & blizzard",)),
+    ("Timing & Impacts", (G_TIME, G_IMPACT)),
+    ("HRRR", (G_HRRR,)),
+)

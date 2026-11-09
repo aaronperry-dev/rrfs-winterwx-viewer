@@ -247,6 +247,8 @@ CSI = ramp_style([(0.01, "#fde3f3"), (0.1, "#f08ac8"), (0.3, "#c02a8c"), (0.7, "
 # Forecast hour of an event (run start 0 h): early = warm yellow, late = dark.
 TIME_H = ramp_style([(0, "#fff7bc"), (12, "#fec44f"), (24, "#fe9929"), (36, "#d95f0e"), (48, "#993404"), (60, "#3d1602")],
                     [3, 6, 9, 12, 15, 18, 21, 24, 30, 36, 42, 48, 54, 60], ticks=[6, 12, 18, 24, 36, 48, 60])
+SNOW_PROD_COLORS = ["#cfd8e3", "#b9a3e3", "#6db6f0", "#1f6fd1", "#7a1fa2"]                       # growth zone only, lift (not snowing yet), snowing, snowing with lift, banded
+SNOW_PROD = Style([1, 2, 3, 4, 5, 6], [None, *SNOW_PROD_COLORS, SNOW_PROD_COLORS[-1]], [1, 2, 3, 4, 5, 6], True)
 IMPACT_H = ramp_style([(3, "#ffd9b3"), (6, "#ff9a4a"), (12, "#d2381e"), (24, "#7a1630"), (36, "#2a0a2a")], [3, 6, 9, 12, 18, 24, 36], ticks=[3, 6, 12, 24, 36])
 
 
