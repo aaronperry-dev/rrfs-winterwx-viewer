@@ -69,3 +69,8 @@ def test_every_group_is_in_exactly_one_family():
 
 def test_page_uses_families_and_names():
     assert "D.families" in HTML and "style.names" in HTML
+
+
+def test_value_tip_names_only_for_ordinal_products():
+    """Every other product has names = [] in the manifest (an empty array is truthy in JS): the readout must test its length."""
+    assert "current.v.style.names && current.v.style.names.length" in HTML
