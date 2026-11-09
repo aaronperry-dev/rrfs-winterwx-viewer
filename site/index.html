@@ -774,8 +774,8 @@ function reduceCat(arrs, mode) {                            // "mean": linear-Z 
 }
 async function viewField(mode, fi = state.frame, opt = {}) {           // -> { values, style, unit, dec } or { error }
   const p = prod(), win = p.kind === "cum" ? state.win : 0, plain = { style: p, unit: p.unit, dec: p.decimals };
-  const hmax = D.hrrr && D.hrrr.max_fhr, none = p.single && hmax && D.frames[fi] > hmax
-    ? `${p.single} runs to F${String(hmax).padStart(3, "0")} on this cycle: pick an earlier hour.` : "No data for this field at this time (the source file does not provide it).";
+  const hmax = D.hrrr && D.hrrr.max_fhr;
+  const none = p.single && hmax && D.frames[fi] > hmax ? `${p.single} runs to F${String(hmax).padStart(3, "0")} on this cycle: pick an earlier hour.` : "No data for this field at this time (the source file does not provide it).";
   if (mode === "refs" || mode.startsWith("m0")) {
     const values = await srcField(p, mode, fi, win);
     if (!values) return { error: mode === "refs" ? "The official REFS mean file does not carry this field - use the member mean." : `${mode} has no data for this field.` };
@@ -1248,8 +1248,8 @@ function fzSmooth(a) {                                       // one pass of a 3 
 }
 async function fzT2(t2, p, mode, fi) {                       // the 2 m temperature that matches the view: REFS, one member, or the mean of the members that are switched on
   if (p.single) return t2.available.refs ? srcField(t2, "refs", fi, 0) : null;
-  if (mode === "refs" && t2.available.refs) return srcField(t2, "refs", fi, 0);
   if (mode.startsWith("m0")) return t2.available[mode] ? srcField(t2, mode, fi, 0) : null;
+  if (t2.available.refs) return srcField(t2, "refs", fi, 0);                              // the REFS mean file: one download instead of five for every ensemble view
   const mem = activeMembers().filter(m => t2.available[m]); if (!mem.length) return null;
   const key = `${fi}|${mem.join()}`; let e = fzMean.get(key);
   if (!e) {
@@ -1491,16 +1491,20 @@ async function render() {
   if (state.layout !== "map") { plumes(); return renderStamps(token, p); }
   clearTimeout(loadTimer);                                   // keep the old map on screen unless the new one is slow
   const showMsg = text => { if (token === renderToken) { msg.hidden = false; msg.textContent = text; } };
-  if (!current) showMsg("Loading…"); else loadTimer = setTimeout(() => showMsg("Computing…"), 250);
+  const cold = !hasMembers(p) ? !store.has(`${p.key}.refs`) : D.members.some(m => state.on[m] && !store.has(`${p.key}.${m}`));          // (added) data still to download: say so, and only after a pause (a brief recompute should not flash a message)
+  if (!current) showMsg("Loading…"); else loadTimer = setTimeout(() => showMsg(cold ? "Loading data…" : "Computing…"), cold ? 600 : 900);
   let v;
   try { v = await viewField(mode, state.frame, { tok: token }); } catch (e) { clearTimeout(loadTimer); showMsg("Could not load data (" + e.message + ")"); return; }
   if (token !== renderToken) return;
   clearTimeout(loadTimer);
   if (v.error) { msg.textContent = v.error; msg.hidden = false; current = null; syncExport(); tiles(null); plumes(); return; }
   msg.hidden = true;
-  v.fz = await freezeFor(p, mode, state.frame, v); if (token !== renderToken) return;        // (added) the 0 °C line's temperature field
+  const fzp = freezeFor(p, mode, state.frame, v), fz0 = await Promise.race([fzp, new Promise(r => setTimeout(() => r(undefined), 120))]);      // (added) the 0 °C line: not worth holding the map back for
+  if (token !== renderToken) return;
+  if (fz0 !== undefined) v.fz = fz0;
   const more = coverageNotes(v, p, mode); if (more.length) { notice.hidden = false; notice.textContent = [...notes, ...more].join(" "); }
   drawMain($("#map").getContext("2d"), v, mode, true);
+  if (fz0 === undefined) fzp.then(f => { if (current && current.v === v && token === renderToken) { v.fz = f; drawMain($("#map").getContext("2d"), v, mode, true, view); } });     // the line arrives later: redraw
   current = { v, mode, hdr: header(mode) };                 // the title block is captured with the map it describes (the state may move on while the next map computes)
   syncExport(); tiles(v); plumes(); evictOthers(); prefetch();
 }
