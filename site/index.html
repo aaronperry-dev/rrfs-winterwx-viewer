@@ -88,7 +88,7 @@
   #mh-run { font: 13px/1.35 ui-monospace, Menlo, Consolas, monospace; white-space: pre; text-align: left; }
   .mapcard { position: relative; background: #fff; border: 1px solid var(--line); overflow: hidden; }
   .mapcard canvas { display: block; width: 100%; height: auto; cursor: crosshair; }
-  .mapcard .msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px;
+  .mapcard .msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 20px 20px 20px 84px;
                   background: rgba(255,255,255,.84); color: #1c2128; font-size: 15px; }
   .zoomctl { position: absolute; left: 3.2%; top: 3.4%; display: flex; flex-direction: column; gap: 4px; align-items: stretch; z-index: 2; width: 38px; }
   .zoomctl button { appearance: none; border: 1px solid #7d8791; border-radius: 5px; background: rgba(255,255,255,.94); color: #1c2128; font: 700 18px/1 var(--font);
@@ -774,7 +774,8 @@ function reduceCat(arrs, mode) {                            // "mean": linear-Z 
 }
 async function viewField(mode, fi = state.frame, opt = {}) {           // -> { values, style, unit, dec } or { error }
   const p = prod(), win = p.kind === "cum" ? state.win : 0, plain = { style: p, unit: p.unit, dec: p.decimals };
-  const none = "No data for this field at this time (the source file does not provide it).";
+  const hmax = D.hrrr && D.hrrr.max_fhr, none = p.single && hmax && D.frames[fi] > hmax
+    ? `${p.single} runs to F${String(hmax).padStart(3, "0")} on this cycle: pick an earlier hour.` : "No data for this field at this time (the source file does not provide it).";
   if (mode === "refs" || mode.startsWith("m0")) {
     const values = await srcField(p, mode, fi, win);
     if (!values) return { error: mode === "refs" ? "The official REFS mean file does not carry this field - use the member mean." : `${mode} has no data for this field.` };
@@ -2072,7 +2073,7 @@ $("#map").addEventListener("mousemove", ev => {
   const cell = current && cellAt(ev);
   if (!cell) { tip.hidden = true; return; }
   const v = current.v.values[cell.r * D.grid.nx + cell.c];
-  tip.hidden = v !== v; if (v === v) { tip.textContent = current.v.style.cat ? (v < 5 ? "No echo" : `${PTYPE_NAMES[current.v.values.cls[cell.r * D.grid.nx + cell.c]]} · ${Math.round(v)} dBZ`) : (current.v.style.names ? `${v < 1 ? "None" : current.v.style.names[Math.min(Math.floor(v + 1e-6), current.v.style.names.length) - 1]} · ${fnum(v, current.v.dec)}` : `${fnum(v, current.v.dec)} ${current.v.unit}`); tip.style.left = ev.clientX + 14 + "px"; tip.style.top = ev.clientY + 12 + "px"; }
+  tip.hidden = v !== v; if (v === v) { tip.textContent = current.v.style.cat ? (v < 5 ? "No echo" : `${PTYPE_NAMES[current.v.values.cls[cell.r * D.grid.nx + cell.c]]} · ${Math.round(v)} dBZ`) : (current.v.style.names && current.v.style.names.length ? `${v < 1 ? "None" : current.v.style.names[Math.min(Math.floor(v + 1e-6), current.v.style.names.length) - 1]} · ${fnum(v, current.v.dec)}` : `${fnum(v, current.v.dec)} ${current.v.unit}`); tip.style.left = ev.clientX + 14 + "px"; tip.style.top = ev.clientY + 12 + "px"; }
 });
 $("#map").addEventListener("mouseleave", () => { $("#tip").hidden = true; });
 $("#map").addEventListener("click", ev => { if (dragged) { dragged = false; return; } const cell = cellAt(ev); if (cell) { state.point = cell; plumeLoc = "map"; if (current) { drawMain($("#map").getContext("2d"), current.v, current.mode, true); } plumes(); writeUrl(); } });
