@@ -446,7 +446,7 @@ class BlizzardClock:
 
 
 def precip_fractions(csnow, cicep, cfrzr):
-    """Exclusive precipitation-type weights (rain-or-none, snow, sleet, freezing rain) from the categorical flags.
+    """Exclusive precipitation-type weights (snow, sleet, freezing rain; rain is whatever is left) from the categorical flags.
 
     Priority: freezing rain > sleet > snow, so a column flagged for several types is not double counted.
     """

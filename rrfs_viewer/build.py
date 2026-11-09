@@ -15,7 +15,7 @@ import shutil
 import sys
 import tempfile
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -76,10 +76,12 @@ def _run_source(args) -> tuple[str, dict[str, bytes], dict]:
         path = Path(lift_dir) / LIFT_FILE
         lift = np.load(path, mmap_mode="r") if path.exists() else None
         arrays, info = pipeline.process_member(src, cycle, source, rg, max_fhr, tick, lift=lift)
-    blobs = {}
-    for key, a in arrays.items():
-        if np.isfinite(a).any():
-            blobs[key] = encode.pack(encode.quantize(a, BY_KEY[key]))
+    # Packing (gzip level 9) is about half of the CPU time a member spends after the download: zlib releases the GIL, so a few threads compress products side by side.
+    # The bytes are exactly those of the serial loop (each product is packed on its own).
+    todo = [(key, a) for key, a in arrays.items() if np.isfinite(a).any()]
+    pack = lambda item: (item[0], encode.pack(encode.quantize(item[1], BY_KEY[item[0]])))
+    with ThreadPoolExecutor(max(1, min(4, os.cpu_count() or 1))) as ex:
+        blobs = dict(ex.map(pack, todo))
     info["seconds"] = round(time.time() - t0, 1)
     return source, blobs, info
 
@@ -104,17 +106,23 @@ def code_version() -> str:
     import hashlib
     h = hashlib.sha1()
     root = Path(__file__).resolve().parent
-    for f in sorted([*root.glob("*.py"), root / "data" / "stations.csv", SITE_DIR / "index.html"]):
+    # every data table that ends up on the page counts (towns, peaks, stations ...), not only stations.csv: editing places.csv or peaks.csv must redeploy
+    for f in sorted([*root.glob("*.py"), *(root / "data").glob("*.csv"), SITE_DIR / "index.html"]):
         h.update(f.name.encode())
         h.update(f.read_bytes())
     return h.hexdigest()[:12]
 
 
 def deployed_manifest(url: str) -> dict | None:
-    """The live site's data.json, or None when it cannot be read - then we simply build."""
+    """The live site's data.json, or None when it cannot be read - then we simply build.
+
+    GitHub Pages caches files at its CDN for about 10 minutes, and a run that starts right after a deployment (the +4h30 retry queued behind the first run)
+    could otherwise read the previous cycle's manifest and rebuild for nothing: a throw-away query string and no-cache headers get the current file.
+    """
     import urllib.request
     try:
-        with urllib.request.urlopen(url.rstrip("/") + "/data.json", timeout=20) as r:
+        req = urllib.request.Request(f"{url.rstrip('/')}/data.json?nocache={int(time.time())}", headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
+        with urllib.request.urlopen(req, timeout=20) as r:
             return json.load(r)
     except Exception as e:                       # first run, Pages not enabled yet, network hiccup ...
         log.info("could not read the deployed manifest (%s)", e)
@@ -125,8 +133,11 @@ def up_to_date(manifest: dict | None, cycle_iso: str, code: str, complete: list[
     """Skip the build only when the live site shows this cycle, was built by this version of the code, and is not demo data.
 
     ``complete``: the sources that have finished publishing; a cycle built while a member was still missing is rebuilt once it is there.
+    A source that *failed* during that build (a transient S3 error, a file that was not readable yet) is not "up to date" either: the next scheduled
+    run (+4h30 / +5h30) tries it again instead of leaving the site without that member until the next cycle.
     """
-    return (bool(manifest) and not manifest.get("demo") and manifest.get("cycle") == cycle_iso and manifest.get("code") == code
+    failed = [s for s in ((manifest or {}).get("errors") or {}) if s in ("refs", *MEMBERS)]      # (HRRR is optional and may fail for good: it does not force rebuilds)
+    return (bool(manifest) and not manifest.get("demo") and manifest.get("cycle") == cycle_iso and manifest.get("code") == code and not failed
             and (complete is None or manifest.get("complete") is None or sorted(manifest["complete"]) == sorted(complete)))
 
 
@@ -202,11 +213,8 @@ def main(argv=None) -> int:
     partial = False
     if args.cycle:
         cycle = datetime.strptime(args.cycle, "%Y%m%d%H").replace(tzinfo=timezone.utc)
-    else:
-        cycle = pipeline.find_cycle(src, now, args.max_fhr)
-        if cycle is None:                                  # no cycle is complete everywhere: take the newest one most members have finished
-            cycle = pipeline.find_cycle(src, now, args.max_fhr, min_members=MIN_MEMBERS)
-            partial = cycle is not None
+    else:                                                  # the newest cycle complete everywhere; a newer one with >= MIN_MEMBERS members once it is PARTIAL_AFTER_H old
+        cycle, partial = pipeline.choose_cycle(src, now, args.max_fhr, MIN_MEMBERS)
     if cycle is None:
         log.error("no usable RRFS/REFS cycle (through F%03d, at least %d members) found in the last 48 h", args.max_fhr, MIN_MEMBERS)
         return 1
@@ -255,7 +263,7 @@ def main(argv=None) -> int:
             results[s] = (blobs, info)
             _report(s, blobs, info)
 
-    # the deterministic lift first (the members read it), in parallel with the REFS mean, then the members
+    # the deterministic lift first (the members read it), in parallel with the REFS mean and HRRR, then the members
     first = [] if args.no_lift else ["det"]
     first += [s for s in sources if s == "refs"]
     first += ["hrrr"] if use_hrrr else []
@@ -265,11 +273,28 @@ def main(argv=None) -> int:
             for s in first + rest:
                 collect(*run_source(mk(s)))
         else:
+            # Only the members need the lift, so they start the moment the lift is written; the REFS mean and HRRR (which nobody waits for) run alongside
+            # them instead of holding them back behind a barrier, and the fifth member no longer runs alone while three workers sit idle.
             with ProcessPoolExecutor(args.workers, mp_context=mp.get_context("spawn")) as pool:
-                for out_ in pool.map(run_source, [mk(s) for s in first]):
-                    collect(*out_)
-                for out_ in pool.map(run_source, [mk(s) for s in rest]):
-                    collect(*out_)
+                who = {pool.submit(run_source, mk(s)): s for s in first}
+                lift_wait = {f for f, s in who.items() if s == "det"}
+                if not lift_wait:                                   # no lift requested: nothing to wait for
+                    who.update({pool.submit(run_source, mk(s)): s for s in rest})
+                    rest = []
+                pending = set(who)
+                while pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for f in done:
+                        try:
+                            collect(*f.result())
+                        except Exception as exc:                    # a worker process that died (out of memory ...): that source is lost, the others go on
+                            log.error("%s: worker failed (%s: %s)", who[f], type(exc).__name__, exc)
+                            collect(who[f], {}, {"bytes": 0, "requests": 0, "seconds": 0, "missing": {}, "hints": {}, "error": f"{type(exc).__name__}: {exc}"})
+                        if f in lift_wait and rest:                 # the lift file is complete (or the lift failed): release the members
+                            new = {pool.submit(run_source, mk(s)): s for s in rest}
+                            who.update(new)
+                            pending |= set(new)
+                            rest = []
     finally:
         shutil.rmtree(lift_dir, ignore_errors=True)
 
@@ -343,6 +368,12 @@ def main(argv=None) -> int:
     (out / ".nojekyll").touch()
     ok = [s for s in sources if results[s][0]]
     log.info("done in %.0fs: %d sources ok, data %.1f MB, overlay %.0f kB", time.time() - t0, len(ok), total / 1e6, overlay_bytes / 1e3)
+    wanted = [s for s in sources if s in MEMBERS]
+    if sum(1 for s in wanted if results[s][0]) < min(MIN_MEMBERS, len(wanted)):
+        # (a lost worker process or an S3 outage must not replace a good site with one that has two members, or only the REFS mean: the run fails, the live site stays, the next run retries)
+        log.error("only %d of %d members were built (at least %d are needed): this build is not published",
+                  sum(1 for s in wanted if results[s][0]), len(wanted), min(MIN_MEMBERS, len(wanted)))
+        return 1
     return 0 if ok else 1
 
 
