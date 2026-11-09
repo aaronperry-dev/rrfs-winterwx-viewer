@@ -236,8 +236,10 @@ Designed so that scheduled generation is never stopped by GitHub:
   `concurrency` group prevents overlap.
 * Data is never committed; the site is built in the runner and deployed with `upload-pages-artifact` + `deploy-pages`. The
   deployed site is on the order of 100 MB (see *Size*), far under the 1 GB Pages limit, and the repo itself stays tiny.
-* Runs are scheduled about 3 h 50 min after each cycle (03:50, 09:50, 15:50, 21:50 UTC), with retries at +4 h 30 and +5 h 30 for slow cycles. A run that finds the site already showing the newest complete cycle
-  exits in about a minute without deploying (`--skip-if-deployed`).
+* Runs are scheduled about 3 h 50 min after each cycle (03:50, 09:50, 15:50, 21:50 UTC), with retries at +4 h 30 and +5 h 30 for slow cycles (on the live bucket the last file of a cycle, the REFS mean F60, has appeared 3 h 10 min - 3 h 35 min after
+  the cycle time). If a member still has not finished the newest cycle at the +5 h 30 run, that cycle is published with the members it has (at least three; a late member
+  is added by a later run) instead of leaving the site on the previous cycle. A run that finds the site already showing the newest complete cycle
+  exits in about a minute without deploying (`--skip-if-deployed`); a build in which a member failed is retried by the next run.
 * GitHub disables scheduled workflows in public repos after 60 days without repository activity. A best-effort step re-enables
   the workflow on every run. If scheduled runs stop anyway, push any commit or press *Run workflow*.
 

@@ -752,3 +752,28 @@ def find_cycle(src: S3Source, now: datetime, max_fhr: int, lookback: int = 8, mi
         elif sum(s != "refs" for s in complete_sources(src, cyc, max_fhr)) >= min_members:
             return cyc
     return None
+
+
+# The newest cycles have been seen on S3 about 3 h 10 min - 3 h 35 min after the cycle time (REFS mean F60 last, ~3 h 35 min); the first scheduled run is at +3 h 50 min and
+# the last retry at +5 h 30 min.  A cycle that still lacks a member after this many hours is published with the members it has (see ``choose_cycle``).
+PARTIAL_AFTER_H = 5.0
+
+
+def choose_cycle(src: S3Source, now: datetime, max_fhr: int, min_members: int = 3, partial_after_h: float = PARTIAL_AFTER_H) -> tuple[datetime | None, bool]:
+    """``(cycle, partial)``: the cycle to build, and whether it is published without every source.
+
+    The newest cycle that is complete everywhere wins - unless a *newer* cycle has at least ``min_members`` complete members and is already ``partial_after_h``
+    hours old: then a member that stopped publishing no longer pins the site to an older cycle (up to 48 h old) and the newer cycle goes out with the members it has
+    (a late member is added by a later run, because ``complete`` then differs from the deployed manifest).  With no complete cycle at all the weaker rule applies at any age.
+    """
+    strict = find_cycle(src, now, max_fhr)
+    base = now.replace(minute=0, second=0, microsecond=0)
+    base -= timedelta(hours=base.hour % 6)
+    if strict == base:                                           # the newest possible cycle is complete: nothing to weigh
+        return strict, False
+    loose = find_cycle(src, now, max_fhr, min_members=min_members)
+    if loose is None or loose == strict:
+        return strict, False
+    if strict is None or now - loose >= timedelta(hours=partial_after_h):
+        return loose, True
+    return strict, False
