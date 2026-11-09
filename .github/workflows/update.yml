@@ -1,8 +1,9 @@
 name: Update RRFS winter dashboard
 
-# RRFS / REFS cycles run at 00, 06, 12 and 18 UTC.  A run starts about 3h50m after each cycle (the 60-hour forecast is on S3 ~3.5 h
-# after the cycle), and retries at +4h30 and +5h30 in case it is late.  A run that finds the live site already showing the newest complete
-# cycle exits after ~1 minute without touching Pages (see --skip-if-deployed); it also rebuilds when the code changed.
+# RRFS / REFS cycles run at 00, 06, 12 and 18 UTC.  A run starts about 3h50m after each cycle (the last file, the 60-hour REFS mean, has been on S3
+# 3h10m-3h35m after the cycle) and retries at +4h30 and +5h30 in case it is late; at the +5h30 run a cycle that still lacks a member (3+ present) is
+# published with the members it has (pipeline.PARTIAL_AFTER_H).  A run that finds the live site already showing the newest complete
+# cycle exits after ~1 minute without touching Pages (see --skip-if-deployed); it also rebuilds when the code changed or a member failed.
 on:
   push:
     branches: [main]            # a code change rebuilds the site (README-only pushes are skipped: same cycle, same code fingerprint)
