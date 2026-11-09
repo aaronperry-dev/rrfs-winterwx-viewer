@@ -220,7 +220,7 @@ def member(rg):
 
 
 GROUP_A = ("tw2", "snowlvl", "snowlvl_agl", "frzlvl", "mslp", "thk_1000_850", "thk_850_700", "thk_1000_500", "t925", "t850", "w925", "w850", "inversion", "fronto700", "band_pot", "csi",
-           "bsnow", "brain", "bsleet", "bfrzr", "bagree", "t_start", "t_end", "t_rate05", "t_rate10", "imp_wetwind", "imp_ice_wind")
+           "bsnow", "brain", "bsleet", "bfrzr", "bagree", "t_start", "t_end", "t_rate05", "t_rate10", "imp_wetwind", "imp_ice_wind", "snow_prod", "snow_prod_h")
 
 
 def test_member_produces_group_a_fields(member):
@@ -230,6 +230,7 @@ def test_member_produces_group_a_fields(member):
     # plausibility of the invented storm
     assert 940 < np.nanmin(out["mslp"]) and np.nanmax(out["mslp"]) < 1060
     assert 100 < np.nanmin(out["thk_1000_850"]) and np.nanmax(out["thk_1000_850"]) < 160
+    assert np.nanmin(out["snow_prod"]) >= 0 and np.nanmax(out["snow_prod"]) <= 5 and np.nanmax(out["snow_prod"]) >= 3     # the demo storm snows
     assert 480 < np.nanmin(out["thk_1000_500"]) and np.nanmax(out["thk_1000_500"]) < 595
     assert np.nanmin(out["thk_1000_500"] - out["thk_1000_850"] - out["thk_850_700"]) > 0      # the 700-500 hPa layer is what is left over
     tw, t2 = out["tw2"][0], out["t2"][0]
