@@ -62,8 +62,12 @@ def test_freezing_line_smoothing_and_specs():
     out = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
     assert out["same"] and out["nan"] and out["far"] == 10
     assert abs(out["centre"] - (40 + 8 * 10) / 9) < 1e-4                    # a lone warm cell is spread over its 3 x 3 neighbourhood
-    # every map gets the line: the 2 m temperature (or HRRR's) is the fallback, the temperature maps use their own field
-    assert 'const FZ_T2 = [32, "32 °F (0 °C) 2 m temperature"' in HTML
-    for k in ("t2", "hr_t2", "tw2", "hr_tw2", "t925", "t850"):
-        assert re.search(rf"\b{k}: \[(32|0),", HTML)
-    assert '["z", "0 °C line"]' in HTML and "z: true," in HTML                 # a Map Layers switch, on by default
+    # every map gets the lines: the 2 m temperature (or HRRR's) is the fallback, the temperature maps use their own field
+    assert 'const FZ_T2 = [FZ_F, "2 m temperature"]' in HTML
+    assert '[32, "32 °F (0 °C)", "32°F", FZ_RED]' in HTML and '[0, "0 °F (-17.8 °C)", "0°F", FZ_BLUE]' in HTML          # red at 32 °F, blue at 0 °F
+    assert '[0, "0 °C (32 °F)", "0°C", FZ_RED]' in HTML and '[-17.78, "-17.8 °C (0 °F)", "-17.8°C", FZ_BLUE]' in HTML
+    for k in ("t2", "hr_t2", "tw2", "hr_tw2"):
+        assert re.search(rf"\b{k}: \[FZ_F,", HTML)
+    for k in ("t925", "t850"):
+        assert re.search(rf"\b{k}: \[FZ_C,", HTML)
+    assert '["z", "0 °C / 0 °F lines"]' in HTML and "z: true," in HTML                 # a Map Layers switch, on by default
