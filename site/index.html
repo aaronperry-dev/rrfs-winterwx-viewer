@@ -1027,7 +1027,7 @@ function strokeLines(ctx, x, y, w, h, vw, counties) {   // counties = true: only
   ctx.restore();
 }
 // ---- optional GIS layers (Map Layers panel): highways with route labels and cities, from data/gis.bin, loaded the first time one is switched on
-const GIS_KEYS = [["z", "0 °C line"], ["k", "Counties"], ["i", "Interstates"], ["u", "US highways"], ["s", "State highways"], ["l", "Route labels"], ["c", "Cities"], ["t", "Towns"], ["n", "City/town names"], ["p", "Peaks"]];
+const GIS_KEYS = [["z", "0 °C / 0 °F lines"], ["k", "Counties"], ["i", "Interstates"], ["u", "US highways"], ["s", "State highways"], ["l", "Route labels"], ["c", "Cities"], ["t", "Towns"], ["n", "City/town names"], ["p", "Peaks"]];
 const GIS_DEFAULT = { z: true, k: true, i: false, u: false, s: false, l: true, c: false, t: false, n: true, p: false };
 const gisOn = { ...GIS_DEFAULT };
 const gisAny = () => gisOn.i || gisOn.u || gisOn.s || gisOn.c || gisOn.t || gisOn.p;          // layers that need data/gis.bin (the counties do not)
@@ -1150,7 +1150,7 @@ function drawGisLabels(ctx, x, y, w, h, vw, stationList) {   // cities, then rou
   ctx.restore();
 }
 function buildGisPanel() {
-  const TITLES = { z: "Solid red line at 0 °C / 32 °F (the 2 m air temperature on most maps; the map's own field on the temperature maps)", k: "County lines (light gray)", l: "Route numbers on the highways (more appear as you zoom in)", t: "Smaller towns and villages (more appear as you zoom in)",
+  const TITLES = { z: "Solid red line at 0 °C / 32 °F and solid blue line at -17.8 °C / 0 °F (the 2 m air temperature on most maps; the map's own field on the temperature maps)", k: "County lines (light gray)", l: "Route numbers on the highways (more appear as you zoom in)", t: "Smaller towns and villages (more appear as you zoom in)",
     n: "Names beside the city and town dots", p: "Mountain peaks with their summit elevation" };
   const draw = () => seg($("#seg-gis"), GIS_KEYS.map(([k, label]) => ({ value: k, label, on: gisOn[k], title: TITLES[k],
     disabled: (k === "l" && !(gisOn.i || gisOn.u || gisOn.s)) || (k === "n" && !(gisOn.c || gisOn.t)) })),
@@ -1186,9 +1186,12 @@ function zoomStations(vw) {                                 // labels that fit a
 }
 const fcap = (f = state.frame) => `F${String(D.frames[f]).padStart(3, "0")}`;
 // ---------------------------------------------------------------- 0 °C / 32 °F line (added): a solid red line on every map
-const FZ_OWN = { t2: [32, "32 °F (0 °C) 2 m temperature", "32°F"], hr_t2: [32, "32 °F (0 °C) 2 m temperature", "32°F"], tw2: [32, "32 °F (0 °C) wet bulb", "32°F"], hr_tw2: [32, "32 °F (0 °C) wet bulb", "32°F"],
-                 t925: [0, "0 °C (32 °F) at 925 hPa", "0°C"], t850: [0, "0 °C (32 °F) at 850 hPa", "0°C"] };
-const FZ_T2 = [32, "32 °F (0 °C) 2 m temperature", "32°F"];
+const FZ_RED = "#e0001b", FZ_BLUE = "#0a3cc8";
+const FZ_F = [[32, "32 °F (0 °C)", "32°F", FZ_RED], [0, "0 °F (-17.8 °C)", "0°F", FZ_BLUE]];            // [value in the field's unit, key text, label on the line, colour]
+const FZ_C = [[0, "0 °C (32 °F)", "0°C", FZ_RED], [-17.78, "-17.8 °C (0 °F)", "-17.8°C", FZ_BLUE]];
+const FZ_OWN = { t2: [FZ_F, "2 m temperature"], hr_t2: [FZ_F, "2 m temperature"], tw2: [FZ_F, "2 m wet bulb"], hr_tw2: [FZ_F, "2 m wet bulb"],
+                 t925: [FZ_C, "925 hPa"], t850: [FZ_C, "850 hPa"] };
+const FZ_T2 = [FZ_F, "2 m temperature"];
 const fzMean = new Map(), fzSmoothed = new WeakMap();
 function fzSmooth(a) {                                       // one pass of a 3 x 3 mean (missing cells skipped) so single-cell speckle does not break the line into confetti
   let o = fzSmoothed.get(a); if (o) return o;
@@ -1218,7 +1221,7 @@ async function fzT2(t2, p, mode, fi) {                       // the 2 m temperat
   }
   return e;
 }
-async function freezeFor(p, mode, fi, v) {                   // -> { values, level, label, tag } | null; the map's own field when it is a temperature in physical units, else the 2 m temperature
+async function freezeFor(p, mode, fi, v) {                   // -> { values, lines: [[level, text, tag, colour], ...], what } | null; the map's own field when it is a temperature in physical units, else the 2 m temperature
   if (!gisOn.z || !v || v.error || !v.values || p.cat) return null;
   let spec = FZ_OWN[p.key], vals = null;
   if (spec && v.style === p) vals = v.values;
@@ -1227,29 +1230,33 @@ async function freezeFor(p, mode, fi, v) {                   // -> { values, lev
     fzKeep = t2.key;
     try { vals = await fzT2(t2, p, mode, fi); } catch (e) { return null; }
   }
-  return vals ? { values: fzSmooth(vals), level: spec[0], label: spec[1], tag: spec[2] } : null;
+  return vals ? { values: fzSmooth(vals), lines: spec[0], what: spec[1], present: null } : null;
 }
 function drawFreeze(ctx, v, g, vw, sc = 1) {                 // g = { x, y, w, h }: where the map sits on this canvas; sc scales the line widths
   const fz = v && v.fz; if (!fz) return;
   const { nx, ny } = D.grid, { u0, v0 } = viewOrigin(vw), z = vw.z;
   let cache = sigCache.get(fz.values); if (!cache) sigCache.set(fz.values, cache = new Map());
-  if (!cache.has(fz.level)) cache.set(fz.level, isoPolylines(fz.values, nx, ny, fz.level).filter(pl => pl.length >= 6));      // (tiny rings are dropped)
   const toXY = q => [g.x + ((q[0] + .5) / nx - u0) * z * g.w, g.y + ((1 - (q[1] + .5) / ny) - v0) * z * g.h];
-  const pls = cache.get(fz.level).map(pl => pl.map(toXY)), path = new Path2D();
-  for (const pl of pls) pl.forEach((q, i) => i ? path.lineTo(q[0], q[1]) : path.moveTo(q[0], q[1]));
+  fz.present = fz.lines.map(() => false);
   ctx.save(); ctx.beginPath(); ctx.rect(g.x, g.y, g.w, g.h); ctx.clip(); ctx.lineJoin = "round"; ctx.lineCap = "round"; ctx.setLineDash([]);
-  ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 5 * sc; ctx.stroke(path);
-  ctx.strokeStyle = "#e0001b"; ctx.lineWidth = 2.6 * sc; ctx.stroke(path);
-  if (sc >= 0.9) {
-    ctx.font = "800 12px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.lineWidth = 3.6; ctx.strokeStyle = "#fff"; ctx.fillStyle = "#b00018";
-    for (const pl of pls) {
-      let acc = 0, next = 120;
-      for (let i = 1; i < pl.length; i++) {
-        const [x0, y0] = pl[i - 1], [x1, y1] = pl[i]; acc += Math.hypot(x1 - x0, y1 - y0);
-        if (acc >= next && x1 > g.x + 24 && x1 < g.x + g.w - 24 && y1 > g.y + 12 && y1 < g.y + g.h - 12) { ctx.strokeText(fz.tag, x1, y1); ctx.fillText(fz.tag, x1, y1); next = acc + 420; }
+  fz.lines.forEach(([level, , tag, col], li) => {
+    if (!cache.has(level)) cache.set(level, isoPolylines(fz.values, nx, ny, level).filter(pl => pl.length >= 6));      // (tiny rings are dropped)
+    const all = cache.get(level); fz.present[li] = all.length > 0; if (!all.length) return;
+    const pls = all.map(pl => pl.map(toXY)), path = new Path2D();
+    for (const pl of pls) pl.forEach((q, i) => i ? path.lineTo(q[0], q[1]) : path.moveTo(q[0], q[1]));
+    ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 5.4 * sc; ctx.stroke(path);
+    ctx.strokeStyle = col; ctx.lineWidth = 3 * sc; ctx.stroke(path);
+    if (sc >= 0.9) {
+      ctx.font = "800 12px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.lineWidth = 3.6; ctx.strokeStyle = "#fff"; ctx.fillStyle = col;
+      for (const pl of pls) {
+        let acc = 0, next = 120;
+        for (let i = 1; i < pl.length; i++) {
+          const [x0, y0] = pl[i - 1], [x1, y1] = pl[i]; acc += Math.hypot(x1 - x0, y1 - y0);
+          if (acc >= next && x1 > g.x + 24 && x1 < g.x + g.w - 24 && y1 > g.y + 12 && y1 < g.y + g.h - 12) { ctx.strokeText(tag, x1, y1); ctx.fillText(tag, x1, y1); next = acc + 420; }
+        }
       }
     }
-  }
+  });
   ctx.restore();
 }
 // ---------------------------------------------------------------- significance lines (added): a labelled isoline at a physically meaningful value (e.g. the thickness rain/snow line)
@@ -1316,7 +1323,7 @@ function drawSigLines(ctx, v, vw = view) {
   ctx.restore();
 }
 function sigKey(ctx, v) {                                    // a small key at the bottom left of the map: red solid 0 °C line and the dashed significance lines
-  const rows = [...(v && v.fz ? [["#e0001b", [], v.fz.label]] : []), ...((v && v.style && v.style.lines) || []).map(l => ["#000", [9, 5], l[1]])];
+  const rows = [...(v && v.fz ? v.fz.lines.map(([, text, , col], i) => [col, [], `${text} ${v.fz.what}`]).filter((r, i) => v.fz.present ? v.fz.present[i] : true) : []), ...((v && v.style && v.style.lines) || []).map(l => ["#000", [9, 5], l[1]])];
   if (!rows.length) return;
   ctx.save(); ctx.font = "700 12px system-ui, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
   const rowH = 20, w = 54 + Math.max(...rows.map(r => ctx.measureText(r[2]).width)) + 10, h = rows.length * rowH + 8, x = MAP.x + 10, y = MAP.y + MAP.h - 10 - h;
@@ -1465,7 +1472,10 @@ async function renderStamps(token, p) {
   const lg = $("#slegend").getContext("2d"); lg.fillStyle = "#fff"; lg.fillRect(0, 0, 1200, 96);
   if (!first.error) { bold(lg, 25, 24, "RRFS winter weather", `: ${p.title} (${p.unit}) · valid ${zfmt(D.valid[state.frame])} · ${fcap()}`, 15); drawLegend(lg, 50, 40, 1000, 22, p, 12); }
   const fz0 = await freezeFor(p, "mean", state.frame, first); if (token !== renderToken) return;       // (added) key for the red 0 °C line on the small maps
-  if (fz0) { lg.strokeStyle = "#e0001b"; lg.lineWidth = 2.6; lg.beginPath(); lg.moveTo(50, 90); lg.lineTo(82, 90); lg.stroke(); lg.font = "700 12px system-ui"; lg.textAlign = "left"; lg.textBaseline = "middle"; lg.fillStyle = "#111"; lg.fillText(fz0.label, 90, 90); }
+  if (fz0) {
+    let x = 50; lg.font = "700 12px system-ui"; lg.textAlign = "left"; lg.textBaseline = "middle";
+    for (const [, text, , col] of fz0.lines) { const t = `${text} ${fz0.what}`; lg.strokeStyle = col; lg.lineWidth = 2.6; lg.beginPath(); lg.moveTo(x, 90); lg.lineTo(x + 32, 90); lg.stroke(); lg.fillStyle = "#111"; lg.fillText(t, x + 40, 90); x += 40 + lg.measureText(t).width + 24; }
+  }
   for (const [m, label] of defs) {
     const st = document.createElement("div"); st.className = "stamp"; st.tabIndex = 0;
     const isMember = m.startsWith("m0"); if (isMember && !state.on[m]) st.classList.add("off");
