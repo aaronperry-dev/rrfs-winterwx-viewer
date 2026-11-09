@@ -49,6 +49,11 @@
                     font: 600 14px/1.1 var(--font); padding: 7px 12px; cursor: pointer; }
   .subtabs button:hover:not([aria-pressed="true"]) { background: color-mix(in srgb, var(--sub) 70%, var(--blue)); }
   .subtabs button[aria-pressed="true"] { background: var(--red); border-color: var(--red); color: #fff; }
+  .subtabs.grp { padding: 0 14px 2px; gap: 4px; }                                  /* (added) the groups inside a family: lighter, text-style tabs between the family row and the products */
+  .subtabs.grp[hidden] { display: none; }
+  .subtabs.grp button { background: transparent; border: 0; border-bottom: 3px solid transparent; border-radius: 0; padding: 4px 8px; font-weight: 700; color: var(--subink); }
+  .subtabs.grp button:hover:not([aria-pressed="true"]) { background: transparent; border-bottom-color: color-mix(in srgb, var(--red) 40%, transparent); }
+  .subtabs.grp button[aria-pressed="true"] { background: transparent; border-bottom-color: var(--red); color: var(--title); }
 
   /* ---- timeline */
   .timeline { display: flex; align-items: flex-end; gap: 14px; padding: 2px 14px 10px; }
@@ -226,6 +231,7 @@
   </header>
 
   <nav class="tabs" id="seg-group" aria-label="Topic"></nav>
+  <nav class="subtabs grp" id="seg-groups" aria-label="Group" hidden></nav>
   <nav class="subtabs" id="seg-product" aria-label="Product"></nav>
 
   <section class="timeline" aria-label="Forecast time">
@@ -805,7 +811,7 @@ async function viewField(mode, fi = state.frame, opt = {}) {           // -> { v
   else if (mode === "mean" && isDbz(p)) values = meanDbz(arrs);
   else values = reduce(arrs, mode, thr, p.thr_dir);
   if (!finite(values)) return { error: none };
-  if (mode === "prob") return { values, style: PROB, unit: "%", dec: 0, thr, used, lacking };
+  if (mode === "prob") return { values, style: probStyle(p), unit: "%", dec: 0, thr, used, lacking };
   if (mode === "spread") return { values, style: spreadStyle(p), unit: p.unit, dec: Math.max(p.decimals, 1), used, lacking };
   if (mode === "pos") return { values, style: POS, unit: "km", dec: 0, used, lacking };
   return { values, ...plain, used, lacking };
@@ -823,6 +829,33 @@ function coverageNotes(v, p, mode) {                        // what was left out
 
 const PROB = { levels: [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95], ticks: [10, 30, 50, 70, 90],
   colors: [null, "#eef1fb", "#cfd8f4", "#a9bcec", "#83a0e0", "#6b86d3", "#7a6fc4", "#8f55b3", "#a83c9c", "#c02b7f", "#d6204f", "#8f0f1e"] };
+// Probability maps take their colours from the product (ColorBrewer ramps, turbo for radar, sampled to 11 colours): snow = blue to purple to pink, cold fields = blues,
+// freezing rain = pinks and purples, sleet = oranges, rain = yellow-green-blue, wind and warm = yellow to dark red, radar = turbo, forcing = purple-blue-green.
+const PROB_RAMPS = {
+  snow: ["#eaf3fb", "#bddbec", "#8cbfdc", "#559ecc", "#3977bd", "#2c4fb0", "#4845ab", "#693fa8", "#8e3fa6", "#b33da0", "#d63a97"],
+  cold: ["#e9e5f1", "#d6d6e9", "#bcc7e1", "#9ebad9", "#7bacd1", "#529bc7", "#2a88bc", "#0872b1", "#04629a", "#034f7d", "#023858"],
+  rain: ["#eef8b3", "#d4eeb3", "#aedfb6", "#7acbbc", "#50bbc2", "#2fa4c2", "#1e88bc", "#2163aa", "#24459c", "#1c2d81", "#081d58"],
+  ice: ["#fdddda", "#fccbc6", "#fbb3bb", "#f996b2", "#f770a4", "#e94b9c", "#d22891", "#b10580", "#8e017a", "#6b0173", "#49006a"],
+  sleet: ["#fee9ca", "#fddbac", "#fdcb95", "#fdb881", "#fc9863", "#f67a51", "#eb5c41", "#d93523", "#c2140d", "#a30000", "#7f0000"],
+  wind: ["#ffeea3", "#fee084", "#fecb67", "#feaf4b", "#fd9640", "#fd6e33", "#f84528", "#e61f1d", "#cd0b22", "#aa0026", "#800026"],
+  warm: ["#ffeea3", "#fee084", "#fecb67", "#feaf4b", "#fd9640", "#fd6e33", "#f84528", "#e61f1d", "#cd0b22", "#aa0026", "#800026"],
+  radar: ["#4666dd", "#3d9efe", "#1ad2d2", "#32f298", "#80ff53", "#c1f334", "#efcd3a", "#fe992c", "#f05b12", "#cc2b04", "#920b01"],
+  dyn: ["#e9e0ef", "#d6d5e8", "#bcc7e1", "#9bbad9", "#70acd1", "#4c9bc7", "#2a8cb3", "#06828e", "#01746c", "#01604e", "#014636"],
+};
+const PROB_THEME_KEYS = {
+  rain: ["qpf", "hr_qpf", "prain"], ice: ["frzr", "hr_frzr", "imp_ice_wind"], sleet: ["sleet", "hr_sleet"], radar: ["refc", "refd", "refl_ptype", "hr_refc"],
+  wind: ["gust", "wind10", "w925", "w850", "hr_gust", "vis", "hr_vis", "blizzard_now", "blizzard_dur", "imp_wetwind"], dyn: ["fronto700", "band_pot", "csi", "dgz_omega", "hr_dgz_omega", "uvv"],
+  cold: ["mslp", "hr_mslp", "inversion", "warmnose"] };
+function probTheme(p) {                                      // the ramp name for a product's probability map
+  for (const [t, keys] of Object.entries(PROB_THEME_KEYS)) if (keys.includes(p.key)) return t;
+  if (["t2", "windchill", "tw2", "hr_t2", "hr_tw2", "t925", "t850", "snowlvl", "snowlvl_agl", "frzlvl", "hr_frzlvl"].includes(p.key) || p.key.startsWith("thk_")) return p.thr_dir === "ge" ? "warm" : "cold";
+  return "snow";                                             // snowfall, snow ratio, growth zone, snow depth, snow production, timing: the snow ramp
+}
+const probStyles = {};
+function probStyle(p) {
+  const t = probTheme(p); if (!probStyles[t]) probStyles[t] = { levels: PROB.levels, ticks: PROB.ticks, colors: [null, ...PROB_RAMPS[t]] };
+  return probStyles[t];
+}
 const POS = { levels: [5, 10, 20, 30, 45, 60, 80, 100, 130, 160], ticks: [10, 30, 60, 100, 160],
   colors: [null, "#fff7bc", "#fee391", "#fec44f", "#fe9929", "#ec7014", "#cc4c02", "#993404", "#7a2a06", "#5c1d05", "#3a1203"] };
 function spreadStyle(p) {
@@ -950,6 +983,14 @@ function drawLegend(ctx, x, y, w, h, style, fs) {
   for (let i = 0; i < n; i++) { const c = style.colors[i + 1]; if (c) { ctx.fillStyle = c; ctx.fillRect(x + i * bw, y, Math.ceil(bw) + 0.5, h); } }
   ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.strokeRect(x, y, w, h);
   ctx.fillStyle = "#000"; ctx.font = `${fs}px system-ui, sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "top";
+  if (style.names && style.names.length === n && h >= 16) {            // (added) an ordinal product: the class name under each colour block instead of numbers
+    for (let i = 0; i < n; i++) {
+      const tx = x + (i + .5) * bw; if (i) { ctx.beginPath(); ctx.moveTo(x + i * bw, y); ctx.lineTo(x + i * bw, y + h); ctx.stroke(); }
+      let f = fs; ctx.font = `${f}px system-ui, sans-serif`; while (f > 8 && ctx.measureText(style.names[i]).width > bw - 4) { f--; ctx.font = `${f}px system-ui, sans-serif`; }
+      ctx.fillText(`${i + 1} ${style.names[i]}`, tx, y + h + 5);
+    }
+    return;
+  }
   for (const t of style.ticks) { const i = lv.indexOf(t); if (i < 0) continue; const tx = x + i * bw;
     ctx.beginPath(); ctx.moveTo(tx, y + h); ctx.lineTo(tx, y + h + 4); ctx.stroke(); ctx.fillText(tick(t), tx, y + h + 5); }
 }
@@ -1849,12 +1890,27 @@ function plumeText() {
 
 // ---------------------------------------------------------------- controls
 let ctlKey = "";
+const famLast = {};                                          // (added) the last product viewed in each family: its tab returns there
 function controls() {
   const p = prod(), groups = D.groups, key = [state.product, state.mode, state.win, state.lpmm, state.thr, state.layout, ...D.members.map(m => state.on[m] ? 1 : 0)].join();
   if (key === ctlKey) return updateTimeline();              // only the time changed (stepping, playing): keep the buttons, and the keyboard focus on them
   ctlKey = key;
-  seg($("#seg-group"), groups.map(g => ({ value: g, label: g })), p.group, g => { const q = D.products.find(x => x.group === g); set({ product: q.key }); });
+  const fams = D.families && D.families.length ? D.families : null;
+  if (fams) {                                               // (added) family tabs on top; the groups of a family (when it has several) in a lighter row; then the products
+    const fam = fams.find(f => f.groups.includes(p.group)) || fams[0], first = g => D.products.find(x => x.group === g);
+    famLast[fam.name] = p.key;
+    seg($("#seg-group"), fams.map(f => ({ value: f.name, label: f.name })), fam.name, name => {
+      const f = fams.find(x => x.name === name), back = famLast[name] && D.products.find(x => x.key === famLast[name]);
+      set({ product: (back || first(f.groups[0])).key });
+    });
+    const gb = $("#seg-groups"); gb.hidden = fam.groups.length < 2;
+    if (!gb.hidden) seg(gb, fam.groups.map(g => ({ value: g, label: g })), p.group, g => set({ product: first(g).key }));
+  } else seg($("#seg-group"), groups.map(g => ({ value: g, label: g })), p.group, g => { const q = D.products.find(x => x.group === g); set({ product: q.key }); });
   seg($("#seg-product"), D.products.filter(x => x.group === p.group).map(x => ({ value: x.key, label: x.label, title: x.desc })), p.key, k => set({ product: k }));
+  for (const id of ["#seg-group", "#seg-groups", "#seg-product"]) {             // (added) on a phone the rows scroll sideways: bring the chosen tab into view
+    const row = $(id), b = row && row.querySelector('[aria-pressed="true"]');
+    if (b && row.scrollWidth > row.clientWidth + 4) row.scrollLeft = Math.max(0, b.offsetLeft - (row.clientWidth - b.offsetWidth) / 2);
+  }
   $("#g-window").hidden = p.kind !== "cum";
   seg($("#seg-window"), WINDOWS.map(w => ({ value: w, label: w ? `${w} h` : "Run total", disabled: w === 1 && !p.has1h,
       title: w === 1 ? "Accumulation in the hour ending at the valid time" : undefined })), state.win, w => set({ win: w }));
@@ -2016,7 +2072,7 @@ $("#map").addEventListener("mousemove", ev => {
   const cell = current && cellAt(ev);
   if (!cell) { tip.hidden = true; return; }
   const v = current.v.values[cell.r * D.grid.nx + cell.c];
-  tip.hidden = v !== v; if (v === v) { tip.textContent = current.v.style.cat ? (v < 5 ? "No echo" : `${PTYPE_NAMES[current.v.values.cls[cell.r * D.grid.nx + cell.c]]} · ${Math.round(v)} dBZ`) : `${fnum(v, current.v.dec)} ${current.v.unit}`; tip.style.left = ev.clientX + 14 + "px"; tip.style.top = ev.clientY + 12 + "px"; }
+  tip.hidden = v !== v; if (v === v) { tip.textContent = current.v.style.cat ? (v < 5 ? "No echo" : `${PTYPE_NAMES[current.v.values.cls[cell.r * D.grid.nx + cell.c]]} · ${Math.round(v)} dBZ`) : (current.v.style.names ? `${v < 1 ? "None" : current.v.style.names[Math.min(Math.floor(v + 1e-6), current.v.style.names.length) - 1]} · ${fnum(v, current.v.dec)}` : `${fnum(v, current.v.dec)} ${current.v.unit}`); tip.style.left = ev.clientX + 14 + "px"; tip.style.top = ev.clientY + 12 + "px"; }
 });
 $("#map").addEventListener("mouseleave", () => { $("#tip").hidden = true; });
 $("#map").addEventListener("click", ev => { if (dragged) { dragged = false; return; } const cell = cellAt(ev); if (cell) { state.point = cell; plumeLoc = "map"; if (current) { drawMain($("#map").getContext("2d"), current.v, current.mode, true); } plumes(); writeUrl(); } });
