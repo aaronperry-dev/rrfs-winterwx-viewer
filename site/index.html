@@ -423,10 +423,11 @@ function load(p, src, one) {                                // one: the stored 1
   }
   return store.get(key);
 }
+let fzKeep = "~";                                            // (added) the temperature product the 0 °C line reads, kept loaded while other products are shown
 function evictOthers() {
   const plume = plumeSeen ? ["qpf", plumeSnow] : [];                         // the plumes keep their two products loaded while the map moves on to others
-  for (const k of [...store.keys()]) if (!k.startsWith(state.product + ".") && !k.startsWith(state.product + "_1h.") && !plume.some(x => k.startsWith(x + "."))) store.delete(k);
-  for (const k of [...fieldCache.keys()]) if (!k.startsWith(state.product + "|")) fieldCache.delete(k);
+  for (const k of [...store.keys()]) if (!k.startsWith(state.product + ".") && !k.startsWith(state.product + "_1h.") && !plume.some(x => k.startsWith(x + ".")) && !k.startsWith(fzKeep + ".")) store.delete(k);
+  for (const k of [...fieldCache.keys()]) if (!k.startsWith(state.product + "|") && !k.startsWith(fzKeep + "|")) fieldCache.delete(k);
 }
 
 function frameField(d, fi) {                                // dequantised Float32Array of one frame
@@ -1026,8 +1027,8 @@ function strokeLines(ctx, x, y, w, h, vw, counties) {   // counties = true: only
   ctx.restore();
 }
 // ---- optional GIS layers (Map Layers panel): highways with route labels and cities, from data/gis.bin, loaded the first time one is switched on
-const GIS_KEYS = [["k", "Counties"], ["i", "Interstates"], ["u", "US highways"], ["s", "State highways"], ["l", "Route labels"], ["c", "Cities"], ["t", "Towns"], ["n", "City/town names"], ["p", "Peaks"]];
-const GIS_DEFAULT = { k: true, i: false, u: false, s: false, l: true, c: false, t: false, n: true, p: false };
+const GIS_KEYS = [["z", "0 °C line"], ["k", "Counties"], ["i", "Interstates"], ["u", "US highways"], ["s", "State highways"], ["l", "Route labels"], ["c", "Cities"], ["t", "Towns"], ["n", "City/town names"], ["p", "Peaks"]];
+const GIS_DEFAULT = { z: true, k: true, i: false, u: false, s: false, l: true, c: false, t: false, n: true, p: false };
 const gisOn = { ...GIS_DEFAULT };
 const gisAny = () => gisOn.i || gisOn.u || gisOn.s || gisOn.c || gisOn.t || gisOn.p;          // layers that need data/gis.bin (the counties do not)
 const ROADS = [["state", "s", "#4d5560", 0.85, 2.3], ["us", "u", "#5e35b1", 1.25, 3.0], ["interstate", "i", "#b00020", 1.8, 3.8]];   // [layer, toggle, colour, width px, casing px] at the full-size map
@@ -1149,11 +1150,11 @@ function drawGisLabels(ctx, x, y, w, h, vw, stationList) {   // cities, then rou
   ctx.restore();
 }
 function buildGisPanel() {
-  const TITLES = { k: "County lines (light gray)", l: "Route numbers on the highways (more appear as you zoom in)", t: "Smaller towns and villages (more appear as you zoom in)",
+  const TITLES = { z: "Solid red line at 0 °C / 32 °F (the 2 m air temperature on most maps; the map's own field on the temperature maps)", k: "County lines (light gray)", l: "Route numbers on the highways (more appear as you zoom in)", t: "Smaller towns and villages (more appear as you zoom in)",
     n: "Names beside the city and town dots", p: "Mountain peaks with their summit elevation" };
   const draw = () => seg($("#seg-gis"), GIS_KEYS.map(([k, label]) => ({ value: k, label, on: gisOn[k], title: TITLES[k],
     disabled: (k === "l" && !(gisOn.i || gisOn.u || gisOn.s)) || (k === "n" && !(gisOn.c || gisOn.t)) })),
-    null, k => { gisOn[k] = !gisOn[k]; if (gisAny()) loadGis(); draw(); redraw(); }, true);
+    null, k => { gisOn[k] = !gisOn[k]; if (gisAny()) loadGis(); draw(); if (k === "z") render(); else redraw(); }, true);
   draw(); gisPanelRefresh = draw;
 }
 let gisPanelRefresh = () => {};
@@ -1184,6 +1185,73 @@ function zoomStations(vw) {                                 // labels that fit a
   return kept.map(k => k.s);
 }
 const fcap = (f = state.frame) => `F${String(D.frames[f]).padStart(3, "0")}`;
+// ---------------------------------------------------------------- 0 °C / 32 °F line (added): a solid red line on every map
+const FZ_OWN = { t2: [32, "32 °F (0 °C) 2 m temperature", "32°F"], hr_t2: [32, "32 °F (0 °C) 2 m temperature", "32°F"], tw2: [32, "32 °F (0 °C) wet bulb", "32°F"], hr_tw2: [32, "32 °F (0 °C) wet bulb", "32°F"],
+                 t925: [0, "0 °C (32 °F) at 925 hPa", "0°C"], t850: [0, "0 °C (32 °F) at 850 hPa", "0°C"] };
+const FZ_T2 = [32, "32 °F (0 °C) 2 m temperature", "32°F"];
+const fzMean = new Map(), fzSmoothed = new WeakMap();
+function fzSmooth(a) {                                       // one pass of a 3 x 3 mean (missing cells skipped) so single-cell speckle does not break the line into confetti
+  let o = fzSmoothed.get(a); if (o) return o;
+  const { nx, ny } = D.grid; o = new Float32Array(a.length);
+  for (let r = 0; r < ny; r++) for (let c = 0; c < nx; c++) {
+    const i = r * nx + c; if (a[i] !== a[i]) { o[i] = NaN; continue; }
+    let sum = 0, n = 0;
+    for (let dr = -1; dr <= 1; dr++) { const rr = r + dr; if (rr < 0 || rr >= ny) continue; for (let dc = -1; dc <= 1; dc++) { const cc = c + dc; if (cc < 0 || cc >= nx) continue; const q = a[rr * nx + cc]; if (q === q) { sum += q; n++; } } }
+    o[i] = sum / n;
+  }
+  fzSmoothed.set(a, o); return o;
+}
+async function fzT2(t2, p, mode, fi) {                       // the 2 m temperature that matches the view: REFS, one member, or the mean of the members that are switched on
+  if (p.single) return t2.available.refs ? srcField(t2, "refs", fi, 0) : null;
+  if (mode === "refs" && t2.available.refs) return srcField(t2, "refs", fi, 0);
+  if (mode.startsWith("m0")) return t2.available[mode] ? srcField(t2, mode, fi, 0) : null;
+  const mem = activeMembers().filter(m => t2.available[m]); if (!mem.length) return null;
+  const key = `${fi}|${mem.join()}`; let e = fzMean.get(key);
+  if (!e) {
+    e = Promise.all(mem.map(m => srcField(t2, m, fi, 0))).then(arrs => {
+      const got = arrs.filter(Boolean); if (!got.length) return null;
+      const out = new Float32Array(got[0].length);
+      for (let i = 0; i < out.length; i++) { let sum = 0, n = 0; for (const a of got) { const q = a[i]; if (q === q) { sum += q; n++; } } out[i] = n ? sum / n : NaN; }
+      return out;
+    });
+    fzMean.set(key, e); if (fzMean.size > 24) fzMean.delete(fzMean.keys().next().value);
+  }
+  return e;
+}
+async function freezeFor(p, mode, fi, v) {                   // -> { values, level, label, tag } | null; the map's own field when it is a temperature in physical units, else the 2 m temperature
+  if (!gisOn.z || !v || v.error || !v.values || p.cat) return null;
+  let spec = FZ_OWN[p.key], vals = null;
+  if (spec && v.style === p) vals = v.values;
+  else {
+    spec = FZ_T2; const t2 = D.products.find(x => x.key === (p.single ? "hr_t2" : "t2")); if (!t2) return null;
+    fzKeep = t2.key;
+    try { vals = await fzT2(t2, p, mode, fi); } catch (e) { return null; }
+  }
+  return vals ? { values: fzSmooth(vals), level: spec[0], label: spec[1], tag: spec[2] } : null;
+}
+function drawFreeze(ctx, v, g, vw, sc = 1) {                 // g = { x, y, w, h }: where the map sits on this canvas; sc scales the line widths
+  const fz = v && v.fz; if (!fz) return;
+  const { nx, ny } = D.grid, { u0, v0 } = viewOrigin(vw), z = vw.z;
+  let cache = sigCache.get(fz.values); if (!cache) sigCache.set(fz.values, cache = new Map());
+  if (!cache.has(fz.level)) cache.set(fz.level, isoPolylines(fz.values, nx, ny, fz.level).filter(pl => pl.length >= 6));      // (tiny rings are dropped)
+  const toXY = q => [g.x + ((q[0] + .5) / nx - u0) * z * g.w, g.y + ((1 - (q[1] + .5) / ny) - v0) * z * g.h];
+  const pls = cache.get(fz.level).map(pl => pl.map(toXY)), path = new Path2D();
+  for (const pl of pls) pl.forEach((q, i) => i ? path.lineTo(q[0], q[1]) : path.moveTo(q[0], q[1]));
+  ctx.save(); ctx.beginPath(); ctx.rect(g.x, g.y, g.w, g.h); ctx.clip(); ctx.lineJoin = "round"; ctx.lineCap = "round"; ctx.setLineDash([]);
+  ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 5 * sc; ctx.stroke(path);
+  ctx.strokeStyle = "#e0001b"; ctx.lineWidth = 2.6 * sc; ctx.stroke(path);
+  if (sc >= 0.9) {
+    ctx.font = "800 12px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.lineWidth = 3.6; ctx.strokeStyle = "#fff"; ctx.fillStyle = "#b00018";
+    for (const pl of pls) {
+      let acc = 0, next = 120;
+      for (let i = 1; i < pl.length; i++) {
+        const [x0, y0] = pl[i - 1], [x1, y1] = pl[i]; acc += Math.hypot(x1 - x0, y1 - y0);
+        if (acc >= next && x1 > g.x + 24 && x1 < g.x + g.w - 24 && y1 > g.y + 12 && y1 < g.y + g.h - 12) { ctx.strokeText(fz.tag, x1, y1); ctx.fillText(fz.tag, x1, y1); next = acc + 420; }
+      }
+    }
+  }
+  ctx.restore();
+}
 // ---------------------------------------------------------------- significance lines (added): a labelled isoline at a physically meaningful value (e.g. the thickness rain/snow line)
 const sigCache = new WeakMap();                              // values array -> Map(level -> polylines in grid coordinates)
 function isoPolylines(values, nx, ny, level) {               // marching squares on the display grid; segments are stitched into polylines so the dashes run on unbroken
@@ -1247,14 +1315,15 @@ function drawSigLines(ctx, v, vw = view) {
   }
   ctx.restore();
 }
-function sigKey(ctx, v) {                                    // a small key at the bottom left of the map: dashed sample and the label
-  const lines = v && v.style && v.style.lines; if (!lines || !lines.length) return;
+function sigKey(ctx, v) {                                    // a small key at the bottom left of the map: red solid 0 °C line and the dashed significance lines
+  const rows = [...(v && v.fz ? [["#e0001b", [], v.fz.label]] : []), ...((v && v.style && v.style.lines) || []).map(l => ["#000", [9, 5], l[1]])];
+  if (!rows.length) return;
   ctx.save(); ctx.font = "700 12px system-ui, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
-  const rowH = 20, w = 54 + Math.max(...lines.map(l => ctx.measureText(l[1]).width)) + 10, h = lines.length * rowH + 8, x = MAP.x + 10, y = MAP.y + MAP.h - 10 - h;
+  const rowH = 20, w = 54 + Math.max(...rows.map(r => ctx.measureText(r[2]).width)) + 10, h = rows.length * rowH + 8, x = MAP.x + 10, y = MAP.y + MAP.h - 10 - h;
   ctx.fillStyle = "rgba(255,255,255,.88)"; ctx.strokeStyle = "rgba(0,0,0,.35)"; ctx.lineWidth = 1; ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
-  lines.forEach(([, label], i) => {
+  rows.forEach(([col, dash, label], i) => {
     const yy = y + 4 + rowH * (i + .5);
-    ctx.setLineDash([9, 5]); ctx.strokeStyle = "#000"; ctx.lineWidth = 2.4; ctx.beginPath(); ctx.moveTo(x + 8, yy); ctx.lineTo(x + 40, yy); ctx.stroke(); ctx.setLineDash([]);
+    ctx.setLineDash(dash); ctx.strokeStyle = col; ctx.lineWidth = 2.6; ctx.beginPath(); ctx.moveTo(x + 8, yy); ctx.lineTo(x + 40, yy); ctx.stroke(); ctx.setLineDash([]);
     ctx.fillStyle = "#111"; ctx.fillText(label, x + 46, yy);
   });
   ctx.restore();
@@ -1267,7 +1336,7 @@ function drawMain(ctx, v, mode, markers, vw = view, ds = 1) {
   drawCounties(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);        // optional layers: county lines and highways under the boundary lines; cities, towns, peaks and route labels over them
   drawRoads(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);
   drawOverlay(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, ds > 1);
-  drawSigLines(ctx, v, vw); sigKey(ctx, v);                         // (added) significance lines, e.g. thickness rain/snow line
+  drawSigLines(ctx, v, vw); drawFreeze(ctx, v, MAP, vw); sigKey(ctx, v);                         // (added) significance lines, e.g. thickness rain/snow line
   const stationList = zoomStations(vw);
   drawGisLabels(ctx, MAP.x, MAP.y, MAP.w, MAP.h, vw, stationList);
   // station values (nearest cell), bold with a white halo
@@ -1380,6 +1449,7 @@ async function render() {
   clearTimeout(loadTimer);
   if (v.error) { msg.textContent = v.error; msg.hidden = false; current = null; syncExport(); tiles(null); plumes(); return; }
   msg.hidden = true;
+  v.fz = await freezeFor(p, mode, state.frame, v); if (token !== renderToken) return;        // (added) the 0 °C line's temperature field
   const more = coverageNotes(v, p, mode); if (more.length) { notice.hidden = false; notice.textContent = [...notes, ...more].join(" "); }
   drawMain($("#map").getContext("2d"), v, mode, true);
   current = { v, mode, hdr: header(mode) };                 // the title block is captured with the map it describes (the state may move on while the next map computes)
@@ -1394,6 +1464,8 @@ async function renderStamps(token, p) {
   const first = await viewField("mean", state.frame, { tok: token }); if (token !== renderToken) return;
   const lg = $("#slegend").getContext("2d"); lg.fillStyle = "#fff"; lg.fillRect(0, 0, 1200, 96);
   if (!first.error) { bold(lg, 25, 24, "RRFS winter weather", `: ${p.title} (${p.unit}) · valid ${zfmt(D.valid[state.frame])} · ${fcap()}`, 15); drawLegend(lg, 50, 40, 1000, 22, p, 12); }
+  const fz0 = await freezeFor(p, "mean", state.frame, first); if (token !== renderToken) return;       // (added) key for the red 0 °C line on the small maps
+  if (fz0) { lg.strokeStyle = "#e0001b"; lg.lineWidth = 2.6; lg.beginPath(); lg.moveTo(50, 90); lg.lineTo(82, 90); lg.stroke(); lg.font = "700 12px system-ui"; lg.textAlign = "left"; lg.textBaseline = "middle"; lg.fillStyle = "#111"; lg.fillText(fz0.label, 90, 90); }
   for (const [m, label] of defs) {
     const st = document.createElement("div"); st.className = "stamp"; st.tabIndex = 0;
     const isMember = m.startsWith("m0"); if (isMember && !state.on[m]) st.classList.add("off");
@@ -1406,6 +1478,7 @@ async function renderStamps(token, p) {
       if (token !== renderToken) return; const c = cv.getContext("2d"); c.fillStyle = "#fff"; c.fillRect(0, 0, 575, 371);
       if (v.error) { c.fillStyle = "#59636e"; c.font = "15px system-ui"; c.textAlign = "center"; c.fillText(m === "refs" ? "not in the REFS mean file" : "no data", 287, 190); return; }
       drawBasemap(c, 0, 0, 575, 371, view); paintField(c, 0, 0, 575, 371, v.values, v.style); drawCounties(c, 0, 0, 575, 371, view); drawOverlay(c, 0, 0, 575, 371, view);
+      freezeFor(p, m, state.frame, v).then(fz => { if (token !== renderToken || !fz) return; v.fz = fz; drawFreeze(cv.getContext("2d"), v, { x: 0, y: 0, w: 575, h: 371 }, view, 0.55); });     // (added)
       if (v.style !== p) {                                  // spread / probability use their own scale: label + mini colour bar
         const c2 = cv.getContext("2d"), t = m === "prob" ? `P(${p.thr_dir === "le" ? "≤" : "≥"}${v.thr} ${p.unit})` : `σ (${p.unit})`;
         c2.font = "700 15px system-ui"; const tw = c2.measureText(t).width + 16;
